@@ -6,3 +6,4 @@ venv/
 # Local device backups produced by --export-json
 *.json
 !examples/*.json
+site

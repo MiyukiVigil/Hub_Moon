@@ -2,6 +2,22 @@
 
 A command-line tool for controlling Moondrop USB DACs over USB HID — read and write the parametric EQ, pre-gain, and DAC offset without the official web app. The protocol was reverse engineered from https://hub.moondroplab.tech/.
 
+## A UI, if you would rather not type
+
+There is a full graphical control panel for this script: a live, region-labelled frequency-response
+graph you can drag bands on (scroll to change Q), an all-bands column editor, eight one-tap presets,
+AutoEQ / REW import through a file browser built into the panel, revert, and save-to-flash. Edits go
+to the DSP in real time and persist only when you save.
+
+It currently ships **only inside [sea-shell](https://seashell.miyukivigil.tech/)**
+(`SUPER+SHIFT+E`) — a Hyprland rice, which vendors this script and drives it over its `--json` /
+`--set-*` interface. Everything device-shaped comes from `--json` rather than being reimplemented
+there: band count, which slot custom PEQ lives on, whether the device supports pre-gain at all. This
+script stays the single source of truth for the device registry.
+
+The panel is Quickshell QML, so it wants Hyprland 0.55 and Quickshell 0.3. There is no standalone
+GTK/Qt build — on anything else, the CLI below is the interface.
+
 ## Requirements
 
 - Python 3
@@ -88,6 +104,15 @@ python3 moondrop_control.py --to-pipewire eq.conf   # mirror the connected DAC's
 
 ## Universal EQ: the same curves on any hardware
 
+> **Scope, honestly.** This one exists mainly for [sea-shell](https://seashell.miyukivigil.tech/)'s
+> sake — it is the software-EQ escape hatch its DAC panel exports, so a curve you tuned on a
+> Moondrop can follow you onto hardware that panel cannot drive. It is **not really core to
+> `moondrop_control.py`**, which is a USB HID controller for a DAC's own DSP; everything else here
+> is about talking to that chip. Treat `--to-pipewire` as a companion feature aimed at the panel
+> rather than a pillar of this tool, and don't be surprised if it eventually lives closer to
+> sea-shell than to this script. Nothing about it is managed for you either — the tool writes
+> `eq.conf` and stops there; installing it into PipeWire is your job, in both the CLI and the panel.
+
 The PEQ above runs on the DAC's own DSP chip, so it only exists on the devices listed above. `--to-pipewire` renders the same filters as a [PipeWire filter-chain](https://docs.pipewire.org/page_module_filter_chain.html) instead — software EQ that applies to *anything*: another brand's DAC, laptop speakers, Bluetooth.
 
 With `--from-rew` or `--from-json` it needs **no Moondrop hardware connected at all**, so an AutoEQ preset for your headphones becomes a system-wide EQ:
@@ -131,6 +156,27 @@ Q2.30 spans only [-2, 2), and some otherwise reasonable filters need coefficient
 - **`b0 > 2`** — any type at high gain, low Q, and high frequency, e.g. `peaking 20000 12 0.3`.
 
 The official web app allows up to +12 dB and does **not** clamp. Its JS packs coefficients with bitwise ops, which wrap modulo 2³² instead of failing, so past these limits it silently programs a filter unrelated to the curve it draws — a +6 dB shelf's `b1` wraps from -2.303 to +1.697, flipping sign. This tool rejects rather than reproduce that. What the firmware would actually do with a wrapped coefficient is untested.
+
+## The site
+
+`site/` holds the project page: three static files and hand-written CSS, no build step and no
+dependencies. `site/dsp.js` is a port of this script's own biquad maths — same shelf-slope form,
+same Q2.30 packing — so the draggable plot on the page refuses exactly where the firmware would.
+It is checked against the Python rather than trusted: see the note at the top of that file.
+
+The folder is deliberately kept out of git (`.gitignore`), so there is no repo for Cloudflare Pages
+to build from. Deploys go straight from a working copy:
+
+```bash
+npx wrangler pages deploy      # wrangler.toml sets pages_build_output_dir = "site"
+```
+
+To preview it locally, **serve** it rather than opening the file — `app.js` is an ES module, so
+`file://` will refuse to load it and the plot will not draw:
+
+```bash
+python3 -m http.server -d site 8000
+```
 
 ## Disclaimer
 
