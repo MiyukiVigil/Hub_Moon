@@ -44,15 +44,11 @@ The web app lists it, but it does not drive PEQ with biquad coefficients the way
 
 ## "I changed the EQ and nothing happened"
 
-PEQ bands are only audible when the device's **active EQ profile** is its custom-PEQ profile (7 on every supported device except E.S. combo, which uses 4). On any other profile the bands are stored but a preset is what's playing — the official app gates on exactly this (`isInPEQMode: readEQIndex() === peqIndex`).
+On a DAWN PRO2 the EQ is toggled **on the hardware**: press both volume buttons to switch between the default (no EQ) mode and custom EQ. If your edits are inaudible, check that first — PEQ writes only affect the sound in custom EQ mode.
 
-`--info` shows both, and `--set-peq` warns when they disagree:
+That toggle is not reflected in any register we could find: sweeping every readable sub-command (0–254) returns byte-identical data in both modes, so this tool cannot tell you which mode you are in. `--info` reports the active EQ profile, but on firmware 1.5 that reads `9` in *both* modes, and PEQ writes are audible in custom EQ mode regardless. Do not read anything into that number.
 
-```
-Active EQ Profile: 9 (custom PEQ is 7)
-```
-
-Switch with `--set-eq-index 7`.
+For the record, the official app assumes otherwise — it gates PEQ on `readEQIndex() === peqIndex` (7 for this device) — which does not describe firmware 1.5. That check would report "not in PEQ mode" even while custom EQ is plainly working.
 
 ## Usage
 
@@ -83,7 +79,28 @@ python3 moondrop_control.py --import-rew filters.txt   # REW-exported EQ
 # Diagnostics and scripting
 python3 moondrop_control.py --stream-status   # ALSA sample rate/format (Linux only)
 python3 moondrop_control.py --json            # full device state as JSON on stdout
+
+# Universal (software) EQ — works on ANY output device, no Moondrop DAC needed
+python3 moondrop_control.py --to-pipewire eq.conf --from-rew ParametricEQ.txt
+python3 moondrop_control.py --to-pipewire eq.conf --from-json profile.json
+python3 moondrop_control.py --to-pipewire eq.conf   # mirror the connected DAC's bands
 ```
+
+## Universal EQ: the same curves on any hardware
+
+The PEQ above runs on the DAC's own DSP chip, so it only exists on the devices listed above. `--to-pipewire` renders the same filters as a [PipeWire filter-chain](https://docs.pipewire.org/page_module_filter_chain.html) instead — software EQ that applies to *anything*: another brand's DAC, laptop speakers, Bluetooth.
+
+With `--from-rew` or `--from-json` it needs **no Moondrop hardware connected at all**, so an AutoEQ preset for your headphones becomes a system-wide EQ:
+
+```bash
+python3 moondrop_control.py --to-pipewire eq.conf --from-rew ParametricEQ.txt
+cp eq.conf ~/.config/pipewire/pipewire.conf.d/
+systemctl --user restart pipewire pipewire-pulse
+```
+
+Then select the **Universal EQ** sink as your output; it feeds your real device. To remove it, delete the file and restart PipeWire again.
+
+Two things differ from the hardware path, both in software's favour: floating-point biquads have no Q2.30 limit, so the shelf gains the DAC must refuse work fine; and it isn't pinned to 96 kHz, since PipeWire recomputes per graph rate.
 
 ### Filter types
 
@@ -123,8 +140,14 @@ This script is tested with the Moondrop Dawn Pro 2 only, which works as intended
 
 ### What has actually been exercised on hardware
 
-On a DAWN PRO2 (`0x011D`, firmware 1.5): `--list`, `--info`, `--get-peq`, `--json`, `--stream-status`, `--export-json`, a live `--set-peq` with `--no-flash` read back and restored, `--save-flash`, and a full `--import-json` round-trip that wrote 8 bands plus both gains to flash and compared byte-identical to the backup afterwards.
+On a DAWN PRO2 (`0x011D`, firmware 1.5): `--list`, `--info`, `--get-peq`, `--json`, `--export-json`, `--import-json`, `--import-rew`, `--stream-status` both idle and while playing, `--save-flash`, and a full `--import-json` round-trip that wrote 8 bands plus both gains to flash and compared byte-identical to the backup afterwards.
 
-Not yet exercised on hardware: `--import-rew`, the interactive panel (`-i`), the "playing" branch of `--stream-status`, persistence across a physical replug, and **every device other than the DAWN PRO2**.
+Most importantly, PEQ writes were confirmed **audible**: a `low_pass` at 800 Hz written live in custom EQ mode audibly muffled playback, and restoring the original band returned it to normal. The write path is not just accepted by the device, it demonstrably changes the sound.
+
+Flash persistence was confirmed across a physical unplug/replug: the flashed config survived the power cycle byte-identical, and writes made with `--no-flash` correctly did *not* survive.
+
+`--to-pipewire` was verified by loading the generated config into a running PipeWire — the sink registers with correct FL/FR ports and no errors.
+
+Not yet exercised on hardware: the interactive panel (`-i`), and **every device other than the DAWN PRO2**.
 
 It writes to your DAC's flash. Export a backup with `--export-json` before experimenting.

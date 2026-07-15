@@ -16,6 +16,7 @@ Usage:
 
 import sys
 import math
+import time
 import struct
 import argparse
 try:
@@ -82,6 +83,7 @@ REV_FILTER_TYPES = {v: k for k, v in FILTER_TYPES.items()}
 # Constants
 REPORT_ID = 75  # 0x4B
 FS = 96000      # DSP internal sample rate is hardcoded to 96kHz
+RESPONSE_TIMEOUT_S = 1.0  # how long to wait for a reply whose echo matches the request
 
 # Every device in SUPPORTED_DEVICES reports peqCount 8 in the app's registry.
 # DEVICE_BANDS stays as the override point if a future device differs.
@@ -90,6 +92,13 @@ DEFAULT_BANDS = 8
 
 # The custom-PEQ profile slot, written into the last byte of an EQ update. Nearly
 # every device uses 7; E.S. combo uses 4 (peqIndex in the app's device registry).
+#
+# Note this is NOT comparable to the active EQ profile that SUB_ACTIVE_EQ reports.
+# The app assumes it is (isInPEQMode: readEQIndex() === peqIndex), but a DAWN PRO2
+# on firmware 1.5 reports active profile 9 in both its EQ-off and custom-EQ modes,
+# while band writes carrying peqIndex 7 are plainly audible in custom-EQ mode. The
+# EQ on/off toggle (both volume buttons) is not reflected in any readable register
+# we could find, so do not gate writes on the active profile.
 DEVICE_PEQ_INDEX = {0x98D5: 4}
 DEFAULT_PEQ_INDEX = 7
 
@@ -103,6 +112,33 @@ def band_count(product_id):
 def peq_profile_index(product_id):
     return DEVICE_PEQ_INDEX.get(product_id, DEFAULT_PEQ_INDEX)
 
+class ShelfSlopeError(ValueError):
+    """
+    Shelf Q too steep for the requested gain: no such filter exists.
+    Carries the ceiling so callers can say what would work.
+    """
+    def __init__(self, gain, Q, limit):
+        self.gain, self.Q, self.limit = gain, Q, limit
+        super().__init__(
+            f"shelf Q={Q:g} is too steep for a {gain:+.1f} dB shelf (max about Q={limit:.2f}). "
+            f"Lower Q or reduce the gain."
+        )
+
+
+def max_shelf_q(gain):
+    """
+    RBJ's shelf formulas read Q as the shelf slope S, and their shared term
+    sqrt((A + 1/A)(1/S - 1) + 2) has no real solution once the slope is too steep
+    for the gain -- the radicand goes negative. The ceiling tightens as gain grows:
+    about Q=17.6 at 6 dB, Q=5.03 at 12 dB. Returns the largest Q that still solves.
+    """
+    a = 10 ** (abs(gain) / 40.0)
+    s = a + 1.0 / a
+    if s <= 2.0:              # unity gain -- every Q solves
+        return float('inf')
+    return 1.0 / (1.0 - 2.0 / s)
+
+
 def calculate_biquad(f, gain, Q, filter_type):
     """
     Standard Bristow-Johnson biquad formulas.
@@ -111,10 +147,17 @@ def calculate_biquad(f, gain, Q, filter_type):
     if filter_type not in FILTER_TYPES or filter_type == "disabled":
         return [0.0]*3, [1.0, 0.0, 0.0]
 
+    # Refuse an impossible shelf up front. Left to itself the sqrt below raises a
+    # bare "math domain error", which says nothing about which knob to turn.
+    if filter_type in ("low_shelf", "high_shelf"):
+        limit = max_shelf_q(gain)
+        if Q > limit:
+            raise ShelfSlopeError(gain, Q, limit)
+
     # Convert parameters
     w0 = f * math.pi * 2 / FS
     cos_w0 = math.cos(w0)
-    
+
     if filter_type == "peaking":
         A = math.sqrt(10 ** (gain / 20))
         alpha = math.sin(w0) / (2 * Q)
@@ -199,10 +242,12 @@ def pack_coefficients(num, den):
 
 
 def _packs_ok(freq, gain, Q, filter_type):
+    # ShelfSlopeError counts as "doesn't fit" too: bisecting gain at a fixed Q walks
+    # into slopes that have no solution, and those gains are just as unusable.
     try:
         pack_coefficients(*calculate_biquad(freq, gain, Q, filter_type))
         return True
-    except CoefficientOverflowError:
+    except (CoefficientOverflowError, ShelfSlopeError):
         return False
 
 
@@ -244,6 +289,9 @@ class MoondropDevice:
         self.bands = band_count(self.product_id)
         self.peq_index = peq_profile_index(self.product_id)
         self.supports_pregain = self.product_id not in NO_PREGAIN_DEVICES
+        # A previous process may have left unread reports queued; clear them so the
+        # first read of this session cannot pick up someone else's answer.
+        self.drain()
 
     def close(self):
         self.device.close()
@@ -252,16 +300,37 @@ class MoondropDevice:
         # Pad to 63 bytes (report_id will make it 64)
         packet = bytearray(63)
         packet[0:len(cmd_data)] = cmd_data
-        
+
         # Write report: [report_id] + 63 bytes data
         self.device.write([self.report_id] + list(packet))
-        
-        if wait_response:
-            # Read 64 bytes response, but with a timeout so commands that don't reply
-            # (e.g. the flash-save writes) can't block the process indefinitely.
-            res = self.device.read(64, 300)
-            return res
+
+        if not wait_response:
+            return None
+
+        # A response echoes the command and sub-command it answers, at bytes 1 and
+        # 2. Commands that never reply would otherwise leave the next read picking
+        # up the PREVIOUS command's report, shifting every subsequent read by one
+        # and silently returning another register's data. So keep reading until the
+        # echo matches what we asked for, discarding anything stale.
+        want_cmd, want_sub = packet[0], packet[1]
+        deadline = time.monotonic() + RESPONSE_TIMEOUT_S
+        while time.monotonic() < deadline:
+            res = self.device.read(64, 200)
+            if not res:
+                continue
+            if len(res) > 2 and res[1] == want_cmd and res[2] == want_sub:
+                return res
+            # Stale report from an earlier command: drop it and keep looking.
         return None
+
+    def drain(self, max_reports=64):
+        """
+        Discard any reports still queued, so a later read cannot pick them up.
+        Bounded: a device that streams reports must not be able to hang us here.
+        """
+        for _ in range(max_reports):
+            if not self.device.read(64, 1):
+                return
 
     def get_firmware_version(self):
         res = self.send_command([CMD_READ, SUB_FIRMWARE_VERSION, 0])
@@ -270,14 +339,6 @@ class MoondropDevice:
         payload = bytes(res[4:])
         version = payload.split(b'\x00')[0].decode('utf-8', errors='ignore')
         return version
-
-    def is_in_peq_mode(self):
-        """
-        True when the active EQ profile is the device's custom-PEQ slot. The app
-        gates PEQ edits on exactly this (isInPEQMode: readEQIndex() === peqIndex);
-        on any other profile the custom bands are stored but not the ones playing.
-        """
-        return self.get_active_eq_index() == self.peq_index
 
     def get_active_eq_index(self):
         res = self.send_command([CMD_READ, SUB_ACTIVE_EQ, 0])
@@ -561,20 +622,144 @@ def run_interactive(dev, name):
                 print(f"\nError: {e}")
                 input("Press Enter to return to menu...")
 
-def warn_if_not_in_peq_mode(dev):
+# ---------------------------------------------------------------------------
+# Universal (software) EQ via PipeWire
+#
+# The PEQ above is the DAC's own hardware DSP, so it only exists on the devices
+# in SUPPORTED_DEVICES. The same filters can be run in software instead, which
+# works with ANY output -- another brand's DAC, laptop speakers, Bluetooth --
+# at the cost of a little CPU. PipeWire's built-in filter-chain module takes
+# biquads with exactly the Freq/Q/Gain parameters we already carry, so the
+# translation is direct.
+#
+# Two things differ from the hardware path, both in software's favour:
+#   * No Q2.30 limit. Software biquads are floating point, so the shelf gains
+#     the DAC has to refuse are fine here.
+#   * Not tied to 96 kHz. PipeWire recomputes per graph rate, so we emit the
+#     filter parameters rather than baked coefficients.
+# ---------------------------------------------------------------------------
+
+PIPEWIRE_LABELS = {
+    "peaking": "bq_peaking",
+    "low_shelf": "bq_lowshelf",
+    "high_shelf": "bq_highshelf",
+    "low_pass": "bq_lowpass",
+    "high_pass": "bq_highpass",
+}
+
+REW_TYPES = {"PK": "peaking", "LS": "low_shelf", "HS": "high_shelf",
+             "LP": "low_pass", "HP": "high_pass"}
+
+
+def parse_rew(path):
+    """Parse a REW / AutoEQ 'ParametricEQ.txt'. Returns (filters, preamp_db)."""
+    import re as _re
+    with open(path, 'r', encoding='utf-8') as fh:
+        lines = fh.readlines()
+
+    filters = []
+    preamp = 0.0
+    for line in lines:
+        line = line.strip()
+        pm = _re.match(r'(?:Preamp|Pre-gain|Pre-amp):\s*([\d\.-]+)\s*dB', line, _re.IGNORECASE)
+        if pm:
+            preamp = float(pm.group(1))
+            continue
+        fm = _re.match(r'Filter\s+(\d+):\s*(ON|OFF)\s+([a-zA-Z0-9_]+)\s+Fc\s+([\d\.]+)\s*Hz\s+'
+                       r'Gain\s+([\d\.-]+)\s*dB\s+Q\s+([\d\.]+)', line, _re.IGNORECASE)
+        if fm:
+            t = REW_TYPES.get(fm.group(3).upper(), "peaking")
+            if fm.group(2).upper() == "OFF":
+                t = "disabled"
+            filters.append({
+                "index": int(fm.group(1)) - 1,
+                "type": t,
+                "frequency": float(fm.group(4)),
+                "gain": float(fm.group(5)),
+                "q": float(fm.group(6)),
+            })
+    return filters, preamp
+
+
+def build_pipewire_config(filters, preamp=0.0, node_name="eq", description="Universal EQ"):
     """
-    Writing PEQ bands while another profile is selected stores them without making
-    them audible, which reads as 'the tool did nothing'. Say so rather than let the
-    user guess.
+    Render a libpipewire-module-filter-chain config: a virtual sink that applies
+    these bands to whatever it is routed to.
+
+    The graph is mono (one In, one Out); filter-chain instantiates it per channel,
+    so it EQs both sides of a stereo stream identically. Nodes are linked
+    explicitly in series -- filter-chain does not chain them implicitly.
     """
-    try:
-        active = dev.get_active_eq_index()
-    except Exception:
-        return
-    if active != dev.peq_index:
-        print(f"\nNote: the device is on EQ profile {active}, but custom PEQ lives on "
-              f"profile {dev.peq_index}, so these bands are stored and not currently audible.")
-        print(f"      Run:  --set-eq-index {dev.peq_index}   to switch to custom PEQ.")
+    nodes, links, prev = [], [], None
+
+    if abs(preamp) > 1e-9:
+        # No biquad does plain gain, so scale the samples: dB -> linear multiplier.
+        mult = 10 ** (preamp / 20.0)
+        nodes.append(f'                {{ type = builtin name = preamp label = linear '
+                     f'control = {{ "Mult" = {mult:.6f} "Add" = 0.0 }} }}')
+        prev = "preamp"
+
+    for f in filters:
+        if f["type"] == "disabled":
+            continue
+        label = PIPEWIRE_LABELS.get(f["type"])
+        if label is None:
+            continue
+        name = f"eq_band_{f['index']}"
+        nodes.append(f'                {{ type = builtin name = {name} label = {label} '
+                     f'control = {{ "Freq" = {float(f["frequency"]):g} "Q" = {float(f["q"]):g} '
+                     f'"Gain" = {float(f["gain"]):g} }} }}')
+        if prev is not None:
+            links.append(f'                {{ output = "{prev}:Out" input = "{name}:In" }}')
+        prev = name
+
+    if not nodes:
+        # An empty graph is invalid; a unity-gain node keeps the sink usable.
+        nodes.append('                { type = builtin name = passthrough label = linear '
+                     'control = { "Mult" = 1.0 "Add" = 0.0 } }')
+
+    nodes_s = "\n".join(nodes)
+    links_s = "\n".join(links)
+    links_block = f"            links = [\n{links_s}\n            ]\n" if links else ""
+
+    return (
+        "# PipeWire software EQ -- generated by moondrop_control.py\n"
+        "#\n"
+        "# Install:   cp this file to ~/.config/pipewire/pipewire.conf.d/\n"
+        "# Activate:  systemctl --user restart pipewire pipewire-pulse\n"
+        f"# Then select the \"{description}\" sink as your output; it feeds your real device.\n"
+        "# Remove:    delete the file and restart pipewire again.\n"
+        "#\n"
+        "# This is software EQ: it applies to ANY output device, not just a Moondrop DAC.\n"
+        "context.modules = [\n"
+        "{   name = libpipewire-module-filter-chain\n"
+        "    args = {\n"
+        f"        node.description = \"{description}\"\n"
+        f"        media.name       = \"{description}\"\n"
+        "        filter.graph = {\n"
+        "            nodes = [\n"
+        f"{nodes_s}\n"
+        "            ]\n"
+        f"{links_block}"
+        "        }\n"
+        "        # Channel config belongs at args level, not inside capture/playback props:\n"
+        "        # that is what makes filter-chain replicate the mono graph onto both\n"
+        "        # channels. (Matches /usr/share/pipewire/filter-chain/sink-eq6.conf.)\n"
+        "        audio.channels = 2\n"
+        "        audio.position = [ FL FR ]\n"
+        "        capture.props = {\n"
+        f"            node.name   = \"effect_input.{node_name}\"\n"
+        "            media.class = Audio/Sink\n"
+        "        }\n"
+        "        playback.props = {\n"
+        f"            node.name    = \"effect_output.{node_name}\"\n"
+        "            node.passive = true\n"
+        "        }\n"
+        "    }\n"
+        "}\n"
+        "]\n"
+    )
+
 
 def check_stream_status():
     import os
@@ -624,7 +809,9 @@ def check_stream_status():
                 print(f"  Playback Status:   {status.upper()}")
                 
                 if status.lower() == "running":
-                    freq_match = re.search(r'Momentary freq\s*=\s*([\d\s\wHz\(\)\.]+)', content)
+                    # Stay on the one line: a permissive class here swallows the
+                    # following "Feedback Format" line into the rate.
+                    freq_match = re.search(r'Momentary freq\s*=\s*([^\r\n]+)', content)
                     freq = freq_match.group(1).strip() if freq_match else "Unknown"
                     
                     format_match = re.search(r'Format:\s*([\w_]+)', content)
@@ -674,6 +861,17 @@ def main():
     parser.add_argument("--import-json", metavar="FILE.json", help="Import/Restore DAC configuration from a JSON file")
     parser.add_argument("--import-rew", metavar="FILE.txt", help="Import EQ configurations from a REW text file")
     parser.add_argument("--stream-status", action="store_true", help="Diagnose current hardware-level audio stream status (sample rate/format)")
+    parser.add_argument("--to-pipewire", metavar="OUT.conf",
+                        help="Write a PipeWire filter-chain config: software EQ that works with ANY "
+                             "output device, not just a Moondrop DAC")
+    parser.add_argument("--from-json", metavar="FILE.json",
+                        help="Source bands from an exported JSON instead of a connected device "
+                             "(lets --to-pipewire run with no Moondrop DAC attached)")
+    parser.add_argument("--from-rew", metavar="FILE.txt",
+                        help="Source bands from a REW/AutoEQ file instead of a connected device "
+                             "(lets --to-pipewire run with no Moondrop DAC attached)")
+    parser.add_argument("--pw-name", metavar="NAME", default="Universal EQ",
+                        help="Sink name shown for --to-pipewire (default: 'Universal EQ')")
     parser.add_argument("--json", action="store_true", help="Dump full device state (info + all PEQ bands) as JSON on stdout, for GUIs")
     parser.add_argument("--no-flash", action="store_true", help="Apply live to the DSP but skip the flash write (for GUI live-preview; use --save-flash to persist)")
     parser.add_argument("--save-flash", action="store_true", help="Persist the current EQ + offsets to device flash")
@@ -682,6 +880,33 @@ def main():
 
     if args.stream_status:
         check_stream_status()
+        sys.exit(0)
+
+    # Device-free path: converting a saved config to a software EQ needs no DAC at
+    # all, which is the entire point -- this is how someone with an unsupported
+    # device gets the same curves.
+    if args.to_pipewire and (args.from_json or args.from_rew):
+        if args.from_rew:
+            filters, preamp = parse_rew(args.from_rew)
+            src = args.from_rew
+        else:
+            import json
+            with open(args.from_json, 'r', encoding='utf-8') as fh:
+                d = json.load(fh)
+            filters = d.get("filters", [])
+            preamp = d.get("pregain", 0.0)
+            src = args.from_json
+        filters = sorted(filters, key=lambda x: x["index"])
+        conf = build_pipewire_config(filters, preamp, description=args.pw_name)
+        with open(args.to_pipewire, 'w', encoding='utf-8') as fh:
+            fh.write(conf)
+        active = [f for f in filters if f["type"] != "disabled"]
+        print(f"Read {len(active)} active band(s) + {preamp:+.2f} dB pre-gain from {src}")
+        print(f"Wrote PipeWire filter-chain config to {args.to_pipewire}")
+        print(f"\n  cp {args.to_pipewire} ~/.config/pipewire/pipewire.conf.d/")
+        print(f"  systemctl --user restart pipewire pipewire-pulse")
+        print(f"\nThen pick the \"{args.pw_name}\" sink as your output. This is software EQ:")
+        print("it works with any DAC, headphones, or speakers -- no Moondrop hardware needed.")
         sys.exit(0)
 
     if len(sys.argv) == 1:
@@ -736,12 +961,22 @@ def main():
     try:
         if args.json:
             import json
+            # A GUI needs the same three facts the CLI warns about in prose:
+            # which slot custom PEQ lives on, whether it is the one playing, and
+            # whether pre-gain is worth offering at all.
+            # Deliberately no "in_peq_mode": comparing the active profile against
+            # peq_index is what the official app does, and it does not hold. A DAWN
+            # PRO2 on firmware 1.5 reports active profile 9 in both its EQ-off and
+            # custom-EQ modes, yet band writes are plainly audible in custom-EQ mode.
+            # Emitting that comparison only teaches a UI to warn about a non-problem.
             data = {
                 "ok": True,
                 "device_name": name,
                 "product_id": dev_info['product_id'],
                 "firmware": dev.get_firmware_version(),
                 "active_eq_profile": dev.get_active_eq_index(),
+                "peq_index": dev.peq_index,
+                "supports_pregain": dev.supports_pregain,
                 "pregain": dev.get_pregain(),
                 "global_gain": dev.get_global_gain(),
                 "bands": dev.bands,
@@ -762,11 +997,9 @@ def main():
             # but the first. --save-flash is applied last so that
             # `--set-peq ... --no-flash --save-flash` previews then persists.
             if args.info:
-                active = dev.get_active_eq_index()
-                in_peq = " (custom PEQ)" if active == dev.peq_index else f" (custom PEQ is {dev.peq_index})"
                 print(f"Device Name:      {name}")
                 print(f"Firmware Version: {dev.get_firmware_version()}")
-                print(f"Active EQ Profile: {active}{in_peq}")
+                print(f"Active EQ Profile: {dev.get_active_eq_index()}")
                 print(f"Pre-Gain:         {dev.get_pregain():.2f} dB")
                 print(f"Global Gain:      {dev.get_global_gain():.2f} dB")
                 print(f"PEQ Bands:        {dev.bands}")
@@ -810,7 +1043,22 @@ def main():
                 if not args.no_flash:
                     dev.save_eq_to_flash()
                 print("Applied (live)." if args.no_flash else "Done and saved to Flash.")
-                warn_if_not_in_peq_mode(dev)
+
+            if args.to_pipewire:
+                print(f"Reading device bands to build a software EQ config...")
+                filters = []
+                for idx in range(dev.bands):
+                    peq = dev.read_peq_index(idx)
+                    if peq:
+                        filters.append(peq)
+                pre = dev.get_pregain()
+                conf = build_pipewire_config(filters, pre, description=args.pw_name)
+                with open(args.to_pipewire, 'w', encoding='utf-8') as fh:
+                    fh.write(conf)
+                active = [f for f in filters if f["type"] != "disabled"]
+                print(f"Wrote {len(active)} band(s) + {pre:+.2f} dB pre-gain to {args.to_pipewire}")
+                print(f"  cp {args.to_pipewire} ~/.config/pipewire/pipewire.conf.d/ "
+                      f"&& systemctl --user restart pipewire pipewire-pulse")
 
             if args.export_json:
                 import json
@@ -871,9 +1119,12 @@ def main():
                     print(f"Selecting EQ profile index {data['active_eq_profile']}...")
                     dev.set_active_eq_index(data["active_eq_profile"], save=False)
 
-                dev.save_eq_to_flash()
-                dev.save_offset_to_flash()
-                print("Import completed and configurations saved to Flash.")
+                if args.no_flash:
+                    print("Import applied (live) -- not written to flash.")
+                else:
+                    dev.save_eq_to_flash()
+                    dev.save_offset_to_flash()
+                    print("Import completed and configurations saved to Flash.")
 
             if args.import_rew:
                 import re
@@ -939,9 +1190,12 @@ def main():
                         print(f"Disabling unused PEQ Slot {idx}...")
                         dev.write_peq_index(idx, "disabled", 1000.0, 0.0, 1.0)
 
-                dev.save_eq_to_flash()
-                dev.save_offset_to_flash()
-                print("Import completed and configurations saved to Flash.")
+                if args.no_flash:
+                    print("Import applied (live) -- not written to flash.")
+                else:
+                    dev.save_eq_to_flash()
+                    dev.save_offset_to_flash()
+                    print("Import completed and configurations saved to Flash.")
 
             if args.save_flash:
                 print("Persisting EQ + offsets to flash...")
