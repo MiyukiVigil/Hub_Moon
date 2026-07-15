@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Local device backups produced by --export-json
+*.json
+!examples/*.json
