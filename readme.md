@@ -157,27 +157,6 @@ Q2.30 spans only [-2, 2), and some otherwise reasonable filters need coefficient
 
 The official web app allows up to +12 dB and does **not** clamp. Its JS packs coefficients with bitwise ops, which wrap modulo 2³² instead of failing, so past these limits it silently programs a filter unrelated to the curve it draws — a +6 dB shelf's `b1` wraps from -2.303 to +1.697, flipping sign. This tool rejects rather than reproduce that. What the firmware would actually do with a wrapped coefficient is untested.
 
-## The site
-
-`site/` holds the project page: three static files and hand-written CSS, no build step and no
-dependencies. `site/dsp.js` is a port of this script's own biquad maths — same shelf-slope form,
-same Q2.30 packing — so the draggable plot on the page refuses exactly where the firmware would.
-It is checked against the Python rather than trusted: see the note at the top of that file.
-
-The folder is deliberately kept out of git (`.gitignore`), so there is no repo for Cloudflare Pages
-to build from. Deploys go straight from a working copy:
-
-```bash
-npx wrangler pages deploy      # wrangler.toml sets pages_build_output_dir = "site"
-```
-
-To preview it locally, **serve** it rather than opening the file — `app.js` is an ES module, so
-`file://` will refuse to load it and the plot will not draw:
-
-```bash
-python3 -m http.server -d site 8000
-```
-
 ## Disclaimer
 
 Unofficial and not affiliated with Moondrop. The USB HID protocol here was reverse engineered from the official web app with the assistance of AI. The coefficient packing and PEQ byte layout have since been checked against that app's own JavaScript and match it exactly, but the command set is still inferred from observed behaviour rather than any documented spec — treat it as a best-effort reconstruction that works on the hardware it was tested against, not as authoritative.
