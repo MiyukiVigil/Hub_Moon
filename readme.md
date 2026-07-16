@@ -2,21 +2,38 @@
 
 A command-line tool for controlling Moondrop USB DACs over USB HID — read and write the parametric EQ, pre-gain, and DAC offset without the official web app. The protocol was reverse engineered from https://hub.moondroplab.tech/.
 
-## A UI, if you would rather not type
+## Scope
 
-There is a full graphical control panel for this script: a live, region-labelled frequency-response
-graph you can drag bands on (scroll to change Q), an all-bands column editor, eight one-tap presets,
-AutoEQ / REW import through a file browser built into the panel, revert, and save-to-flash. Edits go
-to the DSP in real time and persist only when you save.
+This is a USB HID controller for a Moondrop DAC's own DSP, and nothing else. It reads and writes
+that chip's parametric EQ, pre-gain, DAC offset and profile slot, and it can browse the Moondrop
+Hub's community preset library. It does not touch your system audio, install anything, or run a
+software EQ — if there is no supported DAC on the bus, there is nothing here for it to drive.
 
-It currently ships **only inside [sea-shell](https://seashell.miyukivigil.tech/)**
-(`SUPER+SHIFT+E`) — a Hyprland rice, which vendors this script and drives it over its `--json` /
-`--set-*` interface. Everything device-shaped comes from `--json` rather than being reimplemented
-there: band count, which slot custom PEQ lives on, whether the device supports pre-gain at all. This
-script stays the single source of truth for the device registry.
+## Building a front-end on this
 
-The panel is Quickshell QML, so it wants Hyprland 0.55 and Quickshell 0.3. There is no standalone
-GTK/Qt build — on anything else, the CLI below is the interface.
+The CLI is designed to be driven. `--json` reports the full device state, and everything
+device-shaped comes from there rather than being reimplemented in the caller: band count, which slot
+custom PEQ lives on, whether the device supports pre-gain at all. This script stays the single
+source of truth for the device registry.
+
+`--registry` exists for one reason worth knowing about. Only one process can usefully hold the
+hidraw at a time — two readers pick up each other's replies — so anything passive (a tray icon, a
+status pill) must not be the second one. `--registry` prints this file's own device table and
+touches no hardware, so a front-end can recognise a DAC from USB IDs the system already knows and
+never open the device. `--presets` and `--preset` are hardware-free for the same reason. Nothing
+downstream needs to hardcode a product ID.
+
+If you are identifying the DAC from the system side, note that **PipeWire is not the source of truth
+for playback**, so there are two paths:
+
+- Normally the sink node carries `alsa.components = USB35d8:011d` — the USB pair, no name-matching
+  needed — and it updates reactively on hotplug.
+- A bit-perfect player (SONE, TIDAL) opens the card *directly* via exclusive ALSA. PipeWire never
+  sees that stream, so `defaultAudioSink` will happily report "Speaker" while the music is
+  physically going through the DAC — and PipeWire may hold no node for a card it cannot open. So
+  the fallback asks the kernel instead: whoever holds `/proc/asound/card*/pcm*p/sub*` outside
+  pipewire, identified by that card's `/proc/asound/cardN/usbid` — the same `35d8:011d` pair,
+  available whether or not PipeWire has any idea the device exists.
 
 ## Requirements
 
@@ -75,6 +92,7 @@ The first connected supported device is used automatically.
 python3 moondrop_control.py --list            # list connected Moondrop devices
 python3 moondrop_control.py --info            # firmware, active profile, gains
 python3 moondrop_control.py --get-peq         # dump all PEQ slots
+python3 moondrop_control.py --registry        # device registry as JSON; opens no device
 
 # Interactive tuning panel
 python3 moondrop_control.py -i
@@ -92,53 +110,60 @@ python3 moondrop_control.py --export-json profile.json
 python3 moondrop_control.py --import-json profile.json
 python3 moondrop_control.py --import-rew filters.txt   # REW-exported EQ
 
+# Community presets (Moondrop Hub library — reads need no account)
+python3 moondrop_control.py --presets                      # for the connected device
+python3 moondrop_control.py --presets --pid 011d           # ...or name the device
+python3 moondrop_control.py --presets --search harman      # searches the whole library
+python3 moondrop_control.py --presets --refresh            # bypass the local cache
+python3 moondrop_control.py --preset <uuid>                # one curve, as bands JSON
+
 # Diagnostics and scripting
 python3 moondrop_control.py --stream-status   # ALSA sample rate/format (Linux only)
 python3 moondrop_control.py --json            # full device state as JSON on stdout
-
-# Universal (software) EQ — works on ANY output device, no Moondrop DAC needed
-python3 moondrop_control.py --to-pipewire eq.conf --from-rew ParametricEQ.txt
-python3 moondrop_control.py --to-pipewire eq.conf --from-json profile.json
-python3 moondrop_control.py --to-pipewire eq.conf   # mirror the connected DAC's bands
 ```
 
-## Universal EQ: the same curves on any hardware
+## Community presets
 
-> **Scope, honestly.** This one exists mainly for [sea-shell](https://seashell.miyukivigil.tech/)'s
-> sake — it is the software-EQ escape hatch its DAC panel exports, so a curve you tuned on a
-> Moondrop can follow you onto hardware that panel cannot drive. It is **not really core to
-> `moondrop_control.py`**, which is a USB HID controller for a DAC's own DSP; everything else here
-> is about talking to that chip. Treat `--to-pipewire` as a companion feature aimed at the panel
-> rather than a pillar of this tool, and don't be surprised if it eventually lives closer to
-> sea-shell than to this script. Nothing about it is managed for you either — the tool writes
-> `eq.conf` and stops there; installing it into PipeWire is your job, in both the CLI and the panel.
-
-The PEQ above runs on the DAC's own DSP chip, so it only exists on the devices listed above. `--to-pipewire` renders the same filters as a [PipeWire filter-chain](https://docs.pipewire.org/page_module_filter_chain.html) instead — software EQ that applies to *anything*: another brand's DAC, laptop speakers, Bluetooth.
-
-With `--from-rew` or `--from-json` it needs **no Moondrop hardware connected at all**, so an AutoEQ preset for your headphones becomes a system-wide EQ:
+Moondrop Hub carries a public library of user-made curves — about **59,700** of them
+from **19,900** authors. Reading it needs no account, no key and no token, so
+`--presets` browses it and `--preset` pulls one down as bands you can apply. This tool
+only ever reads: it never publishes, likes or comments (those need a login).
 
 ```bash
-python3 moondrop_control.py --to-pipewire eq.conf --from-rew ParametricEQ.txt
-cp eq.conf ~/.config/pipewire/pipewire.conf.d/
-systemctl --user restart pipewire pipewire-pulse
+python3 moondrop_control.py --presets --search "harman" | jq '.presets[0]'
+```
+```json
+{
+  "uuid": "4ba6fbe4-6a97-48f1-b487-9d2a640ee30c",
+  "title": "水月雨aria2 模拟入耳式耳机使用哈曼2019在HEAD acoustics第三代人工头曲线",
+  "author": "rockyuan",
+  "downloads": 31072,
+  "likes": 604,
+  "file": "peq-config-file/fQ0QdflTTrx27gduE14KQpeq.txt"
+}
 ```
 
-Then select the **Universal EQ** sink as your output; it feeds your real device. To remove it, delete the file and restart PipeWire again.
+Worth knowing:
 
-Two things differ from the hardware path, both in software's favour: floating-point biquads have no Q2.30 limit, so the shelf gains the DAC must refuse work fine; and it isn't pinned to 96 kHz, since PipeWire recomputes per graph rate.
+* **You get your whole device family's presets, not just your model.** The server pools
+  by the app's `sharedConfigGroupId`, so a DAWN PRO2 sees ~6,900 curves (its own 1,270
+  plus every other FreeDSP-family device) rather than only its own.
+* **The index is cached for a day** under `~/.cache/hub_moon/`. It has to be: the API has
+  no pagination at all — `productUuid` is the only parameter it honours, and `page` /
+  `limit` / `sortBy` return *zero rows* rather than being ignored — so the smallest
+  possible request is the entire ~3.6 MB index for your device. `--search` then runs
+  locally over all of it, and `--refresh` refetches.
+* **Neither `--presets` nor `--preset` opens the DAC** (strace-verified: zero
+  `/dev/hidraw` opens, same as `--registry`), so browsing can't collide with a GUI
+  that's mid-write.
+* **Published presets carry no pre-gain**, unlike AutoEQ. A loud community curve will
+  clip unless you set your own headroom — see [Filters this hardware cannot represent](#filters-this-hardware-cannot-represent).
+* **Bands with no `filterType` become peaking**, which is what the official app does
+  (and it's the common case — most published bands omit the field). See §5.7 of the
+  [protocol notes](moondrop_hub_reverse_engineering.md).
 
-### Filter types
-
-`disabled`, `peaking`, `low_shelf`, `high_shelf`, `low_pass`, `high_pass`
-
-### Flash behaviour
-
-Writes are saved to device flash by default so they survive a reconnect. For live previewing (e.g. from a GUI), pass `--no-flash` to apply to the DSP only, then persist later with `--save-flash`:
-
-```bash
-python3 moondrop_control.py --set-peq 0 peaking 1000 -3.0 1.0 --no-flash
-python3 moondrop_control.py --save-flash
-```
+The full API — hosts, endpoints, the product-UUID table, and why that table has to be
+hardcoded — is documented in [§5 of the protocol notes](moondrop_hub_reverse_engineering.md).
 
 ## Notes
 
@@ -171,7 +196,7 @@ Most importantly, PEQ writes were confirmed **audible**: a `low_pass` at 800 Hz 
 
 Flash persistence was confirmed across a physical unplug/replug: the flashed config survived the power cycle byte-identical, and writes made with `--no-flash` correctly did *not* survive.
 
-`--to-pipewire` was verified by loading the generated config into a running PipeWire — the sink registers with correct FL/FR ports and no errors.
+`--presets` / `--preset` were verified against the live Moondrop Hub library (6,911 presets for the DAWN PRO2's device family), and both are strace-confirmed to open zero `/dev/hidraw` handles — same as `--registry`.
 
 Not yet exercised on hardware: the interactive panel (`-i`), and **every device other than the DAWN PRO2**.
 

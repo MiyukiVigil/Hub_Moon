@@ -20,17 +20,19 @@ feature set rather than a diff against a previous version.
   snapshot, and `--import-rew` for AutoEQ / REW `ParametricEQ.txt` files.
 - **`--json`** — full device state on stdout for GUIs to consume, so a front-end
   never has to hardcode the device registry.
+- **Community presets** — `--presets` browses the ~59,700-curve public library behind
+  Moondrop Hub (with `--search` over the whole index, and a day-long cache under
+  `~/.cache/hub_moon`), and `--preset <uuid>` pulls one down as bands. Reads need no
+  account; publishing/liking are deliberately not implemented. Neither flag opens the
+  DAC (strace-verified zero `/dev/hidraw` opens), so browsing can't collide with a GUI
+  that is mid-write. `--registry` now also reports each device's `product_uuid`, which
+  has to be hardcoded because the API's own `products/all` reports `pid: null` for all
+  102 products.
 - **`--no-flash` / `--save-flash`** — apply to the DSP live for auditioning, then
   persist deliberately. Writes go to flash by default.
 - **`-i` interactive tuning panel** — a terminal dashboard for the same controls.
 - **`--stream-status`** — hardware-level ALSA stream diagnostics (sample rate, bit
   format, supported rates). Linux-only; everything else is cross-platform.
-- **Universal (software) EQ via `--to-pipewire`** — render the same filters as a
-  PipeWire filter-chain, which applies to *any* output device rather than only a
-  Moondrop DAC. With `--from-json` / `--from-rew` it needs no Moondrop hardware
-  connected at all, so an AutoEQ file can be turned into a software EQ directly.
-  Software biquads are floating point and so are not subject to the firmware's
-  coefficient limits below.
 
 ### Protocol notes
 
@@ -77,9 +79,6 @@ REW import, stream status idle and playing, live band writes confirmed **audible
 (an 800 Hz low-pass audibly muffled playback, restoring the band returned it to
 normal), and a full flash round-trip that survived a physical unplug/replug
 byte-identical — while `--no-flash` writes correctly did not survive.
-
-The PipeWire config was verified by loading it into a running PipeWire: the sink
-registers with correct FL/FR ports and no errors.
 
 Not exercised on hardware: the interactive panel (`-i`), and **every device other
 than the DAWN PRO2** — those names and IDs come from the app's registry only.

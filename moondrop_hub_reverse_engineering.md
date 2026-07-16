@@ -214,7 +214,161 @@ What the *firmware* does with a wrapped coefficient is **UNVERIFIED** — it liv
 
 ---
 
-## 5. Independent Corroboration
+## 5. The Community Preset Library (public HTTP API)
+
+Everything above is USB. The app has a second half that is not: a public library of
+user-made PEQ curves, ~59,700 of them from ~19,900 authors across 52 products.
+
+> [!NOTE]
+> **Provenance.** Endpoint paths and the productUUID table were read out of the app's
+> JS bundle (`/assets/index-CaVUzXsg.js`, a lazy-loaded chunk — *not* the entry bundle).
+> Everything marked **tested** below was then exercised against the live API with plain
+> unauthenticated `curl` on 2026-07-16. Response shapes and counts are what the server
+> actually returned, not what the JS implies.
+
+The library is not called "presets" anywhere. The resource is **`peq-configs`**, which
+is why searching the bundle for "preset", "cloud" or "community" returns nothing.
+
+### 5.1. Hosts
+
+| | |
+|:---|:---|
+| API | `https://cdn-service.moondroplab.tech/api/v1` |
+| Files (curves, avatars) | `https://cdn.moondroplab.tech/` |
+
+Built in the bundle as:
+
+```js
+const I0="https://cdn-service.moondroplab.tech/", Nf="v1", D0="api", WD=k0(I0,D0,Nf);
+const In=jD({baseURL:WD, requestAdapter:CD(), ...})     // alova client, aliased `ft`
+```
+
+### 5.2. Authentication
+
+**Reads need none.** No key, no token, no cookie, no `Origin` check — a bare
+`curl https://cdn-service.moondroplab.tech/api/v1/peq-configs/all` returns the library
+(**tested**). Writes (publish / like / favourite / comment) go through `/users/login`
+and were **not tested**: this tool implements reads only.
+
+### 5.3. Endpoints
+
+Read (all **tested** except where noted):
+
+| Method | Path | Notes |
+|:---|:---|:---|
+| `GET` | `peq-configs/all?productUuid=<uuid>` | the index. **The only filter that works** |
+| `GET` | `peq-configs/{uuid}` | one preset's metadata (incl. `file`) |
+| `GET` | `peq-configs/mine` | needs auth — untested |
+| `GET` | `products/all`, `products/{uuid}` | product registry |
+| `GET` | `peq-config-comments/all`, `peq-config-favorites/list` | untested |
+| `GET` | `/responselib/all`, `/refresponse/all` | FR / target curves — untested |
+| `GET` | `/ota-configs/all` | firmware OTA — untested |
+
+Write (present in the bundle, **none tested**): `POST peq-configs`,
+`DELETE peq-configs/{uuid}`, `PATCH peq-configs/{uuid}/{addLike,addDislike,addFavorite,cancelFavorite,addDownloadCount}`,
+`POST peq-config-comments`, `POST /freq-response`, `POST /file/{type}`,
+plus `/users/*` and `/email|sms` for accounts.
+
+### 5.4. There is no pagination, and unknown params are not ignored
+
+`?productUuid=` is honoured. `page`, `pageSize`, `limit` and `sortBy` are **not** —
+and they don't fall back to defaults, they return **zero rows** (**tested**). So the
+smallest request possible is the entire index for one device family:
+
+| request | bytes | rows |
+|:---|---:|---:|
+| `peq-configs/all` | 31,480,226 | 59,667 |
+| `peq-configs/all?productUuid=<DAWN PRO2>` | 3,664,093 | 6,911 |
+
+Sort client-side, and cache. `sortBy` looks plausible because the bundle defines
+`ca={LIKE,DOWNLOAD,FAVORITE,RATING,COMMENT}`, but sending it empties the response.
+
+### 5.5. Mapping a connected DAC to its presets
+
+**The API cannot do this.** `products/all` returns 102 products and reports
+`"pid": null, "vid": null` for **every one of them** (**tested**). Nothing served by
+the API connects a USB device to its library.
+
+The link exists only in the bundle, and only after following an alias chain:
+
+```js
+vv=[{Class:Su,pid:283,brand:"MOONDROP"}, ...]      // Class -> pid
+let Su=Js;                                          // ...the vv names are aliases
+Ve(Js,"config",{productUUID:"...", sharedConfigGroupId:"..."})   // real class -> uuid
+```
+
+Resolved, that join is:
+
+| PID | Device | productUUID | group |
+|:---|:---|:---|:---|
+| `0x011B` | Rays | `23d46ee2-3926-4c84-8b40-2fc6f08e12f0` | rays |
+| `0x011C` | Marigold | `395619a3-3442-419a-a598-94f9f1d4ef4b` | marigold |
+| `0x011D` | DAWN PRO2 | `069eed07-c968-427e-9243-32663ad6eb25` | freeDSPPro |
+| `0x011E` | AG Rays | `c0a224c7-b6e1-4245-9f30-7f5233e082a5` | rays |
+| `0x0120` | DHA15 | `9f1fd925-4122-477d-a142-9ae6f931773e` | freeDSPPro |
+| `0x0122` | Old Fashioned | `97778394-2d4b-49da-bd45-416213b2baff` | oldFashioned |
+| `0x012A` | INN Deco75-DH Audio | `b30e3988-a9f9-432c-b41d-9d413ecb86d4` | freeDSPPro |
+| `0x012B` | Deco Audio System | `175b4b8f-2853-4bfe-8c91-5c6c5430d020` | freeDSPPro |
+| `0x43DA` | MOONRIVER 3 | `22a34fac-c91d-465a-ad5c-1898c773fff6` | freeDSPPro |
+| `0x98D3` | FreeDSP Pro | `3a3ebcb5-7605-4d1f-9e27-3fd3d8a3af0e` | freeDSPPro |
+| `0x98D4` | FreeDSP Mini | `666c7b9f-46fc-42a7-83ff-dd1c9f2c5f8b` | freeDSPPro |
+| `0x98D5` | E.S. combo | `7ba57e23-b6e5-4ffb-9398-da8639eaddad` | freeDSPPro |
+
+**The server pools by `sharedConfigGroupId`.** Filtering on the DAWN PRO2's uuid returns
+**6,911** presets, not its own 1,270 (**tested**) — every FreeDSP-family curve comes with
+it. The app uses the same idea to warn you when importing a link for another device:
+
+```js
+function el(t){const r=Ui.find(n=>n.uuid===t); ...
+  return Ui.filter(n=>n.sharedConfigGroupId===e)}      // devices that share a library
+```
+
+### 5.6. The curve file
+
+`peq-configs` rows carry a `file` ref; fetch it from the CDN (`GET https://cdn.moondroplab.tech/<file>`,
+**tested**, HTTP 200 unauthenticated). It is a JSON array — despite the `.txt` suffix —
+and **every value is a string**:
+
+```json
+[{"id":"0","frequency":"105","gain":"2.6","q":"0.7","filterType":"LOW_SHELF_2"},
+ {"id":"1","frequency":"172","gain":"-3.6","q":"0.44","filterType":"PEAKING"}]
+```
+
+`filterType` is **optional and usually absent**. In a 40-preset sample of the DAWN PRO2
+library, 128 of 320 bands carried no `filterType` at all (the rest: 188 `PEAKING`,
+2 `LOW_SHELF_2`, 2 `HIGH_SHELF_2`).
+
+### 5.7. filterType, and what the app does with the ones it can't write
+
+The app's lookup is exactly the wire table from §3.5:
+
+```js
+Ta={DISABLED:0,LOW_SHELF_2:1,PEAKING:2,HIGH_SHELF_2:3,LOW_PASS_2:4,HIGH_PASS_2:5}
+if(u&&u in Ta){const h=Ta[u];o[33]=h!==void 0?h:Ta.PEAKING}else o[33]=Ta.PEAKING
+```
+
+Two consequences:
+
+* Only **2nd-order** variants reach the wire. The bundle also defines `LOW_SHELF_1`,
+  `HIGH_SHELF_1`, `LOW_PASS_1`, `HIGH_PASS_1` — none are in `Ta`, so the official app
+  writes them as **peaking**. Whether any published preset actually uses one is
+  **UNVERIFIED** (none appeared in the 40-preset sample).
+* A band with **no** `filterType` is also written as **peaking**. This is the common
+  case, not an edge case.
+
+A tool reading this library should reproduce that fallback rather than improve on it:
+guessing a shelf where the vendor writes a peak makes your curve differ from what the
+preset's author heard when they published it.
+
+### 5.8. Published presets carry no pre-gain
+
+The file is bands and nothing else — no preamp, unlike AutoEQ. A +6 dB community curve
+will clip on a device sitting at 0 dB pre-gain and the library says nothing about it.
+Leave pre-gain to the user (or to §4.1's headroom maths); don't invent one.
+
+---
+
+## 6. Independent Corroboration
 
 * [erikyo/JM98MAX-PEQ](https://github.com/erikyo/JM98MAX-PEQ) — independently reports Q2.30, Report ID 75, 63-byte reports, and 96 kHz.
 * [mohammed-just/DawnPro-GUI-windows](https://github.com/mohammed-just/DawnPro-GUI-windows) — a separate implementation of the same device family.

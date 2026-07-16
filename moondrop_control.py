@@ -15,6 +15,8 @@ Usage:
 """
 
 import sys
+import os
+import json
 import math
 import time
 import struct
@@ -79,6 +81,199 @@ FILTER_TYPES = {
     "high_pass": 5
 }
 REV_FILTER_TYPES = {v: k for k, v in FILTER_TYPES.items()}
+
+# ---------------------------------------------------------------------------
+# Moondrop Hub community preset library
+#
+# The official web app carries a public library of user-made PEQ curves. Read
+# access needs no account, no key and no token: every GET below answers
+# unauthenticated. Publishing, liking and favouriting do need a login, and this
+# tool deliberately implements none of them — it reads.
+#
+# The library is not called "presets" anywhere in the app; the resource is
+# `peq-configs`, which is why it is easy to miss.
+# ---------------------------------------------------------------------------
+HUB_API = "https://cdn-service.moondroplab.tech/api/v1"
+HUB_CDN = "https://cdn.moondroplab.tech"
+HUB_CACHE = os.path.join(
+    os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"), "hub_moon")
+HUB_CACHE_TTL = 24 * 3600
+HUB_UA = "hub_moon/1.0 (+https://hubmoon.miyukivigil.tech)"
+
+# product_id -> the Hub's productUUID for that device.
+#
+# This table cannot be derived at runtime and has to be hardcoded here. The API's
+# own products/all lists 102 products and reports pid:null and vid:null for every
+# single one of them, so nothing served by the API connects a plugged-in DAC to its
+# presets. The link exists only inside the web app's JS bundle, where each device
+# class carries a static config: vv[] maps Class->pid, `let Su=Js` aliases it, and
+# Ve(Js,"config",{productUUID}) holds the uuid. These 12 are that join, resolved.
+#
+# Old Fashioned is included: it has 75 presets of its own and they are readable,
+# even though this tool refuses to *write* to that device (register protocol).
+PRODUCT_UUIDS = {
+    0x011B: "23d46ee2-3926-4c84-8b40-2fc6f08e12f0",  # Rays
+    0x011C: "395619a3-3442-419a-a598-94f9f1d4ef4b",  # Marigold
+    0x011D: "069eed07-c968-427e-9243-32663ad6eb25",  # DAWN PRO2
+    0x011E: "c0a224c7-b6e1-4245-9f30-7f5233e082a5",  # AG Rays
+    0x0120: "9f1fd925-4122-477d-a142-9ae6f931773e",  # DHA15
+    0x0122: "97778394-2d4b-49da-bd45-416213b2baff",  # Old Fashioned (read-only here)
+    0x012A: "b30e3988-a9f9-432c-b41d-9d413ecb86d4",  # INN Deco75-DH Audio
+    0x012B: "175b4b8f-2853-4bfe-8c91-5c6c5430d020",  # Deco Audio System
+    0x43DA: "22a34fac-c91d-465a-ad5c-1898c773fff6",  # MOONRIVER 3
+    0x98D3: "3a3ebcb5-7605-4d1f-9e27-3fd3d8a3af0e",  # FreeDSP Pro
+    0x98D4: "666c7b9f-46fc-42a7-83ff-dd1c9f2c5f8b",  # FreeDSP Mini
+    0x98D5: "7ba57e23-b6e5-4ffb-9398-da8639eaddad",  # E.S. combo
+}
+
+# The Hub's filterType strings -> our FILTER_TYPES keys.
+#
+# Only the 2nd-order variants reach the wire. The app's own lookup is
+#   Ta={DISABLED:0,LOW_SHELF_2:1,PEAKING:2,HIGH_SHELF_2:3,LOW_PASS_2:4,HIGH_PASS_2:5}
+# — identical to FILTER_TYPES above — and its writer is
+#   if (u && u in Ta) o[33]=Ta[u]; else o[33]=Ta.PEAKING
+# so anything not in that table is written as PEAKING by the official app. We
+# reproduce that rather than invent a better answer: guessing a shelf where the
+# vendor writes a peak would make our curve differ from what the preset's author
+# actually heard when they published it.
+#
+# The field is optional and its absence is the COMMON case, not an edge case: in a
+# 40-preset sample of the DAWN PRO2 library, 128 of 320 bands carried no filterType
+# at all (the rest: 188 PEAKING, 2 LOW_SHELF_2, 2 HIGH_SHELF_2). The bundle also
+# defines 1st-order names (LOW_SHELF_1, HIGH_PASS_1, ...) which are absent from Ta
+# and would therefore coerce to peaking — but none appeared in that sample, so
+# whether any published preset uses one is UNVERIFIED.
+HUB_FILTER_TYPES = {
+    "DISABLED": "disabled",
+    "LOW_SHELF_2": "low_shelf",
+    "PEAKING": "peaking",
+    "HIGH_SHELF_2": "high_shelf",
+    "LOW_PASS_2": "low_pass",
+    "HIGH_PASS_2": "high_pass",
+}
+
+
+def _hub_get(url, timeout=20):
+    """One unauthenticated GET. Raises urllib errors; callers turn them into JSON."""
+    import urllib.request
+    req = urllib.request.Request(url, headers={"User-Agent": HUB_UA})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return r.read().decode("utf-8", "replace")
+
+
+def hub_fetch_index(product_uuid, refresh=False, timeout=20):
+    """The preset index for a product, cached on disk.
+
+    Worth caching hard: the endpoint has no pagination whatsoever. `?productUuid=`
+    is the only parameter it honours — page/pageSize/limit/sortBy are not ignored
+    but actively return zero rows — so the smallest possible request is the whole
+    index for that device (~3.6 MB for a DAWN PRO2; 31 MB unfiltered). Re-fetching
+    that per keystroke would be abusive, hence a day-long TTL and a local search.
+
+    The server also pools by sharedConfigGroupId, so this returns every preset for
+    the device's whole family, not just the exact model.
+
+    The timeout is per-socket-operation, not for the whole transfer: it fires after
+    `timeout` seconds of SILENCE, so a slow link still completes the ~4 MB while a
+    black-holed route gives up promptly. 60s here meant a minute of frozen GUI.
+    """
+    os.makedirs(HUB_CACHE, exist_ok=True)
+    path = os.path.join(HUB_CACHE, f"presets-{product_uuid}.json")
+    if not refresh and os.path.exists(path):
+        if (time.time() - os.path.getmtime(path)) < HUB_CACHE_TTL:
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    return json.load(f), True
+            except (json.JSONDecodeError, OSError):
+                pass    # corrupt cache is not an error, just a refetch
+    body = _hub_get(f"{HUB_API}/peq-configs/all?productUuid={product_uuid}", timeout)
+    data = json.loads(body)
+    rows = data.get("data") or []
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(rows, f)
+    os.replace(tmp, path)       # atomic: a killed fetch never leaves a half cache
+    return rows, False
+
+
+def hub_slim(row):
+    """Only the fields a browser needs; the raw rows carry duplicate casing variants."""
+    def num(v):
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            return 0
+
+    def flat(s):
+        # Descriptions are free text and authors format them: 12 of 40 sampled presets
+        # embed newlines, one with 24 of them (a hand-drawn frequency table). A caller
+        # rendering these as one-liners gets 25 lines drawn over whatever is below, so
+        # collapse every run of whitespace to a single space here rather than making
+        # each front-end rediscover it. str.split() with no args splits on any
+        # whitespace and drops empties, so this also strips.
+        return " ".join((s or "").split())
+
+    return {
+        "uuid": row.get("uuid", ""),
+        "title": flat(row.get("title")),
+        "author": flat(row.get("username")),
+        "desc": flat(row.get("desc")),
+        "downloads": num(row.get("downloadcount")),
+        "likes": num(row.get("like")),
+        "file": row.get("file") or "",
+    }
+
+
+def hub_resolve_file(preset):
+    """preset uuid (or a raw file ref) -> the CDN path holding its curve.
+
+    Tries the local caches first so that clicking a preset you are already looking at
+    costs one small CDN fetch and no API call at all.
+    """
+    if "/" in preset:
+        return preset               # already a file ref
+    try:
+        for fn in os.listdir(HUB_CACHE):
+            if not fn.startswith("presets-"):
+                continue
+            with open(os.path.join(HUB_CACHE, fn), encoding="utf-8") as f:
+                for r in json.load(f):
+                    if r.get("uuid") == preset:
+                        return r.get("file")
+    except (OSError, json.JSONDecodeError):
+        pass                        # no cache, or a corrupt one — ask the API
+    try:
+        meta = json.loads(_hub_get(f"{HUB_API}/peq-configs/{preset}"))
+        return (meta.get("data") or {}).get("file")
+    except Exception:
+        return None
+
+
+def hub_preset_bands(file_ref, band_count=None, timeout=20):
+    """Fetch one preset's curve and map it onto our band model.
+
+    The published file is a plain JSON array:
+      [{"id":"0","frequency":"105","gain":"2.6","q":"0.7","filterType":"LOW_SHELF_2"}]
+    Every field is a *string*, and filterType is optional.
+    """
+    band_count = band_count or DEFAULT_BANDS    # defined below this block
+    raw = json.loads(_hub_get(f"{HUB_CDN}/{file_ref}", timeout))
+    bands, dropped = [], 0
+    for i, b in enumerate(raw):
+        if i >= band_count:
+            dropped += 1
+            continue
+        ft = (b.get("filterType") or "").upper()
+        bands.append({
+            "index": i,
+            "type": HUB_FILTER_TYPES.get(ft, "peaking"),   # see HUB_FILTER_TYPES
+            "frequency": float(b.get("frequency") or 1000),
+            "gain": float(b.get("gain") or 0),
+            "q": float(b.get("q") or 0.7),
+            # so a caller can tell the user we reinterpreted their curve
+            "coerced": bool(ft) and ft not in HUB_FILTER_TYPES,
+        })
+    return bands, dropped
 
 # Constants
 REPORT_ID = 75  # 0x4B
@@ -622,144 +817,6 @@ def run_interactive(dev, name):
                 print(f"\nError: {e}")
                 input("Press Enter to return to menu...")
 
-# ---------------------------------------------------------------------------
-# Universal (software) EQ via PipeWire
-#
-# The PEQ above is the DAC's own hardware DSP, so it only exists on the devices
-# in SUPPORTED_DEVICES. The same filters can be run in software instead, which
-# works with ANY output -- another brand's DAC, laptop speakers, Bluetooth --
-# at the cost of a little CPU. PipeWire's built-in filter-chain module takes
-# biquads with exactly the Freq/Q/Gain parameters we already carry, so the
-# translation is direct.
-#
-# Two things differ from the hardware path, both in software's favour:
-#   * No Q2.30 limit. Software biquads are floating point, so the shelf gains
-#     the DAC has to refuse are fine here.
-#   * Not tied to 96 kHz. PipeWire recomputes per graph rate, so we emit the
-#     filter parameters rather than baked coefficients.
-# ---------------------------------------------------------------------------
-
-PIPEWIRE_LABELS = {
-    "peaking": "bq_peaking",
-    "low_shelf": "bq_lowshelf",
-    "high_shelf": "bq_highshelf",
-    "low_pass": "bq_lowpass",
-    "high_pass": "bq_highpass",
-}
-
-REW_TYPES = {"PK": "peaking", "LS": "low_shelf", "HS": "high_shelf",
-             "LP": "low_pass", "HP": "high_pass"}
-
-
-def parse_rew(path):
-    """Parse a REW / AutoEQ 'ParametricEQ.txt'. Returns (filters, preamp_db)."""
-    import re as _re
-    with open(path, 'r', encoding='utf-8') as fh:
-        lines = fh.readlines()
-
-    filters = []
-    preamp = 0.0
-    for line in lines:
-        line = line.strip()
-        pm = _re.match(r'(?:Preamp|Pre-gain|Pre-amp):\s*([\d\.-]+)\s*dB', line, _re.IGNORECASE)
-        if pm:
-            preamp = float(pm.group(1))
-            continue
-        fm = _re.match(r'Filter\s+(\d+):\s*(ON|OFF)\s+([a-zA-Z0-9_]+)\s+Fc\s+([\d\.]+)\s*Hz\s+'
-                       r'Gain\s+([\d\.-]+)\s*dB\s+Q\s+([\d\.]+)', line, _re.IGNORECASE)
-        if fm:
-            t = REW_TYPES.get(fm.group(3).upper(), "peaking")
-            if fm.group(2).upper() == "OFF":
-                t = "disabled"
-            filters.append({
-                "index": int(fm.group(1)) - 1,
-                "type": t,
-                "frequency": float(fm.group(4)),
-                "gain": float(fm.group(5)),
-                "q": float(fm.group(6)),
-            })
-    return filters, preamp
-
-
-def build_pipewire_config(filters, preamp=0.0, node_name="eq", description="Universal EQ"):
-    """
-    Render a libpipewire-module-filter-chain config: a virtual sink that applies
-    these bands to whatever it is routed to.
-
-    The graph is mono (one In, one Out); filter-chain instantiates it per channel,
-    so it EQs both sides of a stereo stream identically. Nodes are linked
-    explicitly in series -- filter-chain does not chain them implicitly.
-    """
-    nodes, links, prev = [], [], None
-
-    if abs(preamp) > 1e-9:
-        # No biquad does plain gain, so scale the samples: dB -> linear multiplier.
-        mult = 10 ** (preamp / 20.0)
-        nodes.append(f'                {{ type = builtin name = preamp label = linear '
-                     f'control = {{ "Mult" = {mult:.6f} "Add" = 0.0 }} }}')
-        prev = "preamp"
-
-    for f in filters:
-        if f["type"] == "disabled":
-            continue
-        label = PIPEWIRE_LABELS.get(f["type"])
-        if label is None:
-            continue
-        name = f"eq_band_{f['index']}"
-        nodes.append(f'                {{ type = builtin name = {name} label = {label} '
-                     f'control = {{ "Freq" = {float(f["frequency"]):g} "Q" = {float(f["q"]):g} '
-                     f'"Gain" = {float(f["gain"]):g} }} }}')
-        if prev is not None:
-            links.append(f'                {{ output = "{prev}:Out" input = "{name}:In" }}')
-        prev = name
-
-    if not nodes:
-        # An empty graph is invalid; a unity-gain node keeps the sink usable.
-        nodes.append('                { type = builtin name = passthrough label = linear '
-                     'control = { "Mult" = 1.0 "Add" = 0.0 } }')
-
-    nodes_s = "\n".join(nodes)
-    links_s = "\n".join(links)
-    links_block = f"            links = [\n{links_s}\n            ]\n" if links else ""
-
-    return (
-        "# PipeWire software EQ -- generated by moondrop_control.py\n"
-        "#\n"
-        "# Install:   cp this file to ~/.config/pipewire/pipewire.conf.d/\n"
-        "# Activate:  systemctl --user restart pipewire pipewire-pulse\n"
-        f"# Then select the \"{description}\" sink as your output; it feeds your real device.\n"
-        "# Remove:    delete the file and restart pipewire again.\n"
-        "#\n"
-        "# This is software EQ: it applies to ANY output device, not just a Moondrop DAC.\n"
-        "context.modules = [\n"
-        "{   name = libpipewire-module-filter-chain\n"
-        "    args = {\n"
-        f"        node.description = \"{description}\"\n"
-        f"        media.name       = \"{description}\"\n"
-        "        filter.graph = {\n"
-        "            nodes = [\n"
-        f"{nodes_s}\n"
-        "            ]\n"
-        f"{links_block}"
-        "        }\n"
-        "        # Channel config belongs at args level, not inside capture/playback props:\n"
-        "        # that is what makes filter-chain replicate the mono graph onto both\n"
-        "        # channels. (Matches /usr/share/pipewire/filter-chain/sink-eq6.conf.)\n"
-        "        audio.channels = 2\n"
-        "        audio.position = [ FL FR ]\n"
-        "        capture.props = {\n"
-        f"            node.name   = \"effect_input.{node_name}\"\n"
-        "            media.class = Audio/Sink\n"
-        "        }\n"
-        "        playback.props = {\n"
-        f"            node.name    = \"effect_output.{node_name}\"\n"
-        "            node.passive = true\n"
-        "        }\n"
-        "    }\n"
-        "}\n"
-        "]\n"
-    )
-
 
 def check_stream_status():
     import os
@@ -861,52 +918,104 @@ def main():
     parser.add_argument("--import-json", metavar="FILE.json", help="Import/Restore DAC configuration from a JSON file")
     parser.add_argument("--import-rew", metavar="FILE.txt", help="Import EQ configurations from a REW text file")
     parser.add_argument("--stream-status", action="store_true", help="Diagnose current hardware-level audio stream status (sample rate/format)")
-    parser.add_argument("--to-pipewire", metavar="OUT.conf",
-                        help="Write a PipeWire filter-chain config: software EQ that works with ANY "
-                             "output device, not just a Moondrop DAC")
-    parser.add_argument("--from-json", metavar="FILE.json",
-                        help="Source bands from an exported JSON instead of a connected device "
-                             "(lets --to-pipewire run with no Moondrop DAC attached)")
-    parser.add_argument("--from-rew", metavar="FILE.txt",
-                        help="Source bands from a REW/AutoEQ file instead of a connected device "
-                             "(lets --to-pipewire run with no Moondrop DAC attached)")
-    parser.add_argument("--pw-name", metavar="NAME", default="Universal EQ",
-                        help="Sink name shown for --to-pipewire (default: 'Universal EQ')")
     parser.add_argument("--json", action="store_true", help="Dump full device state (info + all PEQ bands) as JSON on stdout, for GUIs")
+    parser.add_argument("--registry", action="store_true",
+                        help="Dump the device registry (vendor ID + supported/unsupported product IDs) "
+                             "as JSON. Touches no hardware, so a GUI can identify a DAC from its USB "
+                             "IDs without opening the device")
+    parser.add_argument("--presets", action="store_true",
+                        help="List community PEQ presets for a device from the Moondrop Hub library "
+                             "as JSON. Needs --pid (or a connected device) and the network; touches "
+                             "no hardware when --pid is given")
+    parser.add_argument("--preset", metavar="UUID",
+                        help="Fetch one community preset by uuid and print its bands as JSON, mapped "
+                             "onto this tool's band model. Touches no hardware")
+    parser.add_argument("--pid", metavar="HEX",
+                        help="Product ID (e.g. 011d) to use for --presets instead of probing the bus")
+    parser.add_argument("--search", metavar="TERM",
+                        help="With --presets: keep only presets whose title, author or description "
+                             "contains TERM (case-insensitive)")
+    parser.add_argument("--limit", type=int, default=200,
+                        help="With --presets: cap results (default 200, 0 = no cap)")
+    parser.add_argument("--refresh", action="store_true",
+                        help="With --presets: bypass the local cache and refetch the index")
     parser.add_argument("--no-flash", action="store_true", help="Apply live to the DSP but skip the flash write (for GUI live-preview; use --save-flash to persist)")
     parser.add_argument("--save-flash", action="store_true", help="Persist the current EQ + offsets to device flash")
     
     args = parser.parse_args()
 
-    if args.stream_status:
-        check_stream_status()
+    # Registry dump. Deliberately the FIRST thing handled and deliberately
+    # hardware-free: this exists so a front-end can recognise a DAC from the USB
+    # IDs it already has (PipeWire hands them over in alsa.components as
+    # "USB<vid>:<pid>") WITHOUT opening the device. That matters -- two processes
+    # must never hold the hidraw at once, and a passive indicator has no business
+    # taking the device away from whatever is actually driving it. It also keeps
+    # this file the single source of truth for the registry: nothing downstream
+    # needs to hardcode a product ID.
+    if args.registry:
+        print(json.dumps({
+            "vendor_id": f"{MOONDROP_VID:04x}",
+            "supported": {f"{pid:04x}": name for pid, name in sorted(SUPPORTED_DEVICES.items())},
+            "unsupported": {f"{pid:04x}": {"name": name, "reason": reason}
+                            for pid, (name, reason) in sorted(UNSUPPORTED_DEVICES.items())},
+            # which devices have a community preset library, and under which uuid
+            "product_uuids": {f"{pid:04x}": u for pid, u in sorted(PRODUCT_UUIDS.items())},
+        }, indent=2))
         sys.exit(0)
 
-    # Device-free path: converting a saved config to a software EQ needs no DAC at
-    # all, which is the entire point -- this is how someone with an unsupported
-    # device gets the same curves.
-    if args.to_pipewire and (args.from_json or args.from_rew):
-        if args.from_rew:
-            filters, preamp = parse_rew(args.from_rew)
-            src = args.from_rew
+    # ---- community presets ----
+    # Network only. Neither of these opens the DAC, which matters: the GUI serialises
+    # every device call through one queue because two processes sharing one hidraw pick
+    # up each other's replies, and browsing a library has no business joining that queue.
+    if args.presets or args.preset:
+        def die(msg):
+            print(json.dumps({"ok": False, "error": msg}))
+            sys.exit(1)
+
+        if args.preset:
+            ref = hub_resolve_file(args.preset)
+            if not ref:
+                die(f"could not resolve preset {args.preset}")
+            try:
+                bands, dropped = hub_preset_bands(ref, DEFAULT_BANDS)
+            except Exception as e:
+                die(f"could not fetch preset: {e}")
+            print(json.dumps({"ok": True, "bands": bands, "dropped": dropped,
+                              "coerced": sum(1 for b in bands if b["coerced"])}, indent=2))
+            sys.exit(0)
+
+        if args.pid:
+            try:
+                pid = int(args.pid, 16)
+            except ValueError:
+                die(f"--pid must be hex, e.g. 011d (got {args.pid!r})")
         else:
-            import json
-            with open(args.from_json, 'r', encoding='utf-8') as fh:
-                d = json.load(fh)
-            filters = d.get("filters", [])
-            preamp = d.get("pregain", 0.0)
-            src = args.from_json
-        filters = sorted(filters, key=lambda x: x["index"])
-        conf = build_pipewire_config(filters, preamp, description=args.pw_name)
-        with open(args.to_pipewire, 'w', encoding='utf-8') as fh:
-            fh.write(conf)
-        active = [f for f in filters if f["type"] != "disabled"]
-        print(f"Read {len(active)} active band(s) + {preamp:+.2f} dB pre-gain from {src}")
-        print(f"Wrote PipeWire filter-chain config to {args.to_pipewire}")
-        print(f"\n  cp {args.to_pipewire} ~/.config/pipewire/pipewire.conf.d/")
-        print(f"  systemctl --user restart pipewire pipewire-pulse")
-        print(f"\nThen pick the \"{args.pw_name}\" sink as your output. This is software EQ:")
-        print("it works with any DAC, headphones, or speakers -- no Moondrop hardware needed.")
+            found = find_devices() or find_unsupported_devices()
+            if not found:
+                die("no Moondrop device connected (pass --pid to browse without one)")
+            pid = found[0]["product_id"]
+        uuid = PRODUCT_UUIDS.get(pid)
+        if not uuid:
+            die(f"no community preset library known for product {pid:04x}")
+        try:
+            rows, cached = hub_fetch_index(uuid, refresh=args.refresh)
+        except Exception as e:
+            die(f"could not reach the Moondrop Hub library: {e}")
+        out = [hub_slim(r) for r in rows]
+        if args.search:
+            q = args.search.lower()
+            out = [p for p in out
+                   if q in p["title"].lower() or q in p["author"].lower() or q in p["desc"].lower()]
+        out.sort(key=lambda p: (-p["downloads"], -p["likes"]))
+        total = len(out)
+        if args.limit and args.limit > 0:
+            out = out[:args.limit]
+        print(json.dumps({"ok": True, "product_uuid": uuid, "cached": cached,
+                          "total": total, "shown": len(out), "presets": out}, indent=2))
+        sys.exit(0)
+
+    if args.stream_status:
+        check_stream_status()
         sys.exit(0)
 
     if len(sys.argv) == 1:
@@ -936,7 +1045,6 @@ def main():
         else:
             msg = "No connected Moondrop device found."
         if args.json:
-            import json
             print(json.dumps({"ok": False, "error": msg}))
         else:
             print(f"Error: {msg}")
@@ -951,7 +1059,6 @@ def main():
         dev = MoondropDevice(dev_info)
     except Exception as e:
         if args.json:
-            import json
             print(json.dumps({"ok": False, "error": str(e)}))
         else:
             print(f"Failed to open device: {e}")
@@ -960,7 +1067,6 @@ def main():
 
     try:
         if args.json:
-            import json
             # A GUI needs the same three facts the CLI warns about in prose:
             # which slot custom PEQ lives on, whether it is the one playing, and
             # whether pre-gain is worth offering at all.
@@ -1044,24 +1150,7 @@ def main():
                     dev.save_eq_to_flash()
                 print("Applied (live)." if args.no_flash else "Done and saved to Flash.")
 
-            if args.to_pipewire:
-                print(f"Reading device bands to build a software EQ config...")
-                filters = []
-                for idx in range(dev.bands):
-                    peq = dev.read_peq_index(idx)
-                    if peq:
-                        filters.append(peq)
-                pre = dev.get_pregain()
-                conf = build_pipewire_config(filters, pre, description=args.pw_name)
-                with open(args.to_pipewire, 'w', encoding='utf-8') as fh:
-                    fh.write(conf)
-                active = [f for f in filters if f["type"] != "disabled"]
-                print(f"Wrote {len(active)} band(s) + {pre:+.2f} dB pre-gain to {args.to_pipewire}")
-                print(f"  cp {args.to_pipewire} ~/.config/pipewire/pipewire.conf.d/ "
-                      f"&& systemctl --user restart pipewire pipewire-pulse")
-
             if args.export_json:
-                import json
                 print(f"Reading device state to export to {args.export_json}...")
                 data = {
                     "device_name": name,
@@ -1085,7 +1174,6 @@ def main():
                 print(f"Exported successfully to {args.export_json}")
 
             if args.import_json:
-                import json
                 print(f"Loading configuration from {args.import_json}...")
                 with open(args.import_json, 'r', encoding='utf-8') as f:
                     data = json.load(f)
