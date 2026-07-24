@@ -14,13 +14,23 @@ feature set rather than a diff against a previous version.
 
 - **Packaging** — a root `pyproject.toml` makes Hub Moon a proper installable
   package (`hub-moon` CLI + `hub-moon-gui` windowed entry points, QML shipped as
-  package data, PySide6 an optional `[gui]` extra). On top of it, `packaging/` has
-  an Arch `PKGBUILD`, a PyInstaller spec for a self-contained Windows `.exe` /
-  macOS / Linux bundle, an `nfpm.yaml` that emits both `.deb` and `.rpm` from the
-  bundle, and a `flake.nix` for Nix — all installing the `70-moondrop.rules` udev
-  rule, a `.desktop` launcher and an icon. See `packaging/README.md`. (The wheel,
-  the Arch package and the PyInstaller bundle were built and launched; nfpm/Nix are
-  provided as configs.)
+  package data, PySide6 an optional `[gui]` extra). On top of it, `packaging/`
+  builds an installer for every platform from one PyInstaller spec:
+  - **Windows** — a self-contained `.exe` plus an **Inno Setup** installer
+    (`hub-moon.iss`, Start-menu/uninstaller) and a portable zip; `.ico` icon.
+  - **macOS** — a `Hub Moon.app` (`BUNDLE` step, `.icns` icon) packaged as a
+    drag-to-Applications **`.dmg`** for both Apple Silicon and Intel. Ad-hoc
+    signed, not notarized (Gatekeeper needs a right-click → Open on first launch).
+  - **Linux** — a portable tarball, a single-file **AppImage** (`build-appimage.sh`),
+    and **`.deb`** + **`.rpm`** via `nfpm`, plus an Arch `PKGBUILD` and a `flake.nix`
+    for Nix. All install the `70-moondrop.rules` udev rule, a `.desktop` launcher
+    and an icon.
+
+  Three **GitHub Actions** workflows (`build-windows.yml`, `build-linux.yml`,
+  `build-macos.yml`) build each on its own runner and attach the assets to a
+  tagged Release. See `packaging/README.md`. (Verified on this Linux box: the
+  wheel, Arch package, PyInstaller bundle, AppImage and `.deb`. Windows/macOS/Nix
+  use the same spec/configs but need their own OS.)
 - **Desktop GUI** (`--gui`) — a PySide6 / QML window modelled on MOONDROP's own
   Sound-Tuning Tool (the Hub web app), in three screens. It opens on a
   **connection wizard** (a step indicator, a "Start connecting" scan, the

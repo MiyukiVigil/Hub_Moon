@@ -1,0 +1,97 @@
+name: Build macOS app
+
+# Builds a Hub Moon.app with PyInstaller and packages it as a .dmg (drag to
+# Applications). Runs on both Apple Silicon (macos-14) and Intel (macos-13) so
+# users on either architecture get a native build.
+#
+#   • push a tag vX.Y.Z  → both .dmgs are attached to the GitHub Release
+#   • "Run workflow"     → .dmgs uploaded as artifacts
+#
+# NOTE: these builds are ad-hoc signed, not notarized (notarization needs a paid
+# Apple Developer ID). On first launch macOS Gatekeeper will say the app is from
+# an "unidentified developer" — right-click the app → Open (or run
+# `xattr -dr com.apple.quarantine "/Applications/Hub Moon.app"`) to allow it.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version string (e.g. 0.2.0)"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14   # Apple Silicon (arm64)
+            arch: arm64
+          - runner: macos-13   # Intel (x86_64)
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install project + build tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install ".[gui]" pyinstaller
+
+      - name: Resolve version
+        id: ver
+        run: |
+          inp="${{ github.event.inputs.version }}"
+          ref="${{ github.ref_name }}"
+          if   [ -n "$inp" ]; then v="$inp"
+          elif [[ "$ref" == v* ]]; then v="${ref#v}"
+          else v="0.0.0-$ref"; fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "Building version $v ($ARCH)"
+        env:
+          ARCH: ${{ matrix.arch }}
+
+      - name: Build Hub Moon.app (PyInstaller)
+        run: pyinstaller --noconfirm packaging/hub-moon.spec
+
+      - name: Ad-hoc sign the app
+        run: |
+          # arm64 requires at least an ad-hoc signature to run at all
+          codesign --force --deep --sign - "dist/Hub Moon.app"
+          codesign --verify --deep --strict --verbose=2 "dist/Hub Moon.app" || true
+
+      - name: Package .dmg
+        run: |
+          v="${{ steps.ver.outputs.version }}"
+          arch="${{ matrix.arch }}"
+          staging="dist/dmg"
+          rm -rf "$staging"; mkdir -p "$staging"
+          cp -R "dist/Hub Moon.app" "$staging/"
+          ln -s /Applications "$staging/Applications"
+          hdiutil create -volname "Hub Moon" -srcfolder "$staging" -ov -format UDZO \
+            "dist/HubMoon-$v-macOS-$arch.dmg"
+          rm -rf "$staging"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: hub-moon-macos-${{ matrix.arch }}
+          path: dist/HubMoon-*-macOS-*.dmg
+          if-no-files-found: error
+
+      - name: Attach to release (tagged builds only)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/HubMoon-*-macOS-*.dmg

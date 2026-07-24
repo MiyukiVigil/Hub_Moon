@@ -17,6 +17,11 @@ on:
         required: false
         default: ""
 
+# creating a Release + uploading assets needs write access to repo contents;
+# the default GITHUB_TOKEN is read-only unless we ask for it here.
+permissions:
+  contents: write
+
 jobs:
   windows:
     runs-on: windows-latest

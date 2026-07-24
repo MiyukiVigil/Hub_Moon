@@ -1,0 +1,100 @@
+name: Build Linux packages
+
+# Builds a self-contained Linux bundle and wraps it four ways:
+#   • portable tarball   (any glibc-compatible distro)
+#   • AppImage           (single-file, runs anywhere)
+#   • .deb               (Debian / Ubuntu / Mint …)
+#   • .rpm               (Fedora / RHEL / openSUSE …)
+#
+# Built on ubuntu-22.04 so the bundle's glibc floor stays low (older = runs on
+# more distros). PyInstaller is not a cross-compiler, hence one job per OS.
+#
+#   • push a tag vX.Y.Z  → assets are attached to the GitHub Release
+#   • "Run workflow"     → assets uploaded as artifacts
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version string (e.g. 0.2.0)"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  linux:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install project + build tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install ".[gui]" pyinstaller
+          sudo apt-get update
+          sudo apt-get install -y librsvg2-bin file
+
+      - name: Resolve version
+        id: ver
+        run: |
+          inp="${{ github.event.inputs.version }}"
+          ref="${{ github.ref_name }}"
+          if   [ -n "$inp" ]; then v="$inp"
+          elif [[ "$ref" == v* ]]; then v="${ref#v}"
+          else v="0.0.0-$ref"; fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "Building version $v"
+
+      - name: Build the bundle (PyInstaller)
+        run: pyinstaller --noconfirm packaging/hub-moon.spec
+
+      - name: Portable tarball
+        run: |
+          v="${{ steps.ver.outputs.version }}"
+          tar -C dist -czf "dist/HubMoon-$v-linux-x86_64.tar.gz" hub-moon
+
+      - name: AppImage
+        run: |
+          curl -sL "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage" -o /usr/local/bin/appimagetool
+          sudo chmod +x /usr/local/bin/appimagetool
+          packaging/build-appimage.sh "${{ steps.ver.outputs.version }}"
+
+      - name: .deb + .rpm (nfpm)
+        run: |
+          NFPM_TAG=$(curl -s https://api.github.com/repos/goreleaser/nfpm/releases/latest | grep -oP '"tag_name":\s*"\K[^"]+')
+          curl -sL "https://github.com/goreleaser/nfpm/releases/download/${NFPM_TAG}/nfpm_${NFPM_TAG#v}_Linux_x86_64.tar.gz" -o nfpm.tar.gz
+          tar xzf nfpm.tar.gz nfpm
+          v="${{ steps.ver.outputs.version }}"
+          sed -i "s/^version:.*/version: $v/" packaging/nfpm.yaml   # keep pkg version in sync with the tag
+          ./nfpm pkg --packager deb -f packaging/nfpm.yaml -t dist/
+          ./nfpm pkg --packager rpm -f packaging/nfpm.yaml -t dist/
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: hub-moon-linux
+          path: |
+            dist/HubMoon-*-linux-x86_64.tar.gz
+            dist/HubMoon-*-x86_64.AppImage
+            dist/*.deb
+            dist/*.rpm
+          if-no-files-found: error
+
+      - name: Attach to release (tagged builds only)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/HubMoon-*-linux-x86_64.tar.gz
+            dist/HubMoon-*-x86_64.AppImage
+            dist/*.deb
+            dist/*.rpm
