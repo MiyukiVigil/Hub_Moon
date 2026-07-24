@@ -17,7 +17,10 @@ from PyInstaller.utils.hooks import collect_all
 here = os.path.abspath(SPECPATH)
 repo = os.path.dirname(here)
 
-datas = [(os.path.join(repo, "gui", "qml"), "gui/qml")]   # QML tree → <bundle>/gui/qml
+datas = [
+    (os.path.join(repo, "gui", "qml"), "gui/qml"),        # QML tree
+    (os.path.join(repo, "gui", "assets"), "gui/assets"),  # bundled fonts (icons + UI)
+]
 binaries = []
 hiddenimports = ["hid"]                                     # hidapi's compiled module
 

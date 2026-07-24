@@ -38,11 +38,12 @@ py-modules = ["moondrop_control"]
 [tool.setuptools.packages.find]
 include = ["gui*"]
 
-# ship the QML tree as data alongside the gui package
+# ship the QML tree + bundled fonts as data alongside the gui package
 [tool.setuptools.package-data]
 gui = [
   "qml/*.qml",
   "qml/HubMoon/*.qml",
   "qml/HubMoon/*.js",
   "qml/HubMoon/qmldir",
+  "assets/fonts/*",
 ]

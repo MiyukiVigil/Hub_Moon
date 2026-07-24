@@ -11,14 +11,33 @@ import signal
 import sys
 
 
-def _qml_dir():
-    """Where the .qml/.js/qmldir live, whether run from source, an installed
-    wheel, or a PyInstaller bundle."""
+def _res_dir(sub):
+    """Locate a bundled resource dir (``qml`` / ``assets``), whether the app runs
+    from source, an installed wheel, or a PyInstaller bundle."""
     if getattr(sys, "frozen", False):
         # PyInstaller unpacks datas under _MEIPASS (onefile) or next to the exe
         base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(sys.executable)))
-        return os.path.join(base, "gui", "qml")
-    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "qml")
+        return os.path.join(base, "gui", sub)
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), sub)
+
+
+def _qml_dir():
+    return _res_dir("qml")
+
+
+def _load_fonts():
+    """Register the bundled UI + icon fonts so the app looks identical on every
+    OS. Without this, machines that lack the Material Symbols font render icon
+    ligatures as raw text (``usb_off``, ``check`` …) — the fonts are installed on
+    the dev box but not on a fresh Windows/macOS/other-distro install."""
+    from PySide6.QtGui import QFontDatabase
+
+    fonts_dir = os.path.join(_res_dir("assets"), "fonts")
+    if not os.path.isdir(fonts_dir):
+        return
+    for name in sorted(os.listdir(fonts_dir)):
+        if name.lower().endswith((".ttf", ".otf", ".woff", ".woff2")):
+            QFontDatabase.addApplicationFont(os.path.join(fonts_dir, name))
 
 
 def main(argv=None):
@@ -37,6 +56,10 @@ def main(argv=None):
     app.setApplicationName("Hub Moon")
     app.setOrganizationName("hub_moon")
     app.setApplicationDisplayName("Hub Moon")
+
+    # register the bundled fonts before any QML loads, so the icon/UI families
+    # resolve regardless of what's installed on the host
+    _load_fonts()
 
     controller = Controller()
 
