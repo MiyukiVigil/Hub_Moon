@@ -1,0 +1,41 @@
+# Build + install straight from the working copy — no GitHub tag needed.
+#   cd packaging && makepkg -si -p PKGBUILD.local
+#
+# Use this while iterating. The plain ./PKGBUILD is the release recipe and needs
+# a pushed v$pkgver tag on GitHub.
+# Maintainer: MiyukiVigil
+pkgname=hub-moon
+pkgver=0.2.0
+pkgrel=1
+pkgdesc="Parametric EQ control for Moondrop USB DACs — CLI + Qt desktop GUI (local build)"
+arch=('any')
+url="https://github.com/MiyukiVigil/Hub_Moon"
+license=('MIT')
+depends=('python' 'python-hidapi' 'pyside6')
+makedepends=('python-build' 'python-installer' 'python-wheel' 'python-setuptools' 'rsync')
+options=(!debug)
+
+# stage a clean copy of the repo (parent of packaging/) into $srcdir, minus the
+# junk and makepkg's own work dirs, so the build never touches the working tree
+prepare() {
+  local root; root="$(cd "$startdir/.." && pwd)"
+  rm -rf "$srcdir/tree"; mkdir -p "$srcdir/tree"
+  rsync -a \
+    --exclude='.git' --exclude='build' --exclude='dist' --exclude='*.egg-info' \
+    --exclude='packaging/src' --exclude='packaging/pkg' --exclude='packaging/*.pkg.tar*' \
+    "$root"/ "$srcdir/tree"/
+}
+
+build() {
+  cd "$srcdir/tree"
+  python -m build --wheel --no-isolation
+}
+
+package() {
+  cd "$srcdir/tree"
+  python -m installer --destdir="$pkgdir" dist/*.whl
+  install -Dm644 packaging/70-moondrop.rules "$pkgdir/usr/lib/udev/rules.d/70-moondrop.rules"
+  install -Dm644 packaging/hub-moon.desktop  "$pkgdir/usr/share/applications/hub-moon.desktop"
+  install -Dm644 packaging/hub-moon.svg      "$pkgdir/usr/share/icons/hicolor/scalable/apps/hub-moon.svg"
+  install -Dm644 LICENSE                      "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

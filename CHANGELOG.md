@@ -12,6 +12,38 @@ feature set rather than a diff against a previous version.
 
 ### Added
 
+- **Packaging** — a root `pyproject.toml` makes Hub Moon a proper installable
+  package (`hub-moon` CLI + `hub-moon-gui` windowed entry points, QML shipped as
+  package data, PySide6 an optional `[gui]` extra). On top of it, `packaging/` has
+  an Arch `PKGBUILD`, a PyInstaller spec for a self-contained Windows `.exe` /
+  macOS / Linux bundle, an `nfpm.yaml` that emits both `.deb` and `.rpm` from the
+  bundle, and a `flake.nix` for Nix — all installing the `70-moondrop.rules` udev
+  rule, a `.desktop` launcher and an icon. See `packaging/README.md`. (The wheel,
+  the Arch package and the PyInstaller bundle were built and launched; nfpm/Nix are
+  provided as configs.)
+- **Desktop GUI** (`--gui`) — a PySide6 / QML window modelled on MOONDROP's own
+  Sound-Tuning Tool (the Hub web app), in three screens. It opens on a
+  **connection wizard** (a step indicator, a "Start connecting" scan, the
+  supported-products grid and a demo-mode fallback), then a top-bar nav switches
+  between the **tuner** and the **Config center**. The tuner is near-black with a
+  blue accent, the red equalized curve over a purple flat reference on a
+  normalized dB scale, a region strip, and a horizontal Filter / Gain / Frequency
+  / Q band grid beside a Global-Gain + actions column (Reset / Revert / Import /
+  Export / Write Cfg). Bands are also draggable on the graph. The Config center
+  browses the community PEQ library for the connected device (search + popularity
+  / rating / download / discussion sort, over a virtualised card grid); clicking a
+  card opens a **preview popup** that draws that config's response curve before you
+  commit, and **Apply** auditions it live — auto-headroomed so a boosty curve does
+  not clip — dropping you back in the tuner to tweak and Write Cfg. Pre-gain, a
+  preset sidebar, JSON import/export, and a live/demo status round it out. It imports
+  this file's engine rather than reimplementing the protocol — every write goes
+  through the same `write_peq_index` / validation the CLI uses — and does all HID
+  I/O on a single worker thread so a read never interleaves with a write. Edits are
+  auditioned live (DSP, not flash); "save to flash" persists. Bands the firmware's
+  Q2.30 coefficients can't hold are clamped to the same ceiling the CLI enforces,
+  from a QML port (`gui/qml/HubMoon/dsp.js`) of the biquad maths. With no DAC present
+  it opens in a demo playground. PySide6 is an optional extra (`gui/requirements.txt`),
+  lazy-imported so the CLI keeps its hidapi-only footprint. Cross-platform via Qt.
 - **Read/write control of Moondrop USB DACs over USB HID** — parametric EQ bands,
   pre-gain, global offset, active EQ profile, and firmware version, without the
   official web app. `--list`, `--info`, `--get-peq`, `--set-peq`, `--set-pregain`,

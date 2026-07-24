@@ -1,0 +1,81 @@
+name: Build Windows installer
+
+# Produces a Windows .exe (PyInstaller) and a proper installer (Inno Setup).
+# Runs on a windows-latest runner because PyInstaller is not a cross-compiler —
+# a Windows binary must be built on Windows.
+#
+#   • push a tag like v0.2.0   → builds and attaches the assets to a GitHub Release
+#   • "Run workflow" (manual)  → builds and uploads the assets as artifacts
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version string for the installer (e.g. 0.2.0)"
+        required: false
+        default: ""
+
+jobs:
+  windows:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install project + build tools
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install ".[gui]" pyinstaller
+
+      - name: Resolve version
+        id: ver
+        shell: pwsh
+        run: |
+          $inp = "${{ github.event.inputs.version }}"
+          $ref = "${{ github.ref_name }}"
+          if     ($inp)                    { $v = $inp }
+          elseif ($ref -match '^v(.+)$')   { $v = $Matches[1] }
+          else                             { $v = "0.0.0-$ref" }
+          "version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          Write-Host "Building version $v"
+
+      - name: Build the .exe (PyInstaller)
+        shell: pwsh
+        run: pyinstaller --noconfirm packaging\hub-moon.spec
+
+      - name: Build the installer (Inno Setup)
+        shell: pwsh
+        run: |
+          choco install innosetup --no-progress -y
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          & "$iscc" "/DAppVersion=${{ steps.ver.outputs.version }}" packaging\hub-moon.iss
+
+      - name: Build a portable zip
+        shell: pwsh
+        run: |
+          $v = "${{ steps.ver.outputs.version }}"
+          Compress-Archive -Path dist\hub-moon\* -DestinationPath "dist\HubMoon-$v-windows-portable.zip"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: hub-moon-windows
+          path: |
+            dist/HubMoon-Setup-*.exe
+            dist/HubMoon-*-windows-portable.zip
+          if-no-files-found: error
+
+      - name: Attach to release (tagged builds only)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/HubMoon-Setup-*.exe
+            dist/HubMoon-*-windows-portable.zip

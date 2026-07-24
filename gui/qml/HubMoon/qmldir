@@ -1,0 +1,12 @@
+module HubMoon
+singleton Theme 1.0 Theme.qml
+Sym 1.0 Sym.qml
+HubBtn 1.0 HubBtn.qml
+ComboBox 1.0 ComboBox.qml
+Stepper 1.0 Stepper.qml
+Toggle 1.0 Toggle.qml
+VSlider 1.0 VSlider.qml
+ResponseGraph 1.0 ResponseGraph.qml
+BandEditor 1.0 BandEditor.qml
+ConnectPage 1.0 ConnectPage.qml
+ConfigsPage 1.0 ConfigsPage.qml

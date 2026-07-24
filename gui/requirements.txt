@@ -1,0 +1,4 @@
+# Desktop GUI only. The CLI (moondrop_control.py) needs just hidapi — this is an
+# extra you install when you want `--gui`.
+PySide6>=6.6
+hidapi>=0.14.0

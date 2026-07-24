@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Hub Moon
+GenericName=DAC Equalizer
+Comment=Parametric EQ for Moondrop USB DACs
+Exec=hub-moon-gui
+Icon=hub-moon
+Terminal=false
+Categories=AudioVideo;Audio;Mixer;
+Keywords=EQ;equalizer;DAC;Moondrop;PEQ;audio;hifi;
+StartupNotify=true
+StartupWMClass=Hub Moon

@@ -941,8 +941,23 @@ def main():
                         help="With --presets: bypass the local cache and refetch the index")
     parser.add_argument("--no-flash", action="store_true", help="Apply live to the DSP but skip the flash write (for GUI live-preview; use --save-flash to persist)")
     parser.add_argument("--save-flash", action="store_true", help="Persist the current EQ + offsets to device flash")
-    
+    parser.add_argument("--gui", action="store_true", help="Launch the desktop EQ GUI (needs PySide6)")
+
     args = parser.parse_args()
+
+    # Desktop GUI. Lazy-imported so the CLI keeps its "two dependencies, one file"
+    # promise -- PySide6 is only pulled in when someone actually asks for --gui.
+    if args.gui:
+        # let it run from any cwd: the gui package sits next to this file
+        _here = os.path.dirname(os.path.abspath(__file__))
+        if _here not in sys.path:
+            sys.path.insert(0, _here)
+        try:
+            from gui.app import main as gui_main
+        except ImportError as e:
+            print("The GUI needs PySide6:  pip install -r gui/requirements.txt\n(%s)" % e, file=sys.stderr)
+            sys.exit(1)
+        sys.exit(gui_main())
 
     # Registry dump. Deliberately the FIRST thing handled and deliberately
     # hardware-free: this exists so a front-end can recognise a DAC from the USB

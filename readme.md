@@ -83,6 +83,42 @@ That toggle is not reflected in any register we could find: sweeping every reada
 
 For the record, the official app assumes otherwise — it gates PEQ on `readEQIndex() === peqIndex` (7 for this device) — which does not describe firmware 1.5. That check would report "not in PEQ mode" even while custom EQ is plainly working.
 
+## Desktop GUI
+
+There's a desktop app too — a proper window modelled on MOONDROP's own Sound-Tuning
+Tool (the [Hub](https://hub.moondroplab.tech) web app): near-black, blue accent,
+the red equalized curve over the purple flat line. It opens on a **connection
+screen** (press *Start connecting* to scan, or drop into demo mode), then a top-bar
+nav switches between the **tuner** — a response graph over a Filter / Gain /
+Frequency / Q band grid — and the **Config center**, which browses the community
+library. It drives this same file — the GUI imports `moondrop_control` and calls
+the hardware-tested engine rather than reimplementing the protocol, so anything it
+writes went through the same validation the CLI uses.
+
+```bash
+pip install -r gui/requirements.txt     # adds PySide6 (Qt); the CLI itself still needs only hidapi
+python3 moondrop_control.py --gui
+```
+
+- Set each band with the **filter dropdown**, the **gain slider**, and the **frequency /
+  Q steppers** — or **drag** a band on the graph and **scroll** it for Q. The curve
+  redraws live and folds in pre-gain (toggle the eye by Pre Gain to show/hide it).
+- Edits are **auditioned live** (written to the DSP, not flash) so you hear them as you
+  tune; **Write Cfg** persists to flash. **Revert** re-reads the device; **Reset** flattens.
+- A band the firmware's Q2.30 coefficients can't represent is **clamped**, and its gain
+  turns amber — the same ceiling the CLI enforces, from a port of the same maths.
+- Starting-point **presets**, plus JSON **import / export**.
+- The **Config center** browses [Hub](https://hub.moondroplab.tech)'s community PEQ
+  library for your device — search, sort by popularity / rating / downloads /
+  discussion, and **click any card to preview its response curve** in a popup.
+  **Apply** auditions it live (auto-headroomed so a loud curve won't clip) and
+  lands back in the tuner so you can tweak and **Write Cfg**.
+- **No DAC connected?** It opens in a demo mode — a working playground curve — so you can
+  see the interface without hardware. Writes light up once a device is found.
+
+Cross-platform via Qt (Linux/macOS/Windows). PySide6 is an optional extra: the plain CLI
+keeps its two-dependencies-one-file footprint and only pulls in Qt when you pass `--gui`.
+
 ## Usage
 
 The first connected supported device is used automatically.
@@ -94,7 +130,10 @@ python3 moondrop_control.py --info            # firmware, active profile, gains
 python3 moondrop_control.py --get-peq         # dump all PEQ slots
 python3 moondrop_control.py --registry        # device registry as JSON; opens no device
 
-# Interactive tuning panel
+# Desktop EQ GUI (needs PySide6)
+python3 moondrop_control.py --gui
+
+# Interactive terminal tuning panel
 python3 moondrop_control.py -i
 
 # Gains (dB)

@@ -1,0 +1,44 @@
+# Maintainer: MiyukiVigil
+#
+# Release recipe — needs a pushed v$pkgver tag on GitHub. To build/install from
+# your working copy without tagging, use PKGBUILD.local instead:
+#   makepkg -si -p PKGBUILD.local
+#
+# The udev rule / desktop file / icon are shipped as LOCAL sources next to this
+# PKGBUILD (the usual AUR layout), so they don't depend on being inside the
+# GitHub source tarball. Keep them alongside the PKGBUILD in the AUR repo.
+pkgname=hub-moon
+pkgver=0.2.0
+pkgrel=1
+pkgdesc="Parametric EQ control for Moondrop USB DACs — CLI + Qt desktop GUI"
+arch=('any')
+url="https://github.com/MiyukiVigil/Hub_Moon"
+license=('MIT')
+depends=('python' 'python-hidapi' 'pyside6')
+makedepends=('python-build' 'python-installer' 'python-wheel' 'python-setuptools')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz"
+        "70-moondrop.rules"
+        "hub-moon.desktop"
+        "hub-moon.svg")
+# code tarball changes per release → regenerate with `updpkgsums` after tagging.
+# the three local files are stable, hence SKIP.
+sha256sums=('SKIP'
+            'SKIP'
+            'SKIP'
+            'SKIP')
+
+build() {
+  cd "$srcdir/Hub_Moon-$pkgver"
+  python -m build --wheel --no-isolation
+}
+
+package() {
+  cd "$srcdir/Hub_Moon-$pkgver"
+  python -m installer --destdir="$pkgdir" dist/*.whl
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+
+  # local sources (copied into $srcdir by makepkg)
+  install -Dm644 "$srcdir/70-moondrop.rules" "$pkgdir/usr/lib/udev/rules.d/70-moondrop.rules"
+  install -Dm644 "$srcdir/hub-moon.desktop"  "$pkgdir/usr/share/applications/hub-moon.desktop"
+  install -Dm644 "$srcdir/hub-moon.svg"      "$pkgdir/usr/share/icons/hicolor/scalable/apps/hub-moon.svg"
+}

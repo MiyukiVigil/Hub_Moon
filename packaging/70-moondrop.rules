@@ -1,0 +1,9 @@
+# Hub Moon — let the logged-in user read/write Moondrop DAC HID nodes without root.
+#
+# `uaccess` hands the device to whoever owns the active login session (the modern,
+# seat-aware way — no world-writable node). MODE=0660 is a fallback for systems
+# whose logind build doesn't apply uaccess to hidraw.
+#
+# Install to /usr/lib/udev/rules.d/ (packages) or /etc/udev/rules.d/ (by hand), then:
+#   sudo udevadm control --reload-rules && sudo udevadm trigger
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="35d8", TAG+="uaccess", MODE="0660"

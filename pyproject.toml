@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hub-moon"
+version = "0.2.0"
+description = "Control the parametric EQ on Moondrop USB DACs over USB HID — CLI + desktop GUI."
+readme = "readme.md"
+requires-python = ">=3.9"
+license = { file = "LICENSE" }
+authors = [{ name = "MiyukiVigil" }]
+keywords = ["moondrop", "dac", "equalizer", "peq", "usb-hid", "audio"]
+dependencies = ["hidapi>=0.14.0"]
+
+# The GUI is an optional extra so the CLI keeps its hidapi-only footprint.
+#   pip install hub-moon           → CLI only
+#   pip install "hub-moon[gui]"    → CLI + desktop GUI
+[project.optional-dependencies]
+gui = ["PySide6>=6.6"]
+
+[project.urls]
+Homepage = "https://hubmoon.miyukivigil.tech"
+Source = "https://github.com/MiyukiVigil/Hub_Moon"
+
+[project.scripts]
+# console entry: the full CLI (and `hub-moon --gui`)
+hub-moon = "moondrop_control:main"
+
+[project.gui-scripts]
+# windowed entry (no console on Windows): straight to the GUI
+hub-moon-gui = "gui.app:main"
+
+[tool.setuptools]
+# keep the CLI a single top-level module, exactly as it ships today
+py-modules = ["moondrop_control"]
+
+[tool.setuptools.packages.find]
+include = ["gui*"]
+
+# ship the QML tree as data alongside the gui package
+[tool.setuptools.package-data]
+gui = [
+  "qml/*.qml",
+  "qml/HubMoon/*.qml",
+  "qml/HubMoon/*.js",
+  "qml/HubMoon/qmldir",
+]
