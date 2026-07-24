@@ -153,11 +153,34 @@ HUB_FILTER_TYPES = {
 }
 
 
+_HUB_SSL_CTX = None
+
+
+def _hub_ssl_context():
+    """A TLS context with a real CA bundle.
+
+    macOS Python — and *any* PyInstaller-frozen build — usually can't find a system
+    trust store, so HTTPS fails with CERTIFICATE_VERIFY_FAILED / "unable to get local
+    issuer certificate". certifi ships Mozilla's CA bundle and fixes that on every
+    platform; if it isn't installed we fall back to the stdlib default (fine on Linux,
+    where OpenSSL finds the distro's CA store on its own).
+    """
+    global _HUB_SSL_CTX
+    if _HUB_SSL_CTX is None:
+        import ssl
+        try:
+            import certifi
+            _HUB_SSL_CTX = ssl.create_default_context(cafile=certifi.where())
+        except Exception:
+            _HUB_SSL_CTX = ssl.create_default_context()
+    return _HUB_SSL_CTX
+
+
 def _hub_get(url, timeout=20):
     """One unauthenticated GET. Raises urllib errors; callers turn them into JSON."""
     import urllib.request
     req = urllib.request.Request(url, headers={"User-Agent": HUB_UA})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
+    with urllib.request.urlopen(req, timeout=timeout, context=_hub_ssl_context()) as r:
         return r.read().decode("utf-8", "replace")
 
 

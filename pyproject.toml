@@ -11,9 +11,11 @@ requires-python = ">=3.9"
 license = { file = "LICENSE" }
 authors = [{ name = "MiyukiVigil" }]
 keywords = ["moondrop", "dac", "equalizer", "peq", "usb-hid", "audio"]
-dependencies = ["hidapi>=0.14.0"]
+# hidapi drives the DAC; certifi gives the community-library HTTPS calls a CA
+# bundle that works even where the OS trust store isn't found (macOS / frozen apps).
+dependencies = ["hidapi>=0.14.0", "certifi"]
 
-# The GUI is an optional extra so the CLI keeps its hidapi-only footprint.
+# The GUI is an optional extra so the CLI keeps its light footprint.
 #   pip install hub-moon           → CLI only
 #   pip install "hub-moon[gui]"    → CLI + desktop GUI
 [project.optional-dependencies]
