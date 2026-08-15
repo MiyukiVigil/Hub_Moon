@@ -85,39 +85,44 @@ For the record, the official app assumes otherwise — it gates PEQ on `readEQIn
 
 ## Desktop GUI
 
-There's a desktop app too — a proper window modelled on MOONDROP's own Sound-Tuning
-Tool (the [Hub](https://hub.moondroplab.tech) web app): near-black, blue accent,
-the red equalized curve over the purple flat line. It opens on a **connection
-screen** (press *Start connecting* to scan, or drop into demo mode), then a top-bar
-nav switches between the **tuner** — a response graph over a Filter / Gain /
-Frequency / Q band grid — and the **Config center**, which browses the community
-library. It drives this same file — the GUI imports `moondrop_control` and calls
-the hardware-tested engine rather than reimplementing the protocol, so anything it
-writes went through the same validation the CLI uses.
+There's a desktop app too — a native window, not a web view: one screen with the
+control row, the presets, the response graph and all eight bands visible at once.
+Hub Moon's own look, a warm rose on a light ground, rather than a copy of the
+vendor's near-black. It drives this same file — the GUI imports `moondrop_control`
+and calls the hardware-tested engine rather than reimplementing the protocol, so
+anything it writes went through the same validation the CLI uses.
 
 ```bash
-pip install -r gui/requirements.txt     # adds PySide6 (Qt); the CLI itself still needs only hidapi
+pip install -r gui/requirements.txt     # adds slint; the CLI itself still needs only hidapi
 python3 moondrop_control.py --gui
 ```
 
-- Set each band with the **filter dropdown**, the **gain slider**, and the **frequency /
-  Q steppers** — or **drag** a band on the graph and **scroll** it for Q. The curve
-  redraws live and folds in pre-gain (toggle the eye by Pre Gain to show/hide it).
+- **Drag** a numbered handle on the graph to move that band, and **scroll** over the
+  plot to widen or narrow the selected one. Each band also has a card of its own: a
+  filter-type button (click cycles forward, right-click back), a vertical gain slider,
+  and frequency / Q steppers.
+- Named spectrum regions — SUB through AIR — are tinted behind the curve, and each band
+  card carries the tag of the region its handle sits in.
+- Three traces: the flat reference, the **equalized** curve, and a dashed
+  **+ pre-gain (output)** curve — what actually leaves the DAC once headroom is paid.
+  When the curve would clip, the pre-gain card turns amber and offers a one-tap
+  **match**, which drops pre-gain to exactly the headroom the curve needs.
 - Edits are **auditioned live** (written to the DSP, not flash) so you hear them as you
-  tune; **Write Cfg** persists to flash. **Revert** re-reads the device; **Reset** flattens.
-- A band the firmware's Q2.30 coefficients can't represent is **clamped**, and its gain
-  turns amber — the same ceiling the CLI enforces, from a port of the same maths.
-- Starting-point **presets**, plus JSON **import / export**.
-- The **Config center** browses [Hub](https://hub.moondroplab.tech)'s community PEQ
-  library for your device — search, sort by popularity / rating / downloads /
-  discussion, and **click any card to preview its response curve** in a popup.
-  **Apply** auditions it live (auto-headroomed so a loud curve won't clip) and
-  lands back in the tuner so you can tweak and **Write Cfg**.
+  tune; **save to flash** persists. **Revert** goes back to the last saved state — a
+  re-read can't do that, since the DSP only ever reports what was written to it last.
+- A band the firmware's Q2.30 coefficients can't represent is **clamped**, and its card
+  tags itself `limit` — the same ceiling the CLI enforces, computed by the same code.
+- Eight starting-point **presets**, JSON **import / export**, and a built-in
+  **how to tune** guide.
+- **community** browses [Hub](https://hub.moondroplab.tech)'s PEQ library for your
+  device — search it locally, and applying one auditions it live, auto-headroomed so a
+  loud curve won't clip.
 - **No DAC connected?** It opens in a demo mode — a working playground curve — so you can
   see the interface without hardware. Writes light up once a device is found.
 
-Cross-platform via Qt (Linux/macOS/Windows). PySide6 is an optional extra: the plain CLI
-keeps its two-dependencies-one-file footprint and only pulls in Qt when you pass `--gui`.
+Cross-platform via [Slint](https://slint.dev) (Linux/macOS/Windows), compiled to native
+widgets — no browser, no web view. It's an optional extra: the plain CLI keeps its
+two-dependencies-one-file footprint and only pulls in the toolkit when you pass `--gui`.
 
 ## Usage
 
@@ -130,7 +135,7 @@ python3 moondrop_control.py --info            # firmware, active profile, gains
 python3 moondrop_control.py --get-peq         # dump all PEQ slots
 python3 moondrop_control.py --registry        # device registry as JSON; opens no device
 
-# Desktop EQ GUI (needs PySide6)
+# Desktop EQ GUI (needs slint)
 python3 moondrop_control.py --gui
 
 # Interactive terminal tuning panel
@@ -221,6 +226,13 @@ Q2.30 spans only [-2, 2), and some otherwise reasonable filters need coefficient
 
 The official web app allows up to +12 dB and does **not** clamp. Its JS packs coefficients with bitwise ops, which wrap modulo 2³² instead of failing, so past these limits it silently programs a filter unrelated to the curve it draws — a +6 dB shelf's `b1` wraps from -2.303 to +1.697, flipping sign. This tool rejects rather than reproduce that. What the firmware would actually do with a wrapped coefficient is untested.
 
+## Thanks
+
+- **[AndrewYii](https://github.com/AndrewYii)** — tested Hub Moon on **Windows 11**,
+  which is the only reason the Windows build is known to work at all. Everything else
+  here was developed and verified on Linux against a single DAWN PRO2, so a second pair
+  of hands on a second platform is worth more than it sounds.
+
 ## Disclaimer
 
 Unofficial and not affiliated with Moondrop. The USB HID protocol here was reverse engineered from the official web app with the assistance of AI. The coefficient packing and PEQ byte layout have since been checked against that app's own JavaScript and match it exactly, but the command set is still inferred from observed behaviour rather than any documented spec — treat it as a best-effort reconstruction that works on the hardware it was tested against, not as authoritative.
@@ -237,6 +249,10 @@ Flash persistence was confirmed across a physical unplug/replug: the flashed con
 
 `--presets` / `--preset` were verified against the live Moondrop Hub library (6,911 presets for the DAWN PRO2's device family), and both are strace-confirmed to open zero `/dev/hidraw` handles — same as `--registry`.
 
-Not yet exercised on hardware: the interactive panel (`-i`), and **every device other than the DAWN PRO2**.
+The desktop GUI was exercised on the same DAWN PRO2: device reads, live band writes through the GUI's own code path with a verified read-back, drag-to-edit on the graph, presets, JSON import/export, the community library, and both graph views. It was also run under a fontconfig sandbox with Material Symbols removed, to confirm the icons render without any font installed.
+
+On **Windows 11**, the packaged build was tested by [AndrewYii](https://github.com/AndrewYii) — see [Thanks](#thanks).
+
+Not yet exercised on hardware: the interactive panel (`-i`), macOS, and **every device other than the DAWN PRO2**.
 
 It writes to your DAC's flash. Export a backup with `--export-json` before experimenting.

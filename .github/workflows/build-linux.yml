@@ -18,7 +18,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version string (e.g. 0.2.0)"
+        description: "Version string (e.g. 1.0.0)"
         required: false
         default: ""
 

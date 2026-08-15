@@ -2,14 +2,14 @@
 ;
 ; Build it in two steps, ON WINDOWS:
 ;   pyinstaller packaging\hub-moon.spec           ->  dist\hub-moon\hub-moon.exe
-;   iscc /DAppVersion=0.2.0 packaging\hub-moon.iss ->  dist\HubMoon-Setup-0.2.0.exe
+;   iscc /DAppVersion=1.0.0 packaging\hub-moon.iss ->  dist\HubMoon-Setup-1.0.0.exe
 ;
 ; (The GitHub Actions workflow does both on a windows-latest runner.)
 ;
 ; Defines can be overridden on the iscc command line with /D<name>=<value>.
 
 #ifndef AppVersion
-  #define AppVersion "0.2.0"
+  #define AppVersion "1.0.0"
 #endif
 #ifndef SourceDir
   #define SourceDir "..\dist\hub-moon"
@@ -43,7 +43,7 @@ UninstallDisplayIcon={app}\{#MyAppExeName}
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
-; PySide6 / Qt6 is 64-bit only
+; the slint wheels are 64-bit only
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 
@@ -54,7 +54,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 
 [Files]
-; the whole PyInstaller onedir bundle (exe + Qt runtime + QML tree)
+; the whole PyInstaller onedir bundle (exe + slint runtime + .slint sources)
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
 
 [Icons]

@@ -19,3 +19,13 @@ site
 /packaging/src/
 /packaging/pkg/
 /packaging/*.pkg.tar.*
+
+# wrangler files
+.wrangler
+.dev.vars*
+!.dev.vars.example
+.env*
+!.env.example
+
+# icon-build tool cache (the 10 MB upstream Material Symbols font)
+/tools/.cache/

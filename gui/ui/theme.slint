@@ -1,0 +1,150 @@
+// Hub Moon's own look.
+//
+// The QML theme this replaces was deliberately a copy of MOONDROP's Sound-Tuning Tool,
+// down to its near-black and its blue. That made the app read as a clone of the vendor's,
+// which it is not — it is a different tool that happens to drive the same silicon.
+//
+// So: a warm rose. Light by default, on a soft mauve-grey ground; dark when asked for,
+// on a near-black that keeps the plum in it rather than going neutral. It is nobody
+// else's brand colour, it suits a device whose whole job is tone, and it leaves the
+// graph's conventional hues alone — a violet reference line under an equalised curve is
+// what every EQ draws, and a user who has seen one graph should not have to relearn this
+// one.
+//
+// Dark is re-picked, not inverted. Inverting a palette gives you the right lightnesses
+// and the wrong saturations: the accent that reads as a considered rose on paper reads
+// as a bruise on black. So every value below is chosen twice, and the two halves are
+// meant to be read side by side.
+// One accent, chosen from a few. Each entry carries its own light and dark halves for
+// the same reason the palette does: a hue that reads as considered on paper reads as a
+// bruise on black, so both ends are picked rather than derived.
+//
+// `curve` rides along with the accent. The other two traces do not — the violet
+// reference and the red output warning are learned colours, and a user who has seen one
+// EQ graph should not have to relearn this one because they liked the green.
+export struct Accent {
+    name: string,
+    base: color,   soft: color,   line: color,   ink: color,   curve: color,
+    base-d: color, soft-d: color, line-d: color, ink-d: color, curve-d: color,
+}
+
+export global Accents {
+    out property <[Accent]> all: [
+        { name: "Rose",
+          base: #8a4a5f, soft: #f0e2e7, line: #d8bcc6, ink: #fdf8fa, curve: #5a3040,
+          base-d: #e08aa6, soft-d: #3a2733, line-d: #8c5468, ink-d: #24121a, curve-d: #f2a3b6 },
+        { name: "Ember",
+          base: #a8452f, soft: #f6e3dd, line: #e0b6a8, ink: #fff8f5, curve: #5f2a1e,
+          base-d: #ef8a72, soft-d: #3d2620, line-d: #965242, ink-d: #2a110b, curve-d: #f7ad99 },
+        { name: "Amber",
+          base: #96661d, soft: #f5ebd6, line: #ddc496, ink: #fffaf0, curve: #56400f,
+          base-d: #dfb057, soft-d: #382d15, line-d: #8d6f34, ink-d: #241a05, curve-d: #f0cb86 },
+        { name: "Moss",
+          base: #3f7350, soft: #e0eee4, line: #b1d2ba, ink: #f6fbf7, curve: #26482f,
+          base-d: #74c48d, soft-d: #1f3327, line-d: #47795a, ink-d: #0c2113, curve-d: #9ddcaf },
+        { name: "Ocean",
+          base: #2c6685, soft: #dde9f1, line: #a9c8da, ink: #f5fafd, curve: #1a3f53,
+          base-d: #6db6dc, soft-d: #1c2f3b, line-d: #3f7291, ink-d: #06202c, curve-d: #97cfea },
+        { name: "Iris",
+          base: #63479b, soft: #e7e1f3, line: #c0b0dd, ink: #faf8fd, curve: #3c2a61,
+          base-d: #b092e6, soft-d: #2c2542, line-d: #6a55a0, ink-d: #1a1030, curve-d: #c8b2f0 },
+    ];
+}
+
+export global Theme {
+    // Both flipped by MainWindow, which gets them from the saved settings. Everything
+    // below is a binding on them, so one write repaints the whole app.
+    in-out property <bool> dark: false;
+    in-out property <int> accent-index: 0;
+
+    out property <Accent> ac: Accents.all[Theme.accent-index];
+
+    // ── surfaces: page → cards → wells ──
+    out property <color> bg:     root.dark ? #171216 : #efe9eb;   // the page itself
+    out property <color> card:   root.dark ? #1f181d : #fbf8f9;   // panels, the plot
+    out property <color> card-2: root.dark ? #272029 : #f3edef;   // inputs, hover
+    out property <color> well:   root.dark ? #322833 : #e8dfe3;   // slider grooves
+
+    out property <color> line:   root.dark ? #342b34 : #e3d8dc;   // hairlines
+    out property <color> line-2: root.dark ? #4a3d47 : #d0c0c7;   // borders that must be seen
+
+    // ── ink ──
+    out property <color> text:  root.dark ? #f3e8ee : #2b2126;
+    out property <color> sub:   root.dark ? #b9a5b0 : #6f5f66;
+    out property <color> faint: root.dark ? #7f6d78 : #a2929a;
+
+    // ── the one accent, from the table above ──
+    // Light gets a deep hue that holds up as a fill; dark needs it lifted well past
+    // that or it disappears into the ground.
+    out property <color> accent:      root.dark ? root.ac.base-d : root.ac.base;
+    out property <color> accent-ink:  root.dark ? root.ac.ink-d  : root.ac.ink;    // text ON the accent
+    out property <color> accent-soft: root.dark ? root.ac.soft-d : root.ac.soft;   // selected rows, active pills
+    out property <color> accent-line: root.dark ? root.ac.line-d : root.ac.line;
+
+    // ── semantics ──
+    out property <color> good:      root.dark ? #63c48d : #4c9a6a;
+    out property <color> good-soft: root.dark ? #1d3227 : #e2f0e7;
+    out property <color> warn:      root.dark ? #dfa94c : #b8802f;
+    out property <color> warn-soft: root.dark ? #38290f : #f6ecd9;
+    out property <color> bad:       root.dark ? #ec7c72 : #c0483f;
+    out property <color> bad-soft:  root.dark ? #3a1e1c : #f7e3e1;
+
+    // ── the traces ──
+    out property <color> flat:    root.dark ? #b98ee2 : #a679d4;   // the reference
+    out property <color> curve:   root.dark ? root.ac.curve-d : root.ac.curve;   // the equalised response
+    out property <color> pregain: root.dark ? #ff8478 : #d9564c;   // output level, drawn dashed
+    // The readout view draws one curve, and it is red there rather than plum — that is
+    // how the vendor's chart draws it, and the readout exists to be read the same way.
+    out property <color> readout: root.dark ? #ef6a63 : #a81f1f;
+
+    // Every machine-readable value — dB, Hz, Q, slot numbers, column captions — is set
+    // in mono, because a number that changes width between frames is the fastest way to
+    // make an instrument look like a web page. One family, named once.
+    out property <string> mono: "DejaVu Sans Mono";
+
+    // ── geometry ──
+    // Generous radii throughout. This is a warm, soft interface by intent — the
+    // hard-cornered instrument look belongs to a different kind of tool, and half a
+    // radius reads as an accident rather than a decision.
+    out property <length> r-sm: 10px;
+    out property <length> r-md: 14px;
+    out property <length> r-lg: 18px;
+
+    // Motion. One duration and one curve for everything that is a state change, so the
+    // whole app feels like one object rather than a dozen separately tuned widgets.
+    out property <duration> quick: 110ms;
+    out property <duration> settle: 220ms;
+}
+
+// The spectrum regions drawn behind the curve. Names and boundaries are the ones the
+// audio world already uses, so a band card can say "UPPER-MID" and mean the same thing
+// as the tint under its handle.
+//
+// `at`/`to` are positions on the log axis, not frequencies: (log10(f) - log10(20)) / 3,
+// the same mapping the curve is sampled on. They are written out to five places rather
+// than eyeballed — the earlier hand-picked values put the PRESENCE/AIR edge at 7.9 kHz
+// while every label and band tag called it 6 kHz. Boundaries in Hz:
+// 20 · 60 · 250 · 500 · 2k · 4k · 6k · 20k, and `REGION_HZ` in bridge.py is the same list.
+// Both tints ride on the struct rather than the table being duplicated per theme: a
+// wash that is a hint on white is invisible on black, and one that reads on black is a
+// stain on white — but the boundaries are the same boundaries, and there is no version
+// of this where they should be able to drift apart.
+export struct Region {
+    at: float,
+    to: float,
+    label: string,
+    tint: color,
+    tint-dark: color,
+}
+
+export global Regions {
+    out property <[Region]> all: [
+        { at: 0.00000, to: 0.15904, label: "SUB",       tint: #6f8ed422, tint-dark: #8fa8e416 },
+        { at: 0.15904, to: 0.36564, label: "BASS",      tint: #6f8ed416, tint-dark: #8fa8e410 },
+        { at: 0.36564, to: 0.46598, label: "LOW-MID",   tint: #5fa8b81a, tint-dark: #7fc4d414 },
+        { at: 0.46598, to: 0.66667, label: "MID",       tint: #5fb89a1a, tint-dark: #7fd4b614 },
+        { at: 0.66667, to: 0.76701, label: "UPPER-MID", tint: #6fbe8a1e, tint-dark: #8fda9e16 },
+        { at: 0.76701, to: 0.82571, label: "PRESENCE",  tint: #9dc06c1e, tint-dark: #b8dc8016 },
+        { at: 0.82571, to: 1.00000, label: "AIR",       tint: #c2b06022, tint-dark: #dccc7418 },
+    ];
+}

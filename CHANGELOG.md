@@ -5,22 +5,22 @@ All notable changes to **moondrop_control.py** are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.0.0] - 2026-08-15
 
-Initial release — nothing is tagged yet, so everything below is the starting
-feature set rather than a diff against a previous version.
+First tagged release, so everything below is the starting feature set rather than a
+diff against a previous version.
 
 ### Added
 
 - **Packaging** — a root `pyproject.toml` makes Hub Moon a proper installable
-  package (`hub-moon` CLI + `hub-moon-gui` windowed entry points, QML shipped as
-  package data, PySide6 an optional `[gui]` extra). On top of it, `packaging/`
-  builds an installer for every platform from one PyInstaller spec:
+  package (`hub-moon` CLI + `hub-moon-gui` windowed entry points, the `.slint`
+  sources shipped as package data, slint an optional `[gui]` extra). On top of it,
+  `packaging/` builds an installer for every platform from one PyInstaller spec:
   - **Windows** — a self-contained `.exe` plus an **Inno Setup** installer
     (`hub-moon.iss`, Start-menu/uninstaller) and a portable zip; `.ico` icon.
   - **macOS** — a `Hub Moon.app` (`BUNDLE` step, `.icns` icon) packaged as a
-    drag-to-Applications **`.dmg`** for both Apple Silicon and Intel. Ad-hoc
-    signed, not notarized (Gatekeeper needs a right-click → Open on first launch).
+    drag-to-Applications **`.dmg`** for Apple Silicon. Ad-hoc signed, not notarized
+    (Gatekeeper needs a right-click → Open on first launch).
   - **Linux** — a portable tarball, a single-file **AppImage** (`build-appimage.sh`),
     and **`.deb`** + **`.rpm`** via `nfpm`, plus an Arch `PKGBUILD` and a `flake.nix`
     for Nix. All install the `70-moondrop.rules` udev rule, a `.desktop` launcher
@@ -31,29 +31,35 @@ feature set rather than a diff against a previous version.
   tagged Release. See `packaging/README.md`. (Verified on this Linux box: the
   wheel, Arch package, PyInstaller bundle, AppImage and `.deb`. Windows/macOS/Nix
   use the same spec/configs but need their own OS.)
-- **Desktop GUI** (`--gui`) — a PySide6 / QML window modelled on MOONDROP's own
-  Sound-Tuning Tool (the Hub web app), in three screens. It opens on a
-  **connection wizard** (a step indicator, a "Start connecting" scan, the
-  supported-products grid and a demo-mode fallback), then a top-bar nav switches
-  between the **tuner** and the **Config center**. The tuner is near-black with a
-  blue accent, the red equalized curve over a purple flat reference on a
-  normalized dB scale, a region strip, and a horizontal Filter / Gain / Frequency
-  / Q band grid beside a Global-Gain + actions column (Reset / Revert / Import /
-  Export / Write Cfg). Bands are also draggable on the graph. The Config center
-  browses the community PEQ library for the connected device (search + popularity
-  / rating / download / discussion sort, over a virtualised card grid); clicking a
-  card opens a **preview popup** that draws that config's response curve before you
-  commit, and **Apply** auditions it live — auto-headroomed so a boosty curve does
-  not clip — dropping you back in the tuner to tweak and Write Cfg. Pre-gain, a
-  preset sidebar, JSON import/export, and a live/demo status round it out. It imports
-  this file's engine rather than reimplementing the protocol — every write goes
-  through the same `write_peq_index` / validation the CLI uses — and does all HID
-  I/O on a single worker thread so a read never interleaves with a write. Edits are
-  auditioned live (DSP, not flash); "save to flash" persists. Bands the firmware's
-  Q2.30 coefficients can't hold are clamped to the same ceiling the CLI enforces,
-  from a QML port (`gui/qml/HubMoon/dsp.js`) of the biquad maths. With no DAC present
-  it opens in a demo playground. PySide6 is an optional extra (`gui/requirements.txt`),
-  lazy-imported so the CLI keeps its hidapi-only footprint. Cross-platform via Qt.
+- **Desktop GUI** (`--gui`) — a native window built with [Slint](https://slint.dev),
+  in Hub Moon's own look: a warm rose on a light ground, or a dark palette re-picked
+  rather than inverted, with six accents to choose from. One screen shows everything —
+  device slot, pre-gain and global offset; eight preset pills; the response graph; all
+  eight bands; and the actions. The graph carries named spectrum regions (SUB → AIR)
+  behind a numbered, draggable handle per band, with three traces: a flat reference,
+  the equalised curve, and a dashed `+ pre-gain (output)` curve showing what actually
+  leaves the DAC. A second graph view drops the handles for the vendor chart's framing
+  — one curve, normalised to a 60 dB reference. Drag a handle to move a band, scroll to
+  change its Q, or use the band cards below: filter type, a gain fader, and frequency /
+  Q steppers.
+
+  **community** browses the Moondrop Hub library for the connected device; clicking a
+  config opens a preview of its response curve, and nothing is written until you apply.
+  There is a first-run welcome screen, a built-in tuning guide, JSON import/export via
+  the desktop's own file chooser, and keyboard shortcuts (`esc` closes, `ctrl+S` saves
+  to flash).
+
+  It imports this file's engine rather than reimplementing the protocol — every write
+  goes through the same `write_peq_index` and the same Q2.30 ceiling the CLI enforces,
+  and a band the firmware cannot represent is clamped with its card tagged `limit`. All
+  HID I/O runs on one worker thread so a read never interleaves with a write; the
+  community library and the file dialogs get threads of their own. Edits are auditioned
+  live on the DSP and only `save to flash` persists, while `revert` restores the last
+  saved state — which a re-read cannot do, since the DSP reports whatever was written to
+  it last. Icons are vector outlines generated from Material Symbols by
+  `tools/build-icons.py`, so no font ships and none has to be found at runtime. With no
+  DAC present it opens on a demo curve you can play with. slint is an optional extra
+  (`gui/requirements.txt`), lazy-imported so the CLI keeps its hidapi-only footprint.
 - **Read/write control of Moondrop USB DACs over USB HID** — parametric EQ bands,
   pre-gain, global offset, active EQ profile, and firmware version, without the
   official web app. `--list`, `--info`, `--get-peq`, `--set-peq`, `--set-pregain`,

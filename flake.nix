@@ -1,5 +1,5 @@
 {
-  description = "Hub Moon — parametric EQ control for Moondrop USB DACs (CLI + Qt GUI)";
+  description = "Hub Moon — parametric EQ control for Moondrop USB DACs (CLI + native GUI)";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
@@ -12,18 +12,18 @@
       packages = forAll (pkgs: {
         default = pkgs.python3Packages.buildPythonApplication {
           pname = "hub-moon";
-          version = "0.2.0";
+          version = "1.0.0";
           src = ./.;
           pyproject = true;
 
           build-system = [ pkgs.python3Packages.setuptools ];
 
-          # runtime deps — the distro-native, non-bundled route
-          dependencies = with pkgs.python3Packages; [ hidapi pyside6 ];
-
-          # Qt apps must be wrapped so they find their QML/Qt plugins at runtime
-          nativeBuildInputs = [ pkgs.qt6.wrapQtAppsHook ];
-          dontWrapQtApps = false;
+          # runtime deps — the distro-native, non-bundled route.
+          # NOTE: nixpkgs may not carry the slint python bindings yet; if
+          # `python3Packages.slint` does not resolve, package it from PyPI (it ships
+          # manylinux wheels) or use the PyInstaller bundle instead. Unverified here —
+          # this flake has not been built since the GUI moved off Qt.
+          dependencies = with pkgs.python3Packages; [ hidapi slint ];
 
           # ship the udev rule (see nixosModules.default), desktop entry, icon
           postInstall = ''

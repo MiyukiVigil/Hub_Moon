@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hub-moon"
-version = "0.2.0"
+version = "1.0.0"
 description = "Control the parametric EQ on Moondrop USB DACs over USB HID — CLI + desktop GUI."
 readme = "readme.md"
 requires-python = ">=3.9"
@@ -19,7 +19,7 @@ dependencies = ["hidapi>=0.14.0", "certifi"]
 #   pip install hub-moon           → CLI only
 #   pip install "hub-moon[gui]"    → CLI + desktop GUI
 [project.optional-dependencies]
-gui = ["PySide6>=6.6"]
+gui = ["slint>=1.13"]
 
 [project.urls]
 Homepage = "https://hubmoon.miyukivigil.tech"
@@ -40,12 +40,10 @@ py-modules = ["moondrop_control"]
 [tool.setuptools.packages.find]
 include = ["gui*"]
 
-# ship the QML tree + bundled fonts as data alongside the gui package
+# ship the .slint sources alongside the gui package. They are compiled at startup, so
+# they are data, not build inputs. There is no font to ship: the icons are vector
+# outlines generated into ui/icons.slint by tools/build-icons.py.
 [tool.setuptools.package-data]
 gui = [
-  "qml/*.qml",
-  "qml/HubMoon/*.qml",
-  "qml/HubMoon/*.js",
-  "qml/HubMoon/qmldir",
-  "assets/fonts/*",
+  "ui/*.slint",
 ]

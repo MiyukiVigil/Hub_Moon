@@ -1,4 +1,4 @@
-# PyInstaller spec — builds a self-contained Hub Moon bundle (PySide6 + QML in).
+# PyInstaller spec — builds a self-contained Hub Moon bundle (slint in).
 #
 #   pip install pyinstaller
 #   pyinstaller packaging/hub-moon.spec            # → dist/hub-moon/  (onedir)
@@ -7,8 +7,9 @@
 # Windows .exe on Windows, the macOS .app on macOS, the Linux binary on Linux.
 # On Windows the result is dist/hub-moon/hub-moon.exe (windowed, no console).
 #
-# collect_all('PySide6') bundles the whole Qt runtime — big (~200 MB) but
-# reliable; it guarantees the QtQuick/QtQml plugins the UI needs are present.
+# collect_all('slint') bundles the toolkit's compiled extension and its data. Far
+# smaller than the Qt runtime this replaced, and there are no plugins to chase — the
+# .slint sources above are compiled at startup and the icons are vectors in them.
 import os
 import sys
 from PyInstaller.utils.hooks import collect_all
@@ -18,13 +19,12 @@ here = os.path.abspath(SPECPATH)
 repo = os.path.dirname(here)
 
 datas = [
-    (os.path.join(repo, "gui", "qml"), "gui/qml"),        # QML tree
-    (os.path.join(repo, "gui", "assets"), "gui/assets"),  # bundled fonts (icons + UI)
+    (os.path.join(repo, "gui", "ui"), "gui/ui"),   # .slint sources, compiled at startup
 ]
 binaries = []
 hiddenimports = ["hid"]                                     # hidapi's compiled module
 
-_d, _b, _h = collect_all("PySide6")
+_d, _b, _h = collect_all("slint")
 datas += _d
 binaries += _b
 hiddenimports += _h

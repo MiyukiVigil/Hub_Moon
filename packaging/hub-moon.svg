@@ -1,30 +1,43 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <!--
+    Hub Moon.
+
+    A crescent with an equaliser reading in its hollow — the same mark the app draws on
+    its welcome screen, so the thing in the dock and the thing on the screen are one
+    object. Rose on plum: Hub Moon's own colours, not the vendor's near-black and blue.
+
+    Built to survive 16px. The crescent is one heavy shape with no interior detail, and
+    the bars are 8 units wide on a 128 grid — two pixels at 32px, which still reads as a
+    reading rather than mush. Nothing here is thinner than that on purpose.
+  -->
   <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#111a29"/>
-      <stop offset="1" stop-color="#0d1420"/>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3a2b33"/>
+      <stop offset="1" stop-color="#1d1519"/>
     </linearGradient>
-    <linearGradient id="curve" x1="0" y1="0" x2="1" y2="0">
-      <stop offset="0" stop-color="#63c7dd"/>
-      <stop offset="1" stop-color="#a2e2e8"/>
+    <linearGradient id="moon" x1="0" y1="0" x2="0.4" y2="1">
+      <stop offset="0" stop-color="#f2a8bf"/>
+      <stop offset="1" stop-color="#c96a86"/>
     </linearGradient>
-    <!-- crescent: a disc with an offset disc punched out -->
-    <mask id="cres">
-      <rect x="0" y="0" width="128" height="128" fill="#000"/>
-      <circle cx="90" cy="38" r="20" fill="#fff"/>
-      <circle cx="99" cy="32" r="17" fill="#000"/>
+    <!-- the crescent: a disc with a second disc punched out of it -->
+    <mask id="crescent">
+      <rect width="128" height="128" fill="#000"/>
+      <circle cx="58" cy="64" r="44" fill="#fff"/>
+      <circle cx="88" cy="52" r="39" fill="#000"/>
     </mask>
   </defs>
 
-  <!-- deep-sea rounded tile -->
-  <rect x="4" y="4" width="120" height="120" rx="26" fill="url(#bg)" stroke="#24304a" stroke-width="2"/>
+  <rect x="4" y="4" width="120" height="120" rx="28" fill="url(#tile)"/>
+  <rect x="4" y="4" width="120" height="120" rx="28" fill="none"
+        stroke="#5b4450" stroke-width="2"/>
 
-  <!-- crescent moon, upper area -->
-  <rect x="0" y="0" width="128" height="128" fill="#a2e2e8" mask="url(#cres)"/>
+  <circle cx="58" cy="64" r="44" fill="url(#moon)" mask="url(#crescent)"/>
 
-  <!-- EQ response curve sweeping across the lower half -->
-  <path d="M18 92 C34 92 38 70 52 70 C64 70 66 90 78 90 C90 90 96 60 110 60"
-        fill="none" stroke="url(#curve)" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
-  <circle cx="52" cy="70" r="5" fill="#0d1420" stroke="#63c7dd" stroke-width="3"/>
-  <circle cx="78" cy="90" r="5" fill="#0d1420" stroke="#63c7dd" stroke-width="3"/>
+  <!-- the reading, sitting in the crescent's hollow -->
+  <g fill="#f2a8bf">
+    <rect x="56"  y="66" width="8" height="20" rx="4"/>
+    <rect x="70"  y="54" width="8" height="32" rx="4"/>
+    <rect x="84"  y="62" width="8" height="24" rx="4"/>
+    <rect x="98"  y="46" width="8" height="40" rx="4"/>
+  </g>
 </svg>

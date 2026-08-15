@@ -8,12 +8,12 @@ turns Hub Moon into an installable package with two entry points —
 | `hub-moon` | the full CLI (and `hub-moon --gui`) |
 | `hub-moon-gui` | straight to the desktop GUI (windowed) |
 
-The QML tree ships as package data, and `gui/app.py` finds it whether the app runs
+The `.slint` sources ship as package data, and `gui/app.py` finds them whether the app runs
 from source, an installed wheel, or a frozen bundle. So there are two routes:
 
-- **distro-native** (Arch, Nix) — depend on the system PySide6. Lean.
+- **distro-native** (Arch, Nix) — depend on the system slint bindings. Lean.
 - **bundled** (Windows `.exe`, macOS `.dmg`, `.deb`/`.rpm`, AppImage) — PyInstaller
-  freezes PySide6 + Qt + QML in, so there's no per-distro PySide6 dependency to chase.
+  freezes slint in, so there's no per-distro toolkit dependency to chase.
 
 Two things every package installs besides the code:
 - **`70-moondrop.rules`** — the udev rule, or the DAC won't open without `sudo`.
@@ -43,7 +43,7 @@ step can upload — the default `GITHUB_TOKEN` is read-only.
 
 ```bash
 pip install .            # CLI only
-pip install ".[gui]"     # CLI + GUI (pulls in PySide6)
+pip install ".[gui]"     # CLI + GUI (pulls in slint)
 hub-moon-gui
 ```
 
@@ -55,18 +55,18 @@ Two recipes:
 # now — build + install from your working copy (no tag needed)
 cd packaging && makepkg -si -p PKGBUILD.local
 
-# release — after you push a v0.2.0 tag to GitHub
+# release — after you push a v1.0.0 tag to GitHub
 cd packaging && updpkgsums && makepkg -si          # updpkgsums fills the source digest
 ```
 
-Both depend on `python-hidapi` and `pyside6` from the repos and install the udev rule,
+Both depend on `python-hidapi` and `python-slint` from the repos and install the udev rule,
 desktop file and icon. `PKGBUILD.local` stages a clean copy of the repo (via rsync) so
 the build never touches your working tree. The release `PKGBUILD` pulls the source from
 the GitHub tag and takes the udev/desktop/icon from the three files kept **next to the
 PKGBUILD** (standard AUR layout) — so they don't need to be inside the source tarball.
 
 > The 404 you'll get from plain `makepkg` before tagging is expected — it's trying to
-> download `v0.2.0.tar.gz`, which doesn't exist until you tag. Use `PKGBUILD.local`
+> download `v1.0.0.tar.gz`, which doesn't exist until you tag. Use `PKGBUILD.local`
 > until then.
 
 ## Windows `.exe` + installer (and macOS `.app`, bundled Linux) — `hub-moon.spec` / `hub-moon.iss`  ✅ spec verified on Linux
@@ -86,7 +86,7 @@ PyInstaller is **not** a cross-compiler — build on the OS you're targeting.
 ```powershell
 pip install ".[gui]" pyinstaller
 pyinstaller packaging\hub-moon.spec                       # → dist\hub-moon\hub-moon.exe (windowed)
-iscc /DAppVersion=0.2.0 packaging\hub-moon.iss            # → dist\HubMoon-Setup-0.2.0.exe
+iscc /DAppVersion=1.0.0 packaging\hub-moon.iss            # → dist\HubMoon-Setup-1.0.0.exe
 ```
 - `hub-moon.ico` (shipped here, generated from `hub-moon.svg`) is picked up
   automatically as the exe/taskbar/installer icon.
@@ -113,13 +113,13 @@ still done so the arm64 build runs at all.
 
 ## `.deb` + `.rpm` — `nfpm.yaml`  ✅ built + inspected on Linux
 
-nfpm makes both from one config, wrapping the PyInstaller bundle (so no PySide6
+nfpm makes both from one config, wrapping the PyInstaller bundle (so no toolkit
 dependency to name per distro). `build-linux.yml` does this automatically; by hand:
 
 ```bash
 pyinstaller packaging/hub-moon.spec                       # build the bundle first
-nfpm pkg --packager deb -f packaging/nfpm.yaml -t dist/   # → dist/hub-moon_0.2.0-1_amd64.deb
-nfpm pkg --packager rpm -f packaging/nfpm.yaml -t dist/   # → dist/hub-moon-0.2.0-1.x86_64.rpm
+nfpm pkg --packager deb -f packaging/nfpm.yaml -t dist/   # → dist/hub-moon_1.0.0-1_amd64.deb
+nfpm pkg --packager rpm -f packaging/nfpm.yaml -t dist/   # → dist/hub-moon-1.0.0-1.x86_64.rpm
 ```
 `nfpm` is a single Go binary — https://nfpm.goreleaser.com. Installs to `/opt/hub-moon`
 with a `/usr/bin/hub-moon-gui` symlink; `postinstall.sh` reloads udev.
@@ -130,22 +130,21 @@ A single portable file that runs on any modern Linux, no install:
 
 ```bash
 pyinstaller packaging/hub-moon.spec                       # build the bundle first
-packaging/build-appimage.sh 0.2.0                         # → dist/HubMoon-0.2.0-x86_64.AppImage
+packaging/build-appimage.sh 1.0.0                         # → dist/HubMoon-1.0.0-x86_64.AppImage
 ```
 Needs `appimagetool` on PATH (and `rsvg-convert`/ImageMagick for the icon). Also
 run automatically by `build-linux.yml`.
 
 ## Nix — `flake.nix`  (templated — needs Nix)
 
-Distro-native route (depends on nixpkgs `pyside6`/`hidapi`):
+Distro-native route (depends on nixpkgs `slint`/`hidapi`):
 
 ```bash
 nix build          # result/bin/hub-moon-gui
 nix run            # launches the GUI
 ```
 NixOS users can `imports = [ hub-moon.nixosModules.default ]` to get the app **and**
-the udev rule system-wide. Qt wrapping is via `qt6.wrapQtAppsHook`; if QML plugins
-aren't found at runtime, that hook is the knob to check.
+the udev rule system-wide. There is no toolkit wrapping to do — slint has no plugin path to fix up.
 
 ## Flatpak (optional, not scripted here)
 
@@ -161,9 +160,9 @@ Built and run on this machine (Arch, x86_64):
 
 - **wheel** — installed into a clean venv, GUI launched from outside the repo.
 - **Arch package** — `makepkg`, layout inspected.
-- **PyInstaller bundle** — built and launched; QML resolves from the frozen bundle,
+- **PyInstaller bundle** — built and launched; the .slint sources resolve from the frozen bundle,
   including the connect / config / preview screens.
-- **AppImage** — built with `build-appimage.sh` and launched (stays up, no QML errors).
+- **AppImage** — built with `build-appimage.sh` and launched (stays up, no load errors).
 - **`.deb`** — built with nfpm and its payload inspected (`/opt/hub-moon/hub-moon`,
   the `/usr/bin/hub-moon-gui` symlink, udev rule, desktop file, icon, `postinst`).
 - **`.rpm`** — built with nfpm (same config; not installed here — no `rpm` on this box).

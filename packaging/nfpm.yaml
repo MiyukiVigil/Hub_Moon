@@ -1,22 +1,22 @@
 # nfpm config — one file, both .deb and .rpm. It wraps the self-contained
-# PyInstaller bundle, so there's no per-distro PySide6 dependency to name.
+# PyInstaller bundle, so there's no per-distro toolkit dependency to name.
 #
 #   1. build the bundle first (on Linux):  pyinstaller packaging/hub-moon.spec
 #   2. from the repo root:
-#        nfpm pkg --packager deb -f packaging/nfpm.yaml   # → hub-moon_0.2.0_amd64.deb
-#        nfpm pkg --packager rpm -f packaging/nfpm.yaml   # → hub-moon-0.2.0.x86_64.rpm
+#        nfpm pkg --packager deb -f packaging/nfpm.yaml   # → hub-moon_1.0.0_amd64.deb
+#        nfpm pkg --packager rpm -f packaging/nfpm.yaml   # → hub-moon-1.0.0.x86_64.rpm
 #
 # nfpm: https://nfpm.goreleaser.com  (a single Go binary, no toolchain)
 name: hub-moon
 arch: amd64            # nfpm maps this to x86_64 for rpm
 platform: linux
-version: 0.2.0
+version: 1.0.0
 release: 1
 section: sound
 priority: optional
 maintainer: MiyukiVigil
 description: |
-  Parametric EQ control for Moondrop USB DACs — CLI + Qt desktop GUI.
+  Parametric EQ control for Moondrop USB DACs — CLI + native desktop GUI.
   Reads and writes the DAC's own DSP (PEQ, pre-gain, offset) over USB HID.
 vendor: MiyukiVigil
 homepage: https://github.com/MiyukiVigil/Hub_Moon
