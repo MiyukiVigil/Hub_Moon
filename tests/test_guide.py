@@ -94,14 +94,3 @@ def test_every_palette_defines_both_halves():
         assert not missing, "%s is missing %s" % (name, sorted(missing))
         assert re.search(r'note:\s*"[^"]+"', e), "%s has no note" % name
 
-
-def test_the_bridge_agrees_with_the_table_on_how_many_there_are():
-    """The clamp on the saved setting is counted from the source, so adding a palette
-    cannot silently leave it unreachable."""
-    import re
-    import os
-    from gui import bridge
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    with open(os.path.join(root, "gui", "ui", "theme.slint"), encoding="utf-8") as fh:
-        table = fh.read().split("out property <[Skin]> all:", 1)[1].split("];", 1)[0]
-    assert bridge.SKINS == len(re.findall(r"\{\s*name:", table))

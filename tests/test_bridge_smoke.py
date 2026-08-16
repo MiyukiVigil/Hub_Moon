@@ -7,13 +7,23 @@ does not exist, or a field `push()` reads but `__init__` never set is invisible 
 them and fatal on launch. Each has happened.
 """
 import gc
+import os
 
 import pytest
 
-slint = pytest.importorskip("slint", reason="the GUI extra is not installed")
+# A plain try/except rather than `pytest.importorskip`: that helper treats a module
+# which imports *and then* raises ImportError as a hard error from pytest 9.1, and
+# silencing it needs an `exc_type=` argument older pytests in the version matrix do
+# not accept. This means the same thing on every version.
+try:
+    import slint
+except ImportError:                     # the GUI extra is not installed
+    pytest.skip("slint is not installed", allow_module_level=True)
 
 from gui.bridge import Bridge          # noqa: E402 — must not import before the skip
 import moondrop_control as mc          # noqa: E402
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 OFFER = {
@@ -556,3 +566,20 @@ def test_a_stepper_can_be_undone(plotted):
     plotted.step_freq(1, 1)
     plotted.undo()
     assert plotted._band(1)["frequency"] == was
+
+
+def test_the_bridge_agrees_with_the_palette_table(bridge):
+    """The clamp on the saved setting is counted from theme.slint, so adding a palette
+    cannot silently leave it unreachable.
+
+    It lives here rather than beside the other palette test because reaching
+    `gui.bridge` means importing slint, and the version matrix deliberately does not
+    install it — the CLI standing alone is part of what that matrix proves.
+    """
+    import re
+
+    from gui import bridge as bridge_mod
+    path = os.path.join(ROOT, "gui", "ui", "theme.slint")
+    with open(path, encoding="utf-8") as fh:
+        table = fh.read().split("out property <[Skin]> all:", 1)[1].split("];", 1)[0]
+    assert bridge_mod.SKINS == len(re.findall(r"\{\s*name:", table))

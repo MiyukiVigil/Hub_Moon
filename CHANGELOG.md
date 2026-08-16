@@ -54,6 +54,13 @@ was done on.
   "Hub Moon 1.2.0b2 · from 1.2.0b2 · already installed and running", because
   `last_run_version` is set to the running version the moment the panel is first
   shown. There is no "from" when you open it yourself, so the chip is no longer drawn.
+- The version matrix went red on a test that imports `gui.bridge`, which imports
+  slint — and that matrix installs `hidapi` and `pytest` only, deliberately, because
+  the CLI standing alone is part of what it proves. The test moved to the file that is
+  gated on slint. That gate is now a plain `try/except` rather than
+  `pytest.importorskip`, which from pytest 9.1 treats an importable-but-raising module
+  as a hard error and needs an `exc_type=` argument the older pytests in the matrix do
+  not accept.
 - The new bridge tests aborted the interpreter partway through, naming a worker
   thread rather than anything in the test. A Bridge starts five workers, every row
   handed to Slint is a `PyStruct` pyo3 marks unsendable, and the cyclic collector runs

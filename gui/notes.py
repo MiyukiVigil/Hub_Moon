@@ -14,6 +14,7 @@ NOTES = {
         'A .deb, .rpm or Arch install reported itself as a loose tarball.',
         'The main window was slow, and worst when it was largest.',
         'What\'s New said "from 1.2.0b2" on 1.2.0b2.',
+        'The version matrix went red on a test that imports gui.bridge, which imports slint — and that matrix installs hidapi and pytest only, deliberately, because the CLI standing alone is part of…',
         'The new bridge tests aborted the interpreter partway through, naming a worker thread rather than anything in the test.',
         'Every button was 26px too wide, with all of it after the label.',
         "The header's three icon buttons were spaced like three unrelated things.",
@@ -21,7 +22,6 @@ NOTES = {
         'The palette picker overflowed into the row below it.',
         'The About tab closed over its own last paragraph.',
         'A/B compare. Hold compare in the action bar to hear the headphone with none of your tuning, release to hear it back.',
-        'Per-band mute. The slot number on each band card turns into a mute control on hover — click it to hear the curve without that band, click again to bring it back at the filter type it had.',
     ],
     '1.2.0b2': [
         "What's New was empty on the beta channel.",
