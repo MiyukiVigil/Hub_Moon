@@ -1,0 +1,57 @@
+{
+  "_comment": [
+    "The update manifest gui/updater.py fetches. This file is an EXAMPLE — it is not",
+    "read by anything. Generate the real one with:",
+    "",
+    "    python3 tools/build-update-manifest.py v1.1.0",
+    "",
+    "which writes packaging/update.json for a normal release, or update-beta.json for",
+    "one marked as a pre-release on GitHub. Those two belong on the two branches the",
+    "app looks at: main carries stable, test carries beta.",
+    "",
+    "Keys the app actually reads: version, date, summary, notes_url, assets. An asset",
+    "with no sha256 is refused rather than installed, so every entry must carry one.",
+    "The asset keys are fixed — see ASSET_FOR in gui/updater.py — and macOS is split",
+    "by architecture because an arm64 bundle installs fine on an Intel Mac and then",
+    "will not launch."
+  ],
+  "schema": 1,
+  "version": "1.1.0",
+  "channel": "stable",
+  "tag": "v1.1.0",
+  "date": "2026-08-16",
+  "summary": "Fixes the quit crash on Windows, adds update checking and a log file.",
+  "notes_url": "https://hubmoon.miyukivigil.tech/changelog.html#v1-1-0",
+  "assets": {
+    "windows-installer": {
+      "url": "https://github.com/MiyukiVigil/Hub_Moon/releases/download/v1.1.0/HubMoon-Setup-1.1.0.exe",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "size": 0,
+      "name": "HubMoon-Setup-1.1.0.exe"
+    },
+    "windows-portable": {
+      "url": "https://github.com/MiyukiVigil/Hub_Moon/releases/download/v1.1.0/HubMoon-1.1.0-windows-portable.zip",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "size": 0,
+      "name": "HubMoon-1.1.0-windows-portable.zip"
+    },
+    "macos-dmg-arm64": {
+      "url": "https://github.com/MiyukiVigil/Hub_Moon/releases/download/v1.1.0/HubMoon-1.1.0-macOS-arm64.dmg",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "size": 0,
+      "name": "HubMoon-1.1.0-macOS-arm64.dmg"
+    },
+    "appimage": {
+      "url": "https://github.com/MiyukiVigil/Hub_Moon/releases/download/v1.1.0/HubMoon-1.1.0-x86_64.AppImage",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "size": 0,
+      "name": "HubMoon-1.1.0-x86_64.AppImage"
+    },
+    "linux-tarball": {
+      "url": "https://github.com/MiyukiVigil/Hub_Moon/releases/download/v1.1.0/HubMoon-1.1.0-linux-x86_64.tar.gz",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "size": 0,
+      "name": "HubMoon-1.1.0-linux-x86_64.tar.gz"
+    }
+  }
+}

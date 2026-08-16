@@ -1,0 +1,41 @@
+{
+  "schema": 1,
+  "version": "1.1.0",
+  "channel": "stable",
+  "tag": "v1.1.0",
+  "date": "2026-08-16",
+  "summary": "Fixes the crash on quit, adds update checking and a log file.",
+  "notes_url": "https://hubmoon.miyukivigil.tech/changelog.html#v1-1-0",
+  "assets": {
+    "linux-tarball": {
+      "url": "https://github.com/MiyukiVigil/Hub_Moon/releases/download/v1.1.0/HubMoon-1.1.0-linux-x86_64.tar.gz",
+      "sha256": "317542bcfa2a59b1e35f43a497c9a71bd25b37fc639c32b672991d721d343570",
+      "size": 40883126,
+      "name": "HubMoon-1.1.0-linux-x86_64.tar.gz"
+    },
+    "macos-dmg-arm64": {
+      "url": "https://github.com/MiyukiVigil/Hub_Moon/releases/download/v1.1.0/HubMoon-1.1.0-macOS-arm64.dmg",
+      "sha256": "48989af7c3b22cbe25027db4595f342a8035348dcc522ba8f394d0fc40e31fb7",
+      "size": 22066459,
+      "name": "HubMoon-1.1.0-macOS-arm64.dmg"
+    },
+    "windows-portable": {
+      "url": "https://github.com/MiyukiVigil/Hub_Moon/releases/download/v1.1.0/HubMoon-1.1.0-windows-portable.zip",
+      "sha256": "cf924c80b9cc94803af9ef9694948a24b9c023133c30951ed3e1f36932507946",
+      "size": 22495820,
+      "name": "HubMoon-1.1.0-windows-portable.zip"
+    },
+    "appimage": {
+      "url": "https://github.com/MiyukiVigil/Hub_Moon/releases/download/v1.1.0/HubMoon-1.1.0-x86_64.AppImage",
+      "sha256": "9171b10ee18251e5d7546be76b48bee2516790e19893db34dda21c82f7aecee5",
+      "size": 38230520,
+      "name": "HubMoon-1.1.0-x86_64.AppImage"
+    },
+    "windows-installer": {
+      "url": "https://github.com/MiyukiVigil/Hub_Moon/releases/download/v1.1.0/HubMoon-Setup-1.1.0.exe",
+      "sha256": "9745ac4337ee4cbbc636847d7a51524d63805f6213a77e6c39547dfc7a4c0574",
+      "size": 18130692,
+      "name": "HubMoon-Setup-1.1.0.exe"
+    }
+  }
+}

@@ -13,6 +13,12 @@ result-*
 # Local device backups produced by --export-json
 *.json
 !examples/*.json
+# ...but the update manifests are source, not a backup. They are what the app fetches
+# when the website copy is unreachable, so they have to be committed: packaging/update.json
+# on main is the stable channel, packaging/update-beta.json on test is the beta one.
+!/packaging/update.json
+!/packaging/update-beta.json
+!/packaging/update.example.json
 site
 
 # makepkg build artifacts
