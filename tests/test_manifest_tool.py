@@ -100,3 +100,43 @@ def test_system_packages_are_offered_as_downloads_only(tool, name, expect):
     assert kind in U.FETCHABLE
     assert kind not in U.SELF_UPDATABLE
     assert kind not in U.APPLIERS
+
+
+# ── notes ────────────────────────────────────────────────────────────────────
+
+def test_the_release_body_is_used_when_there_is_one(tool):
+    got = tool.release_notes("- **A thing.** With an explanation after it.\n"
+                             "- Another thing.\n")
+    assert got == ["A thing. With an explanation after it.", "Another thing."]
+
+
+def test_an_empty_release_body_falls_back_to_the_changelog(tool):
+    """The normal case, and the reason this exists: the build workflows publish a
+    release with an empty body, so every manifest written before this shipped
+    `"notes": []` — and the app, asked to preview a version it has not installed,
+    correctly had nothing to show."""
+    import moondrop_control as mc
+    assert tool.release_notes("") == []
+    got = tool.changelog_notes(mc.__version__)
+    assert got, "CHANGELOG.md has no notes for the running version"
+    assert all(isinstance(n, str) and n.strip() for n in got)
+
+
+def test_the_fallback_matches_a_version_spelled_either_way(tool):
+    """A tag of v1.2.0-beta.1 and a changelog heading of 1.2.0b1 are the same release
+    written two legal ways — PEP 440 spells it one way and Arch's pkgver forbids the
+    hyphen in the other."""
+    from gui import updater as U
+    with open(os.path.join(ROOT, "CHANGELOG.md"), encoding="utf-8") as fh:
+        heads = [ln for ln in fh if ln.startswith("## [")]
+    tag = next((h.split("[")[1].split("]")[0] for h in heads if "b" in h.split("]")[0]), None)
+    if not tag:
+        pytest.skip("no pre-release in the changelog to check against")
+    assert U.parse_version(tag) == U.parse_version(tag.replace("b", "-beta."))
+    assert tool.changelog_notes(tag) == tool.changelog_notes(tag.replace("b", "-beta."))
+
+
+def test_an_unknown_version_gets_no_notes_rather_than_the_wrong_ones(tool):
+    """Showing one version's notes under another's heading is worse than showing
+    none — it is the app stating something false about what you are about to install."""
+    assert tool.changelog_notes("9.9.9") == []

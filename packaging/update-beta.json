@@ -6,7 +6,20 @@
   "date": "2026-08-16",
   "summary": "v1.2.0b3",
   "notes_url": "https://hubmoon.miyukivigil.tech/changelog.html#v1-2-0b3",
-  "notes": [],
+  "notes": [
+    "No Linux binary release could see the DAC without root.",
+    "A .deb, .rpm or Arch install reported itself as a loose tarball.",
+    "The main window was slow, and worst when it was largest.",
+    "What's New said \"from 1.2.0b2\" on 1.2.0b2.",
+    "The version matrix went red on a test that imports gui.bridge, which imports slint \u2014 and that matrix installs hidapi and pytest only, deliberately, because the CLI standing alone is part of\u2026",
+    "The new bridge tests aborted the interpreter partway through, naming a worker thread rather than anything in the test.",
+    "Every button was 26px too wide, with all of it after the label.",
+    "The header's three icon buttons were spaced like three unrelated things.",
+    "The welcome screen's four cards. They were fixed at 236px, so the fourth was cut off below about 1000px \u2014 where a tiling window manager will routinely put you.",
+    "The palette picker overflowed into the row below it.",
+    "The About tab closed over its own last paragraph.",
+    "A/B compare. Hold compare in the action bar to hear the headphone with none of your tuning, release to hear it back."
+  ],
   "assets": {
     "arch-package": {
       "url": "https://github.com/MiyukiVigil/Hub_Moon/releases/download/v1.2.0b3/hub-moon-1.2.0b3-1-x86_64.pkg.tar.zst",

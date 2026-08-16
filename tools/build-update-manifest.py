@@ -162,6 +162,45 @@ def release_notes(body):
     return out
 
 
+def changelog_notes(version):
+    """The notes for `version` out of CHANGELOG.md.
+
+    The release body is the better source when it exists, because it can say things
+    decided after the code was frozen. It usually does not exist: the build workflows
+    publish a release with an empty body, so unless somebody goes and writes one by
+    hand the manifest ships `"notes": []` — and the app's What's New, asked to preview
+    a version it has not installed, correctly has nothing to show.
+
+    Falling back to the changelog fixes that at the source rather than in the app. It
+    is the same extractor that compiles gui/notes.py, so the notes a user sees before
+    updating and the ones they see afterwards come from one text.
+    """
+    tool = os.path.join(HERE, "build-release-notes.py")
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("_notes_tool", tool)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        with open(os.path.join(ROOT, "CHANGELOG.md"), encoding="utf-8") as fh:
+            found = mod.parse(fh.read())
+    except Exception as exc:
+        print("warning: could not read CHANGELOG.md for notes (%s)" % exc, file=sys.stderr)
+        return []
+
+    # Matched as parsed versions, not as text: a tag of v1.2.0-beta.1 and a changelog
+    # heading of 1.2.0b1 are the same release spelled two legal ways.
+    try:
+        sys.path.insert(0, ROOT)
+        from gui.updater import parse_version
+    except Exception:
+        return found.get(version, [])
+    want = parse_version(version)
+    for tag, lines in found.items():
+        if parse_version(tag) == want:
+            return lines
+    return []
+
+
 def classify(name):
     for pattern, key in PATTERNS:
         if re.match(pattern, name):
@@ -219,6 +258,16 @@ def main():
                        "size": a["size"],
                        "name": a["name"]}
 
+    # The release body first, the changelog second. Empty is the normal case — the
+    # workflows publish with no body — so without the fallback every manifest this
+    # tool has ever written carried an empty note list.
+    notes = release_notes(rel.get("body") or "")
+    if not notes:
+        notes = changelog_notes(version)
+        if notes:
+            print("note: release body is empty; took %d notes from CHANGELOG.md"
+                  % len(notes), file=sys.stderr)
+
     manifest = {
         "schema": 1,
         "version": version,
@@ -230,7 +279,7 @@ def main():
         # The release body, trimmed to the lines worth showing in a small panel. The
         # app reads these from its cache after updating, so What's New works offline —
         # which is the normal case, since the machine has just restarted.
-        "notes": release_notes(rel.get("body") or ""),
+        "notes": notes,
         "assets": assets,
     }
 
