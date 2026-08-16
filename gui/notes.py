@@ -11,7 +11,7 @@ installed from a release.
 NOTES = {
     '1.2.0b5': [
         'A frozen build could not run any system program.',
-        'The import hid failure handler called system_env() before it was defined — it runs at import time, above where the helper first landed.',
+        '--selftest, and CI now runs the binary it is about to ship.',
     ],
     '1.2.0b4': [
         "The palette picker did nothing. set_skin clamped the index with len(SKINS) - 1, and SKINS is a count, not a list — so every click raised TypeError: object of type 'int' has no len() and the…",

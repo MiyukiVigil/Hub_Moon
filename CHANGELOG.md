@@ -36,6 +36,27 @@ source tree and false of the thing people actually download.
   test walks the AST of every file that spawns one and fails on any that forgets,
   because a missing `env=` works perfectly from source and fails only in the build
   nobody runs tests against.
+### Added
+
+- **`--selftest`, and CI now runs the binary it is about to ship.** Every bug in b3,
+  b4 and this release was invisible to the test suite by construction: it imports the
+  source tree, where nothing is frozen, no bootloader has rewritten the library path,
+  and the entry point is a function rather than a `.exe`. A bundle that gets all of
+  that wrong still passes 285 tests, which is precisely what happened four times.
+
+  `hub-moon --selftest` prints what a build can only learn about itself at runtime —
+  whether it is frozen, how it was installed, and whether a child process inherits the
+  bundle's library directory. `tools/smoke-frozen.py` asserts on that and
+  `build-linux.yml` runs it straight after PyInstaller and before the tarball, the
+  AppImage and the packages, so a broken bundle cannot become a release.
+
+  The library-path check asks a child what it actually sees rather than running some
+  tool and hoping. A probe that runs `sh` proves nothing: `sh` does not link against
+  OpenSSL and survives a bundle that breaks `pacman`, `zenity` and `pkexec`. Verified
+  by building deliberately without the fix and confirming the check fails.
+
+### Fixed (continued)
+
 - The `import hid` failure handler called `system_env()` before it was defined — it
   runs at import time, above where the helper first landed. Caught by ruff rather
   than by anybody, since it only fires on a build with no hidapi.

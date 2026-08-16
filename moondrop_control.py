@@ -1208,6 +1208,12 @@ def main():
                         help="Ask whether a newer Hub Moon has been released and print "
                              "what it is, plus how THIS install updates. Touches no "
                              "hardware and installs nothing")
+    parser.add_argument("--selftest", action="store_true",
+                        help="Print what this build can tell about itself as JSON: how "
+                             "it was installed, whether it is frozen, and whether it "
+                             "can start a system program. Touches no hardware. Exists "
+                             "because a frozen bundle gets those wrong in ways the "
+                             "test suite cannot see")
     parser.add_argument("--channel", default="stable", choices=("stable", "beta"),
                         help="With --check-update: which release channel to ask about "
                              "(default stable)")
@@ -1268,6 +1274,51 @@ def main():
     # Update check. Hardware-free and side-effect-free: it reports, and it is the GUI
     # that installs. Useful on its own for anyone driving Hub Moon from a script, and
     # the fastest way to find out what a given install would be told to do.
+    if args.selftest:
+        # Everything here is a fact the source tree gets right and a frozen bundle can
+        # get wrong, which is why it is reported by the *build* rather than asserted by
+        # the test suite. `spawn` is the one that mattered: PyInstaller hands children
+        # the bundle's library path, and a system binary loading the bundle's OpenSSL
+        # instead of the distribution's dies before it does anything.
+        _here = os.path.dirname(os.path.abspath(__file__))
+        if _here not in sys.path:
+            sys.path.insert(0, _here)
+        import platform
+        import subprocess
+        out = {"version": __version__,
+               "frozen": bool(getattr(sys, "frozen", False)),
+               "python": platform.python_version(),
+               "executable": sys.executable}
+        try:
+            from gui import updater
+            out["install_kind"] = updater.install_kind()
+            out["can_self_update"] = bool(updater.can_self_update())
+        except Exception as exc:
+            out["install_kind"] = "error: %s" % exc
+        # Asked of the child directly rather than inferred from whether some tool
+        # happened to survive: `sh` does not link against OpenSSL, so it runs fine
+        # with the bundle's library path and would report a clean bill of health for
+        # a build that breaks `pacman`, `zenity` and `pkexec`. The invariant is that
+        # the child does not see the bundle's directory at all.
+        bundle = getattr(sys, "_MEIPASS", "") or os.path.dirname(os.path.abspath(sys.executable))
+        var = "DYLD_LIBRARY_PATH" if sys.platform == "darwin" else "LD_LIBRARY_PATH"
+        try:
+            if os.name == "nt":
+                out["spawn"] = {"ok": True, "child_path": "", "note": "n/a on Windows"}
+            else:
+                done = subprocess.run(
+                    ["sh", "-c", 'printf %%s "${%s-}"' % var],
+                    capture_output=True, text=True, timeout=30, env=system_env())
+                child = done.stdout
+                leaked = bool(child) and bundle in child
+                out["spawn"] = {"ok": done.returncode == 0 and not leaked,
+                                "child_path": child[:300],
+                                "leaked_bundle_path": leaked}
+        except Exception as exc:
+            out["spawn"] = {"ok": False, "child_path": "", "error": str(exc)}
+        print(json.dumps(out, indent=2))
+        return 0
+
     if args.check_update:
         _here = os.path.dirname(os.path.abspath(__file__))
         if _here not in sys.path:
