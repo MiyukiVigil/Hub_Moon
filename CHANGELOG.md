@@ -5,6 +5,29 @@ All notable changes to **moondrop_control.py** are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **The bundle smoke test now runs on macOS and Windows too.** b5 added it to the
+  Linux build only, which left unchecked the two platforms it had the most to say
+  about. macOS especially: the library-path bug broke `hdiutil`, `ditto`, `xattr` and
+  `codesign` there, which is the whole of the `.dmg` updater, and nothing in CI would
+  have noticed that fix regressing. The macOS check runs *after* the ad-hoc signature
+  rather than before, so it also catches a `codesign --deep` that breaks the app —
+  `--verify` is allowed to fail there without stopping the build, so nothing else
+  would.
+
+  The Windows bundle is windowed (`console=False`), so it has no console attached and
+  prints into the void. `--selftest` therefore takes an optional file to write its
+  report to, which is the one channel all three platforms share; the checks that read
+  stdout stay on the two platforms that have one, and `--selftest` has already proved
+  the CLI runs by the time they are reached.
+
+  The linker check learned dyld's wording as well as glibc's. Matching only
+  `not found (required by` meant it passed unconditionally on macOS — a check that
+  could not fail on the platform it most needed to catch.
+
 ## [1.2.0b5] - 2026-08-16
 
 One bug, and it had been breaking most of what a binary release does since the first

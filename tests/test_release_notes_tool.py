@@ -122,6 +122,15 @@ def test_a_long_note_is_elided_rather_than_wrapped_forever(tool):
     assert got.endswith("…")
 
 
+def test_an_unreleased_section_is_not_a_version(tool):
+    """Keep a Changelog collects the next release under `## [Unreleased]`. Nothing is
+    running that, so a lookup for it can never happen, and carrying it would put a
+    release that does not exist in the table the What's New panel reads."""
+    got = tool.parse("## [Unreleased]\n\n### Added\n\n- Not out yet.\n\n"
+                     "## [9.9.9] - 2026-01-01\n\n### Fixed\n\n- Shipped.\n")
+    assert got == {"9.9.9": ["Shipped."]}
+
+
 def test_the_real_changelog_produces_notes_for_the_running_version(tool):
     """The generated module and CHANGELOG.md agreeing is what makes the What's New
     panel honest; they drift the moment somebody bumps a version and forgets."""

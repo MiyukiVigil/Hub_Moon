@@ -58,14 +58,14 @@ jobs:
         run: pyinstaller --noconfirm packaging/hub-moon.spec
 
       - name: Smoke-test the bundle
-        # Runs the binary that is about to be packaged five different ways, and
-        # checks the things the test suite structurally cannot see: it imports the
-        # source tree, where nothing is frozen and no bootloader has rewritten the
-        # library path. 1.2.0b3 and b4 both shipped an install-detection fix that
-        # could not execute, and 285 passing tests said nothing about it.
+        # Runs the binary that is about to be packaged and checks the things the test
+        # suite structurally cannot see: it imports the source tree, where nothing is
+        # frozen and no bootloader has rewritten the library path. 1.2.0b3 and b4 both
+        # shipped an install-detection fix that could not execute, and 285 passing
+        # tests said nothing about it.
         #
         # Placed before the tarball, AppImage and packages, so a broken bundle never
-        # becomes any of them.
+        # becomes any of them. The macOS and Windows workflows run the same script.
         run: python3 tools/smoke-frozen.py dist/hub-moon/hub-moon
 
       - name: Portable tarball

@@ -1208,12 +1208,14 @@ def main():
                         help="Ask whether a newer Hub Moon has been released and print "
                              "what it is, plus how THIS install updates. Touches no "
                              "hardware and installs nothing")
-    parser.add_argument("--selftest", action="store_true",
+    parser.add_argument("--selftest", nargs="?", const="", default=None, metavar="FILE",
                         help="Print what this build can tell about itself as JSON: how "
                              "it was installed, whether it is frozen, and whether it "
                              "can start a system program. Touches no hardware. Exists "
                              "because a frozen bundle gets those wrong in ways the "
-                             "test suite cannot see")
+                             "test suite cannot see. Give a FILE to write the report "
+                             "there as well: the Windows build is windowed, so it has "
+                             "no stdout for anything to read")
     parser.add_argument("--channel", default="stable", choices=("stable", "beta"),
                         help="With --check-update: which release channel to ask about "
                              "(default stable)")
@@ -1274,7 +1276,7 @@ def main():
     # Update check. Hardware-free and side-effect-free: it reports, and it is the GUI
     # that installs. Useful on its own for anyone driving Hub Moon from a script, and
     # the fastest way to find out what a given install would be told to do.
-    if args.selftest:
+    if args.selftest is not None:
         # Everything here is a fact the source tree gets right and a frozen bundle can
         # get wrong, which is why it is reported by the *build* rather than asserted by
         # the test suite. `spawn` is the one that mattered: PyInstaller hands children
@@ -1316,7 +1318,19 @@ def main():
                                 "leaked_bundle_path": leaked}
         except Exception as exc:
             out["spawn"] = {"ok": False, "child_path": "", "error": str(exc)}
-        print(json.dumps(out, indent=2))
+        report = json.dumps(out, indent=2)
+        # The Windows bundle is built windowed (console=False in the spec), so it is a
+        # GUI-subsystem binary with no console attached and nothing reads what it
+        # prints. A file is the only way that build can report anything at all, which
+        # is why the smoke test asks for one on every platform rather than parsing
+        # stdout on two of them and guessing on the third.
+        if args.selftest:
+            with open(args.selftest, "w", encoding="utf-8") as fh:
+                fh.write(report + "\n")
+        try:
+            print(report)
+        except Exception:
+            pass
         return 0
 
     if args.check_update:

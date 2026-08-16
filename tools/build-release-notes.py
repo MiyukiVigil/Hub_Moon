@@ -140,8 +140,11 @@ def parse(text):
         flush()
     flush()
 
+    # `## [Unreleased]` is a heading, not a version: nothing is running it, so a lookup
+    # for it can never happen and carrying it would only put a fake release in the table
+    # the GUI reads. It becomes a real entry the moment it is given a number.
     return {v: [n for s in SECTIONS for n in groups.get(s, [])][:MAX_NOTES]
-            for v, groups in out.items()}
+            for v, groups in out.items() if v.lower() != "unreleased"}
 
 
 HEADER = '''"""Release notes, generated from CHANGELOG.md — do not edit by hand.

@@ -55,6 +55,17 @@ jobs:
         shell: pwsh
         run: pyinstaller --noconfirm packaging\hub-moon.spec
 
+      - name: Smoke-test the .exe
+        # Same script as the Linux build — see the note there. This bundle is windowed
+        # (console=False in the spec), so it has no console and prints into the void:
+        # the script asks it to write its report to a file instead, which is the only
+        # channel all three platforms share.
+        #
+        # Placed before Inno Setup and the portable zip, so a build that cannot start
+        # never becomes either of them.
+        shell: pwsh
+        run: python tools\smoke-frozen.py dist\hub-moon\hub-moon.exe
+
       - name: Build the installer (Inno Setup)
         shell: pwsh
         run: |

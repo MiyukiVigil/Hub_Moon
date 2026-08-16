@@ -64,6 +64,18 @@ jobs:
           codesign --force --deep --sign - "dist/Hub Moon.app"
           codesign --verify --deep --strict --verbose=2 "dist/Hub Moon.app" || true
 
+      - name: Smoke-test the app
+        # Same script as the Linux build — see the note there for why a passing test
+        # suite says nothing about a bundle. macOS had the most to lose from the bug
+        # that prompted it: `LD_LIBRARY_PATH`'s counterpart `DYLD_LIBRARY_PATH` pointed
+        # every child at the bundle, so `hdiutil`, `ditto`, `xattr` and `codesign` all
+        # failed, which is the entire .dmg updater.
+        #
+        # Run *after* signing rather than before, so it also catches a signature that
+        # breaks the app — `codesign --deep` is capable of that and nothing else here
+        # would notice, since `--verify` is allowed to fail without stopping the build.
+        run: python3 tools/smoke-frozen.py "dist/Hub Moon.app"
+
       - name: Package .dmg
         run: |
           v="${{ steps.ver.outputs.version }}"
