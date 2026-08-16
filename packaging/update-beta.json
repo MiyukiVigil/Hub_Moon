@@ -1,71 +1,63 @@
 {
   "schema": 1,
-  "version": "1.2.0b4",
+  "version": "1.2.0b5",
   "channel": "beta",
-  "tag": "v1.2.0b4",
+  "tag": "v1.2.0b5",
   "date": "2026-08-16",
-  "summary": "v1.2.0b4",
-  "notes_url": "https://hubmoon.miyukivigil.tech/changelog.html#v1-2-0b4",
+  "summary": "v1.2.0b5",
+  "notes_url": "https://hubmoon.miyukivigil.tech/changelog.html#v1-2-0b5",
   "notes": [
-    "The palette picker did nothing. set_skin clamped the index with len(SKINS) - 1, and SKINS is a count, not a list \u2014 so every click raised TypeError: object of type 'int' has no len() and the\u2026",
-    "The window had no Wayland app id. class came back empty from the compositor, and on Wayland that is the key to everything outside the window: a taskbar or switcher looks up hub-moon.desktop\u2026",
-    "A manifest with no notes. Every manifest this project has published carried \"notes\": [], so the What's New panel, asked to preview a version not yet installed, correctly had nothing to show.",
-    "The version matrix went red on a test that imports gui.bridge, which imports slint \u2014 and that matrix installs hidapi and pytest only, deliberately, because the CLI standing alone is part of\u2026",
-    "No packaged install had a hub-moon command.",
-    "The /usr/bin launcher was a symlink into /opt, and that broke building from source on the same machine.",
-    "A nudged fader, stepper or arrow key could not be undone.",
-    "The download tables on the website are generated from the update manifests.",
-    "The readme leads with the desktop app.",
-    "The changelog marks every release with its channel"
+    "A frozen build could not run any system program.",
+    "The import hid failure handler called system_env() before it was defined \u2014 it runs at import time, above where the helper first landed."
   ],
   "assets": {
     "arch-package": {
-      "url": "https://github.com/MiyukiVigil/Hub_Moon/releases/download/v1.2.0b4/hub-moon-1.2.0b4-1-x86_64.pkg.tar.zst",
-      "sha256": "18e6edab0e5bd220d1a5990fd39cddddd69c43b0b0cdd281502b72008f0b2609",
-      "size": 40263526,
-      "name": "hub-moon-1.2.0b4-1-x86_64.pkg.tar.zst"
+      "url": "https://github.com/MiyukiVigil/Hub_Moon/releases/download/v1.2.0b5/hub-moon-1.2.0b5-1-x86_64.pkg.tar.zst",
+      "sha256": "b57eddc7cbd9678752378fb3600f8dd30fc3326e57dfcdda035c286586f14115",
+      "size": 40265678,
+      "name": "hub-moon-1.2.0b5-1-x86_64.pkg.tar.zst"
     },
     "rpm-package": {
-      "url": "https://github.com/MiyukiVigil/Hub_Moon/releases/download/v1.2.0b4/hub-moon-1.2.0b4-1.x86_64.rpm",
-      "sha256": "d0179c2e1a880459a242dfce25bf484abd0bbf03b03511dca6140904a516351f",
-      "size": 41788907,
-      "name": "hub-moon-1.2.0b4-1.x86_64.rpm"
+      "url": "https://github.com/MiyukiVigil/Hub_Moon/releases/download/v1.2.0b5/hub-moon-1.2.0b5-1.x86_64.rpm",
+      "sha256": "9ab5a752b7af68cdf11004f8a1497678a28dd7ade84cfb25e3fe31c1591f371d",
+      "size": 41785168,
+      "name": "hub-moon-1.2.0b5-1.x86_64.rpm"
     },
     "deb-package": {
-      "url": "https://github.com/MiyukiVigil/Hub_Moon/releases/download/v1.2.0b4/hub-moon_1.2.0b4-1_amd64.deb",
-      "sha256": "8fe4e2a7b59dd8896578deba64f08fc62c4e0979284dcecc256a6eb786af07d3",
-      "size": 41754138,
-      "name": "hub-moon_1.2.0b4-1_amd64.deb"
+      "url": "https://github.com/MiyukiVigil/Hub_Moon/releases/download/v1.2.0b5/hub-moon_1.2.0b5-1_amd64.deb",
+      "sha256": "6e46e9f59660859f47dbceb12cb6f60d0258ee32df77585c6774d47729f9f156",
+      "size": 41750112,
+      "name": "hub-moon_1.2.0b5-1_amd64.deb"
     },
     "linux-tarball": {
-      "url": "https://github.com/MiyukiVigil/Hub_Moon/releases/download/v1.2.0b4/HubMoon-1.2.0b4-linux-x86_64.tar.gz",
-      "sha256": "41f6535e958631dfe846a6efa3ac0ae262f370d6ca078958f41eabbcf35e54f9",
-      "size": 40949734,
-      "name": "HubMoon-1.2.0b4-linux-x86_64.tar.gz"
+      "url": "https://github.com/MiyukiVigil/Hub_Moon/releases/download/v1.2.0b5/HubMoon-1.2.0b5-linux-x86_64.tar.gz",
+      "sha256": "1c3f37a1f2cd6d6feada9e704b75a32d96170cce585b3b064536abc97ace53be",
+      "size": 40952773,
+      "name": "HubMoon-1.2.0b5-linux-x86_64.tar.gz"
     },
     "macos-dmg-arm64": {
-      "url": "https://github.com/MiyukiVigil/Hub_Moon/releases/download/v1.2.0b4/HubMoon-1.2.0b4-macOS-arm64.dmg",
-      "sha256": "8a2262ff743e96141c3f20bf9be4cc1cdc23afa5642d5550df80c2ebe417e9fe",
-      "size": 21811153,
-      "name": "HubMoon-1.2.0b4-macOS-arm64.dmg"
+      "url": "https://github.com/MiyukiVigil/Hub_Moon/releases/download/v1.2.0b5/HubMoon-1.2.0b5-macOS-arm64.dmg",
+      "sha256": "cb226acf0ad4bb7bdefc5035070b1d0ad78e2e0615d0d8fd527e074af42bf9da",
+      "size": 22135866,
+      "name": "HubMoon-1.2.0b5-macOS-arm64.dmg"
     },
     "windows-portable": {
-      "url": "https://github.com/MiyukiVigil/Hub_Moon/releases/download/v1.2.0b4/HubMoon-1.2.0b4-windows-portable.zip",
-      "sha256": "850e1534e0db01079cfe6d9ba17a77108a2a3f964516396ba9bb132e8c7af05d",
-      "size": 22557546,
-      "name": "HubMoon-1.2.0b4-windows-portable.zip"
+      "url": "https://github.com/MiyukiVigil/Hub_Moon/releases/download/v1.2.0b5/HubMoon-1.2.0b5-windows-portable.zip",
+      "sha256": "e74dbe8b5fd339ab37c8a0aa122166c8bc85b2da67fe18ad2f094f98dc6a697c",
+      "size": 22560706,
+      "name": "HubMoon-1.2.0b5-windows-portable.zip"
     },
     "appimage": {
-      "url": "https://github.com/MiyukiVigil/Hub_Moon/releases/download/v1.2.0b4/HubMoon-1.2.0b4-x86_64.AppImage",
-      "sha256": "282cfbac42f43383c018e6a349211183d1fe7e4fd3a2e8c0faae43b3d805c091",
+      "url": "https://github.com/MiyukiVigil/Hub_Moon/releases/download/v1.2.0b5/HubMoon-1.2.0b5-x86_64.AppImage",
+      "sha256": "92c6ac20c77c51d03a950c6874149d73d64d0dd5e1031910248e9cd05c1e24fd",
       "size": 38296056,
-      "name": "HubMoon-1.2.0b4-x86_64.AppImage"
+      "name": "HubMoon-1.2.0b5-x86_64.AppImage"
     },
     "windows-installer": {
-      "url": "https://github.com/MiyukiVigil/Hub_Moon/releases/download/v1.2.0b4/HubMoon-Setup-1.2.0b4.exe",
-      "sha256": "6c9a29791f92af652c88e08391b5a742bbaa6a8015ed8cfd5a9df3667c53b027",
-      "size": 18186229,
-      "name": "HubMoon-Setup-1.2.0b4.exe"
+      "url": "https://github.com/MiyukiVigil/Hub_Moon/releases/download/v1.2.0b5/HubMoon-Setup-1.2.0b5.exe",
+      "sha256": "05043d856b294b66a483b0714fe406794c3e4cac88ee33361d6189abc54cf6b3",
+      "size": 18194592,
+      "name": "HubMoon-Setup-1.2.0b5.exe"
     }
   }
 }
