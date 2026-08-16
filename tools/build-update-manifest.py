@@ -5,9 +5,13 @@
     python3 tools/build-update-manifest.py v1.2.0-beta.1 --site ../self-website/hubmoon
 
 Run it after the three build workflows have finished and attached their assets to
-the GitHub release for that tag. It reads the release through the public API — no
-token, no login — takes the SHA-256 of every asset from the `SHA256SUMS-*.txt` files
-the workflows publish alongside them, and writes the small JSON the app fetches.
+the GitHub release for that tag. It reads the release through the public API, takes
+the SHA-256 of every asset from the `SHA256SUMS-*.txt` files the workflows publish
+alongside them, and writes the small JSON the app fetches.
+
+No login is needed. If `GITHUB_TOKEN` (or `GH_TOKEN`) happens to be set it is used,
+which raises the API's limit from 60 requests an hour to 5,000 — worth having only on
+a day when something else on the machine has already spent the anonymous budget.
 
 **Which file it writes is decided by the release, not by a flag.** A release marked
 as a pre-release is a beta and lands in `update-beta.json`; anything else is stable
@@ -26,6 +30,8 @@ import json
 import os
 import re
 import sys
+import time
+import urllib.error
 import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -46,13 +52,108 @@ PATTERNS = [
 ]
 
 
+class Fail(SystemExit):
+    """An error the person running this can act on, without a traceback."""
+
+    def __init__(self, *lines):
+        super().__init__("\n".join(lines))
+
+
+def _token():
+    """A GitHub token, if one is around.
+
+    Entirely optional — everything here works unauthenticated. It only raises the
+    rate limit from 60 requests an hour to 5,000, which matters on a day when
+    something else on this machine has already spent the anonymous budget.
+    """
+    return (os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or "").strip()
+
+
 def get(url):
-    req = urllib.request.Request(url, headers={
-        "User-Agent": "hub-moon-manifest",
-        "Accept": "application/vnd.github+json",
-    })
-    with urllib.request.urlopen(req, timeout=30) as r:
-        return r.read()
+    headers = {"User-Agent": "hub-moon-manifest",
+               "Accept": "application/vnd.github+json"}
+    token = _token()
+    if token:
+        headers["Authorization"] = "Bearer " + token
+    req = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return r.read()
+    except urllib.error.HTTPError as exc:
+        raise _explain(exc, url) from exc
+    except urllib.error.URLError as exc:
+        raise Fail("Could not reach GitHub: %s" % exc.reason) from exc
+
+
+def _explain(exc, url):
+    """Turn an HTTP status into the sentence that says what to do about it."""
+    if exc.code == 404:
+        return Fail(
+            "No release found for that tag.",
+            "",
+            "Either the tag has not been pushed yet, or its build workflows have not",
+            "finished and published a release. Check:",
+            "  git push origin <tag>",
+            "  https://github.com/%s/releases" % REPO,
+        )
+    if exc.code in (403, 429):
+        reset = exc.headers.get("X-RateLimit-Reset")
+        remaining = exc.headers.get("X-RateLimit-Remaining")
+        if remaining == "0" and reset:
+            try:
+                mins = max(0, int((int(reset) - time.time()) / 60) + 1)
+            except ValueError:
+                mins = None
+            return Fail(
+                "GitHub's API rate limit is used up for this IP address.",
+                "",
+                "Unauthenticated callers get 60 requests an hour. It resets in about "
+                "%s." % ("%d minute%s" % (mins, "" if mins == 1 else "s")
+                         if mins is not None else "an hour"),
+                "",
+                "To raise it to 5,000, export a token with no scopes at all — this only",
+                "reads public releases:",
+                "  https://github.com/settings/tokens",
+                "  export GITHUB_TOKEN=ghp_…",
+            )
+        return Fail("GitHub refused the request (%s). %s" % (exc.code, exc.reason))
+    return Fail("GitHub answered %s %s for %s" % (exc.code, exc.reason, url))
+
+
+MAX_NOTES = 14
+MAX_NOTE_LEN = 160
+
+
+def release_notes(body):
+    """The GitHub release body as a short list of plain lines.
+
+    Markdown headings, bullets and emphasis are stripped rather than rendered: the
+    panel showing these is a list of sentences, and half-rendered markdown reads worse
+    than none. Links keep their text and lose their target.
+    """
+    out, fenced = [], False
+    for raw in str(body).splitlines():
+        line = raw.strip()
+        # A fence has to toggle state, not just be skipped: matching the ``` lines
+        # alone let everything *between* them through as if it were prose.
+        if line.startswith("```"):
+            fenced = not fenced
+            continue
+        if fenced or not line or line.startswith(("---", "<!--", "|")):
+            continue
+        line = re.sub(r"^#{1,6}\s*", "", line)             # headings
+        line = re.sub(r"^[-*+]\s+", "", line)              # bullets
+        line = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", line)  # links
+        line = re.sub(r"[*_`]{1,2}", "", line)             # emphasis, code spans
+        line = line.strip()
+        if not line:
+            continue
+        if len(line) > MAX_NOTE_LEN:
+            line = line[:MAX_NOTE_LEN - 1].rstrip() + "…"
+        out.append(line)
+        if len(out) >= MAX_NOTES:
+            break
+    return out
 
 
 def classify(name):
@@ -89,6 +190,9 @@ def main():
     args = ap.parse_args()
 
     rel = json.loads(get(API % (args.repo, args.tag)))
+    if rel.get("draft"):
+        raise Fail("That release is still a draft — its assets are not public yet.",
+                   "Publish it on GitHub, then run this again.")
     version = rel["tag_name"].lstrip("vV")
     beta = bool(rel.get("prerelease"))
     sums = checksums(rel.get("assets", []))
@@ -117,6 +221,10 @@ def main():
         "date": (rel.get("published_at") or "")[:10],
         "summary": args.summary or (rel.get("name") or "").strip(),
         "notes_url": "%s#v%s" % (NOTES, version.replace(".", "-")),
+        # The release body, trimmed to the lines worth showing in a small panel. The
+        # app reads these from its cache after updating, so What's New works offline —
+        # which is the normal case, since the machine has just restarted.
+        "notes": release_notes(rel.get("body") or ""),
         "assets": assets,
     }
 

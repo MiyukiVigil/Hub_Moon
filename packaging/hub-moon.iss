@@ -9,7 +9,7 @@
 ; Defines can be overridden on the iscc command line with /D<name>=<value>.
 
 #ifndef AppVersion
-  #define AppVersion "1.1.0"
+  #define AppVersion "1.2.0b1"
 #endif
 #ifndef SourceDir
   #define SourceDir "..\dist\hub-moon"

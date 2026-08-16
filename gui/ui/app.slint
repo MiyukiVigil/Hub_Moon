@@ -110,6 +110,17 @@ component Mark inherits Rectangle {
     }
 }
 
+export struct ProfileRow {
+    name: string,
+    note: string,
+}
+
+export struct AeqRow {
+    model: string,
+    source: string,
+    form: string,
+}
+
 export struct HubRow {
     uuid: string,
     title: string,
@@ -1410,6 +1421,45 @@ component SettingRow inherits HorizontalLayout {
     @children
 }
 
+// A row in the settings rail. Not a tab strip across the top: three groups with
+// long labels do not fit one, and a vertical rail leaves the panel its full width.
+component NavItem inherits Rectangle {
+    in property <string> label;
+    in property <string> icon;
+    in property <bool> active;
+    callback picked();
+
+    height: 34px;
+    border-radius: Theme.r-sm;
+    background: root.active ? Theme.accent-soft
+        : (nav.has-hover ? Theme.card-2 : transparent);
+    animate background { duration: Theme.quick; easing: ease-out; }
+
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        spacing: 8px;
+        Sym {
+            d: root.icon;
+            sz: 15px;
+            width: 15px;
+            tint: root.active ? Theme.accent : Theme.sub;
+        }
+        Text {
+            text: root.label;
+            color: root.active ? Theme.text : Theme.sub;
+            font-size: 12px;
+            font-weight: root.active ? 700 : 500;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+        }
+    }
+    nav := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.picked(); }
+    }
+}
+
 // A flat progress bar. Not a component library's — this needs exactly one thing, and
 // the width of a filled rectangle is exactly that one thing.
 component Meter inherits Rectangle {
@@ -1433,6 +1483,7 @@ component SettingsSheet inherits Rectangle {
     in property <int> accent-index;
     in property <string> settings-path;
     in property <string> app-version;
+    in property <string> about-text;
     in property <string> update-state;
     in property <string> update-note;
     in property <string> update-version;
@@ -1455,7 +1506,9 @@ component SettingsSheet inherits Rectangle {
     callback auto-picked(bool);
     callback logs-clicked();
     callback notes-clicked();
+    callback copy-clicked();
 
+    property <int> tab: 0;
     property <bool> busy: root.update-state == "checking"
         || root.update-state == "downloading" || root.update-state == "staged";
 
@@ -1467,19 +1520,18 @@ component SettingsSheet inherits Rectangle {
 
     VerticalLayout {
         padding: 16px;
-        spacing: 8px;
+        spacing: 10px;
 
         SheetHead {
             title: "Settings";
-            note: root.settings-path;
+            note: root.tab == 2 ? "Hub Moon " + root.app-version : root.settings-path;
             closed => { root.closed(); }
         }
         Rectangle { height: 1px; background: Theme.line; }
 
-        // Pinned above the scroll area, and only while there is something to act on.
-        // The Updates section further down is where the channel and the toggle live,
-        // but a waiting update must not be something you have to scroll to find —
-        // most people open this sheet to change the theme and would never see it.
+        // A waiting update is pinned above everything, on every tab. Most people open
+        // this sheet to change the theme, and something that needs a decision must not
+        // be two clicks and a scroll away.
         if root.busy || root.update-state == "available": Rectangle {
             height: banner.preferred-height + 20px;
             border-radius: Theme.r-sm;
@@ -1523,251 +1575,351 @@ component SettingsSheet inherits Rectangle {
             }
         }
 
-        Flickable {
-        viewport-height: sheet.preferred-height;
-        sheet := VerticalLayout {
-        spacing: 8px;
-        padding-right: 2px;
+        HorizontalLayout {
+            spacing: 14px;
+            vertical-stretch: 1;
 
-        SettingRow {
-            label: "Theme";
-            note: "Dark is re-picked rather than inverted — same rose, chosen twice.";
+            // ── the rail ──
             VerticalLayout {
-                alignment: center;
-                Segmented {
-                    left: "Light";
-                    right: "Dark";
-                    on-right: root.dark;
-                    picked(v) => { root.dark-picked(v); }
+                width: 148px;
+                spacing: 4px;
+                NavItem {
+                    label: "Appearance";
+                    icon: Icons.tune;
+                    active: root.tab == 0;
+                    picked => { root.tab = 0; }
                 }
-            }
-        }
-        Rectangle { height: 1px; background: Theme.line; }
-
-        SettingRow {
-            label: "Accent";
-            note: "One hue, used for the primary action, the active state and the equalised curve. The reference and output traces stay put — those are learned colours.";
-            VerticalLayout {
-                alignment: center;
-                HorizontalLayout {
-                    spacing: 8px;
-                    height: 30px;
-                    for a[i] in Accents.all: Rectangle {
-                        width: 30px;
-                        border-radius: 15px;
-                        background: Theme.dark ? a.base-d : a.base;
-                        border-width: sw.has-hover || i == root.accent-index ? 3px : 0px;
-                        border-color: Theme.text;
-                        animate border-width { duration: Theme.quick; easing: ease-out; }
-                        // The tick is on the swatch rather than beside it: a ring alone
-                        // reads as hover, and hover and selected must not look the same.
-                        Sym {
-                            d: i == root.accent-index ? Icons.check : "";
-                            sz: 15px;
-                            tint: Theme.dark ? a.ink-d : a.ink;
-                            width: 100%;
-                            height: 100%;
-                        }
-                        sw := TouchArea {
-                            mouse-cursor: pointer;
-                            clicked => { root.accent-picked(i); }
-                        }
-                    }
-                }
-            }
-        }
-        Rectangle { height: 1px; background: Theme.line; }
-
-        SettingRow {
-            label: "Graph";
-            note: "Editor draws each band and lets you drag it. Readout draws the level that leaves the DAC, normalised to a 60 dB reference.";
-            VerticalLayout {
-                alignment: center;
-                Segmented {
-                    left: "Editor";
-                    right: "Readout";
-                    on-right: root.readout;
-                    picked(v) => { root.readout-picked(v); }
-                }
-            }
-        }
-        Rectangle { height: 1px; background: Theme.line; }
-
-        SettingRow {
-            label: "Welcome screen";
-            note: "The opening screen, with what each control does. Shown once on a first run.";
-            VerticalLayout {
-                alignment: center;
-                TextBtn {
-                    label: "Show it again";
-                    icon: Icons.restart-alt;
-                    clicked => { root.welcome-again(); }
-                }
-            }
-        }
-        Rectangle { height: 1px; background: Theme.line; }
-
-        Text {
-            text: "The graph also has a toggle of its own, at its top-right corner.";
-            color: Theme.faint;
-            font-size: 11px;
-            wrap: word-wrap;
-        }
-
-        // ── updates ──
-        Rectangle { height: 8px; }
-        Text {
-            text: "UPDATES";
-            color: Theme.faint;
-            font-size: 10px;
-            font-weight: 700;
-            letter-spacing: 1.1px;
-        }
-        Rectangle { height: 1px; background: Theme.line; }
-
-        SettingRow {
-            label: "Check for updates";
-            note: root.install-note;
-            VerticalLayout {
-                alignment: center;
-                Segmented {
-                    left: "Off";
-                    right: "On";
-                    on-right: root.update-auto;
-                    picked(v) => { root.auto-picked(v); }
-                }
-            }
-        }
-        Rectangle { height: 1px; background: Theme.line; }
-
-        SettingRow {
-            label: "Channel";
-            note: "Stable is the tagged release. Beta is what is being tested next — newer, and the reason the changelog has an \"unreleased\" section.";
-            VerticalLayout {
-                alignment: center;
-                Segmented {
-                    left: "Stable";
-                    right: "Beta";
-                    on-right: root.update-channel == 1;
-                    picked(v) => { root.channel-picked(v ? 1 : 0); }
-                }
-            }
-        }
-        Rectangle { height: 1px; background: Theme.line; }
-
-        // The status block. One row, and what it offers depends entirely on where the
-        // check got to — there is no state in which every button is meaningful, so
-        // none of them are shown greyed out waiting to become so.
-        VerticalLayout {
-            padding-top: 10px;
-            padding-bottom: 10px;
-            spacing: 8px;
-
-            HorizontalLayout {
-                spacing: 10px;
-                VerticalLayout {
-                    alignment: center;
-                    horizontal-stretch: 1;
-                    spacing: 3px;
-                    Text {
-                        text: root.update-state == "available"
-                            ? "Hub Moon " + root.update-version + " is available"
-                            : "You are running Hub Moon " + root.app-version;
-                        color: root.update-state == "available" ? Theme.accent : Theme.text;
-                        font-size: 13px;
-                        font-weight: 600;
-                    }
-                    Text {
-                        text: root.update-note == ""
-                            ? "Nothing has been checked yet this session."
-                            : root.update-note;
-                        color: Theme.faint;
-                        font-size: 11px;
-                        wrap: word-wrap;
-                    }
-                }
-                VerticalLayout {
-                    alignment: center;
-                    TextBtn {
-                        label: root.update-state == "checking" ? "Checking…" : "Check now";
-                        icon: Icons.refresh;
-                        enabled: !root.busy;
-                        clicked => { root.check-clicked(); }
-                    }
-                }
-            }
-
-            if root.update-state == "downloading" || root.update-state == "staged":
-                Meter { value: root.update-progress; }
-
-            if root.update-state == "available": HorizontalLayout {
-                spacing: 8px;
-                // An install this app must not perform says so, and shows the command
-                // that will, rather than offering a button that cannot keep its word.
-                if root.update-can-install: TextBtn {
-                    label: "Download and install";
+                NavItem {
+                    label: "Updates";
                     icon: Icons.download;
-                    primary: true;
-                    clicked => { root.install-clicked(); }
+                    active: root.tab == 1;
+                    picked => { root.tab = 1; }
                 }
-                TextBtn {
-                    label: "Release notes";
-                    icon: Icons.note;
-                    clicked => { root.notes-clicked(); }
-                }
-                TextBtn {
-                    label: "Skip this one";
-                    icon: Icons.close;
-                    clicked => { root.skip-clicked(); }
-                }
-                Rectangle { horizontal-stretch: 1; }
-            }
-
-            if root.update-state == "available" && !root.update-can-install: Rectangle {
-                height: cmd.preferred-height + 18px;
-                border-radius: Theme.r-sm;
-                background: Theme.card-2;
-                border-width: 1px;
-                border-color: Theme.line-2;
-                cmd := VerticalLayout {
-                    padding: 9px;
-                    spacing: 3px;
-                    Text {
-                        text: root.update-reason;
-                        color: Theme.faint;
-                        font-size: 11px;
-                        wrap: word-wrap;
-                    }
-                    Text {
-                        text: root.update-hint;
-                        color: Theme.text;
-                        font-size: 12px;
-                        font-family: "monospace";
-                        wrap: word-wrap;
-                    }
-                }
-            }
-        }
-        Rectangle { height: 1px; background: Theme.line; }
-
-        SettingRow {
-            label: "Diagnostics";
-            note: "Every session writes a log. If something goes wrong, that file is what a bug report needs.";
-            VerticalLayout {
-                alignment: center;
-                TextBtn {
-                    label: "Open log folder";
+                NavItem {
+                    label: "About";
                     icon: Icons.info;
-                    clicked => { root.logs-clicked(); }
+                    active: root.tab == 2;
+                    picked => { root.tab = 2; }
+                }
+                Rectangle { vertical-stretch: 1; }
+            }
+            Rectangle { width: 1px; background: Theme.line; }
+
+            // ── the panel ──
+            Rectangle {
+                horizontal-stretch: 1;
+                clip: true;
+                Flickable {
+                    viewport-height: pane.preferred-height;
+                    pane := VerticalLayout {
+                        width: parent.width;
+                        spacing: 8px;
+
+                        if root.tab == 0: VerticalLayout {
+                            spacing: 8px;
+                                    SettingRow {
+                                        label: "Theme";
+                                        note: "Dark is re-picked rather than inverted — same rose, chosen twice.";
+                                        VerticalLayout {
+                                            alignment: center;
+                                            Segmented {
+                                                left: "Light";
+                                                right: "Dark";
+                                                on-right: root.dark;
+                                                picked(v) => { root.dark-picked(v); }
+                                            }
+                                        }
+                                    }
+                                    Rectangle { height: 1px; background: Theme.line; }
+
+                                    SettingRow {
+                                        label: "Accent";
+                                        note: "One hue, used for the primary action, the active state and the equalised curve. The reference and output traces stay put — those are learned colours.";
+                                        VerticalLayout {
+                                            alignment: center;
+                                            HorizontalLayout {
+                                                spacing: 8px;
+                                                height: 30px;
+                                                for a[i] in Accents.all: Rectangle {
+                                                    width: 30px;
+                                                    border-radius: 15px;
+                                                    background: Theme.dark ? a.base-d : a.base;
+                                                    border-width: sw.has-hover || i == root.accent-index ? 3px : 0px;
+                                                    border-color: Theme.text;
+                                                    animate border-width { duration: Theme.quick; easing: ease-out; }
+                                                    // The tick is on the swatch rather than beside it: a ring alone
+                                                    // reads as hover, and hover and selected must not look the same.
+                                                    Sym {
+                                                        d: i == root.accent-index ? Icons.check : "";
+                                                        sz: 15px;
+                                                        tint: Theme.dark ? a.ink-d : a.ink;
+                                                        width: 100%;
+                                                        height: 100%;
+                                                    }
+                                                    sw := TouchArea {
+                                                        mouse-cursor: pointer;
+                                                        clicked => { root.accent-picked(i); }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Rectangle { height: 1px; background: Theme.line; }
+
+                                    SettingRow {
+                                        label: "Graph";
+                                        note: "Editor draws each band and lets you drag it. Readout draws the level that leaves the DAC, normalised to a 60 dB reference.";
+                                        VerticalLayout {
+                                            alignment: center;
+                                            Segmented {
+                                                left: "Editor";
+                                                right: "Readout";
+                                                on-right: root.readout;
+                                                picked(v) => { root.readout-picked(v); }
+                                            }
+                                        }
+                                    }
+                                    Rectangle { height: 1px; background: Theme.line; }
+
+                                    SettingRow {
+                                        label: "Welcome screen";
+                                        note: "The opening screen, with what each control does. Shown once on a first run.";
+                                        VerticalLayout {
+                                            alignment: center;
+                                            TextBtn {
+                                                label: "Show it again";
+                                                icon: Icons.restart-alt;
+                                                clicked => { root.welcome-again(); }
+                                            }
+                                        }
+                                    }
+                                    Rectangle { height: 1px; background: Theme.line; }
+
+                                    Text {
+                                        text: "The graph also has a toggle of its own, at its top-right corner.";
+                                        color: Theme.faint;
+                                        font-size: 11px;
+                                        wrap: word-wrap;
+                                    }
+                            Text {
+                                text: "The graph also has a toggle of its own, at its top-right corner.";
+                                color: Theme.faint;
+                                font-size: 11px;
+                                wrap: word-wrap;
+                            }
+                        }
+
+                        if root.tab == 1: VerticalLayout {
+                            spacing: 8px;
+                                    SettingRow {
+                                        label: "Check for updates";
+                                        note: root.install-note;
+                                        VerticalLayout {
+                                            alignment: center;
+                                            Segmented {
+                                                left: "Off";
+                                                right: "On";
+                                                on-right: root.update-auto;
+                                                picked(v) => { root.auto-picked(v); }
+                                            }
+                                        }
+                                    }
+                                    Rectangle { height: 1px; background: Theme.line; }
+
+                                    SettingRow {
+                                        label: "Channel";
+                                        note: "Stable is the tagged release. Beta is what is being tested next — newer, and the reason the changelog has an \"unreleased\" section.";
+                                        VerticalLayout {
+                                            alignment: center;
+                                            Segmented {
+                                                left: "Stable";
+                                                right: "Beta";
+                                                on-right: root.update-channel == 1;
+                                                picked(v) => { root.channel-picked(v ? 1 : 0); }
+                                            }
+                                        }
+                                    }
+                                    Rectangle { height: 1px; background: Theme.line; }
+
+                                    // The status block. One row, and what it offers depends entirely on where the
+                                    // check got to — there is no state in which every button is meaningful, so
+                                    // none of them are shown greyed out waiting to become so.
+                                    VerticalLayout {
+                                        padding-top: 10px;
+                                        padding-bottom: 10px;
+                                        spacing: 8px;
+
+                                        HorizontalLayout {
+                                            spacing: 10px;
+                                            VerticalLayout {
+                                                alignment: center;
+                                                horizontal-stretch: 1;
+                                                spacing: 3px;
+                                                Text {
+                                                    text: root.update-state == "available"
+                                                        ? "Hub Moon " + root.update-version + " is available"
+                                                        : "You are running Hub Moon " + root.app-version;
+                                                    color: root.update-state == "available" ? Theme.accent : Theme.text;
+                                                    font-size: 13px;
+                                                    font-weight: 600;
+                                                }
+                                                Text {
+                                                    text: root.update-note == ""
+                                                        ? "Nothing has been checked yet this session."
+                                                        : root.update-note;
+                                                    color: Theme.faint;
+                                                    font-size: 11px;
+                                                    wrap: word-wrap;
+                                                }
+                                            }
+                                            VerticalLayout {
+                                                alignment: center;
+                                                TextBtn {
+                                                    label: root.update-state == "checking" ? "Checking…" : "Check now";
+                                                    icon: Icons.refresh;
+                                                    enabled: !root.busy;
+                                                    clicked => { root.check-clicked(); }
+                                                }
+                                            }
+                                        }
+
+                                        if root.update-state == "downloading" || root.update-state == "staged":
+                                            Meter { value: root.update-progress; }
+
+                                        if root.update-state == "available": HorizontalLayout {
+                                            spacing: 8px;
+                                            // An install this app must not perform says so, and shows the command
+                                            // that will, rather than offering a button that cannot keep its word.
+                                            if root.update-can-install: TextBtn {
+                                                label: "Download and install";
+                                                icon: Icons.download;
+                                                primary: true;
+                                                clicked => { root.install-clicked(); }
+                                            }
+                                            TextBtn {
+                                                label: "Release notes";
+                                                icon: Icons.note;
+                                                clicked => { root.notes-clicked(); }
+                                            }
+                                            TextBtn {
+                                                label: "Skip this one";
+                                                icon: Icons.close;
+                                                clicked => { root.skip-clicked(); }
+                                            }
+                                            Rectangle { horizontal-stretch: 1; }
+                                        }
+
+                                        if root.update-state == "available" && !root.update-can-install: Rectangle {
+                                            height: cmd.preferred-height + 18px;
+                                            border-radius: Theme.r-sm;
+                                            background: Theme.card-2;
+                                            border-width: 1px;
+                                            border-color: Theme.line-2;
+                                            cmd := VerticalLayout {
+                                                padding: 9px;
+                                                spacing: 3px;
+                                                Text {
+                                                    text: root.update-reason;
+                                                    color: Theme.faint;
+                                                    font-size: 11px;
+                                                    wrap: word-wrap;
+                                                }
+                                                Text {
+                                                    text: root.update-hint;
+                                                    color: Theme.text;
+                                                    font-size: 12px;
+                                                    font-family: "monospace";
+                                                    wrap: word-wrap;
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Rectangle { height: 1px; background: Theme.line; }
+                        }
+
+                        if root.tab == 2: VerticalLayout {
+                            spacing: 10px;
+
+                            Text {
+                                text: "Hub Moon " + root.app-version;
+                                color: Theme.text;
+                                font-size: 20px;
+                                font-weight: 700;
+                            }
+                            Text {
+                                text: "Parametric EQ for Moondrop USB DACs, over USB HID. MIT licensed.";
+                                color: Theme.sub;
+                                font-size: 12px;
+                                wrap: word-wrap;
+                            }
+                            Text {
+                                text: root.install-note;
+                                color: Theme.faint;
+                                font-size: 11px;
+                                wrap: word-wrap;
+                            }
+
+                            // The block that goes into a bug report. Eleven of the
+                            // twelve supported DACs and all of USB HID on Windows are
+                            // still untested, and closing that depends on reports from
+                            // people whose hardware nobody here owns — so the facts
+                            // they would otherwise be asked for are on screen, in one
+                            // selectable lump, behind one button.
+                            Rectangle {
+                                height: sysbox.preferred-height + 20px;
+                                border-radius: Theme.r-sm;
+                                background: Theme.card-2;
+                                border-width: 1px;
+                                border-color: Theme.line-2;
+                                sysbox := VerticalLayout {
+                                    padding: 10px;
+                                    Text {
+                                        text: root.about-text;
+                                        color: Theme.sub;
+                                        font-family: Theme.mono;
+                                        font-size: 11px;
+                                        wrap: no-wrap;
+                                        overflow: elide;
+                                    }
+                                }
+                            }
+                            HorizontalLayout {
+                                spacing: 8px;
+                                TextBtn {
+                                    label: "Copy system info";
+                                    icon: Icons.upload-file;
+                                    primary: true;
+                                    clicked => { root.copy-clicked(); }
+                                }
+                                TextBtn {
+                                    label: "Open log folder";
+                                    icon: Icons.note;
+                                    clicked => { root.logs-clicked(); }
+                                }
+                                Rectangle { horizontal-stretch: 1; }
+                            }
+                            Text {
+                                text: "Every session writes to that log, including anything that goes wrong on a worker thread. If you are reporting a bug, it is the file to attach.";
+                                color: Theme.faint;
+                                font-size: 11px;
+                                wrap: word-wrap;
+                            }
+                            Rectangle { height: 1px; background: Theme.line; }
+                            Text {
+                                text: "Headphone corrections come from AutoEQ by Jaakko Pasanen (MIT), measured by the people credited on each row. The community library is Moondrop's own, read-only. Neither this project nor its author is affiliated with MOONDROP.";
+                                color: Theme.faint;
+                                font-size: 11px;
+                                wrap: word-wrap;
+                            }
+                        }
+
+                        Rectangle { vertical-stretch: 1; }
+                    }
                 }
             }
-        }
-        Rectangle { vertical-stretch: 1; }
-        }
         }
     }
 }
-
 component HelpSheet inherits Rectangle {
     callback closed();
     background: Theme.card;
@@ -2173,6 +2325,534 @@ component CommunitySheet inherits Rectangle {
     }
 }
 
+// One line of a release's notes. Its own component so the entrance can be staggered
+// by rank, the same way the welcome cards are.
+component NoteLine inherits Rectangle {
+    in property <string> body;
+    in property <int> rank;
+    in property <bool> shown;
+
+    height: line.preferred-height + 16px;
+    border-radius: Theme.r-sm;
+    background: hover.has-hover ? Theme.card-2 : transparent;
+    animate background { duration: Theme.quick; easing: ease-out; }
+    opacity: root.shown ? 1.0 : 0.0;
+    x: root.shown ? 0px : 14px;
+    animate opacity, x { duration: 420ms; delay: 320ms + root.rank * 80ms; easing: cubic-bezier(0.2, 0, 0, 1); }
+
+    hover := TouchArea { }
+    line := HorizontalLayout {
+        padding: 8px;
+        spacing: 11px;
+        // A numbered chip rather than a bullet: it gives the eye a column to run down
+        // and makes four changes read as a list of four things rather than a paragraph.
+        VerticalLayout {
+            alignment: start;
+            width: 21px;
+            Rectangle {
+            width: 21px;
+            height: 21px;
+            border-radius: 6px;
+            background: Theme.accent-soft;
+            Text {
+                text: root.rank + 1;
+                color: Theme.accent;
+                font-family: Theme.mono;
+                font-size: 11px;
+                font-weight: 700;
+                width: 100%;
+                height: 100%;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+            }
+        }
+        Text {
+            text: root.body;
+            color: Theme.sub;
+            font-size: 12.5px;
+            wrap: word-wrap;
+            horizontal-stretch: 1;
+        }
+    }
+}
+
+// Shown once, the first time a new version runs — and only when there was a previous
+// one to have changed from. On a fresh install the welcome screen does this job.
+component WhatsNew inherits Rectangle {
+    in property <string> version;
+    in property <string> from-version;
+    in property <[string]> notes;
+    callback dismissed();
+    callback changelog();
+
+    background: Theme.card;
+    border-radius: Theme.r-lg;
+    border-width: 1px;
+    border-color: Theme.line-2;
+    clip: true;
+
+    property <bool> shown: false;
+    // One tick after the first paint, so the animations have a state to move FROM —
+    // the same reason the welcome screen does it this way.
+    Timer {
+        interval: 40ms;
+        running: !root.shown;
+        triggered => { root.shown = true; }
+    }
+
+    VerticalLayout {
+        padding: 0px;
+        spacing: 0px;
+
+        // ── the hero ──
+        Rectangle {
+            height: 132px;
+            background: Theme.accent-soft;
+            clip: true;
+
+            // A wash that lifts the band away from a flat fill without becoming a
+            // gradient: one soft disc, off-centre, behind the mark.
+            Rectangle {
+                x: parent.width - 210px;
+                y: -66px;
+                width: 240px;
+                height: 240px;
+                border-radius: 120px;
+                background: Theme.accent;
+                opacity: 0.10;
+            }
+
+            HorizontalLayout {
+                padding-left: 20px;
+                padding-right: 16px;
+                spacing: 16px;
+                VerticalLayout {
+                    alignment: center;
+                    MoonMark {
+                        width: 92px;
+                        height: 92px;
+                        shown: root.shown;
+                    }
+                }
+                VerticalLayout {
+                    alignment: center;
+                    horizontal-stretch: 1;
+                    spacing: 5px;
+                    Text {
+                        text: "Hub Moon " + root.version;
+                        color: Theme.text;
+                        font-size: 25px;
+                        font-weight: 700;
+                        opacity: root.shown ? 1.0 : 0.0;
+                        animate opacity { duration: 460ms; delay: 200ms; easing: cubic-bezier(0.2, 0, 0, 1); }
+                    }
+                    HorizontalLayout {
+                        alignment: start;
+                        spacing: 7px;
+                        Rectangle {
+                            width: chip.preferred-width + 18px;
+                            height: 21px;
+                            border-radius: 11px;
+                            background: Theme.card;
+                            opacity: root.shown ? 1.0 : 0.0;
+                            animate opacity { duration: 460ms; delay: 300ms; }
+                            chip := Text {
+                                text: "from " + root.from-version;
+                                color: Theme.sub;
+                                font-family: Theme.mono;
+                                font-size: 10.5px;
+                                width: 100%;
+                                height: 100%;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+                        Text {
+                            text: "already installed and running";
+                            color: Theme.sub;
+                            font-size: 11.5px;
+                            vertical-alignment: center;
+                            opacity: root.shown ? 1.0 : 0.0;
+                            animate opacity { duration: 460ms; delay: 360ms; }
+                        }
+                    }
+                }
+                VerticalLayout {
+                    alignment: start;
+                    padding-top: 14px;
+                    IconBtn { icon: Icons.close; clicked => { root.dismissed(); } }
+                }
+            }
+        }
+        Rectangle { height: 1px; background: Theme.line; }
+
+        // ── what changed ──
+        Rectangle {
+            vertical-stretch: 1;
+            clip: true;
+            Flickable {
+                // Without this the viewport is as wide as the longest line wants to
+                // be, and `wrap: word-wrap` never gets a width to wrap against — the
+                // notes ran off the edge instead of wrapping.
+                viewport-width: self.width;
+                viewport-height: notelist.preferred-height;
+                notelist := VerticalLayout {
+                    width: parent.width;
+                    padding: 12px;
+                    padding-bottom: 4px;
+                    spacing: 2px;
+                    for n[i] in root.notes: NoteLine {
+                        body: n;
+                        rank: i;
+                        shown: root.shown;
+                    }
+                    // A release whose manifest carried no notes still says something
+                    // true rather than showing an empty box.
+                    if root.notes.length == 0: Text {
+                        text: "This version is installed and running. The full changelog is on the website.";
+                        color: Theme.sub;
+                        font-size: 12.5px;
+                        wrap: word-wrap;
+                    }
+                }
+            }
+        }
+
+        Rectangle { height: 1px; background: Theme.line; }
+        HorizontalLayout {
+            padding: 14px;
+            spacing: 8px;
+            VerticalLayout {
+                alignment: center;
+                TextBtn {
+                    label: "Full changelog";
+                    icon: Icons.note;
+                    clicked => { root.changelog(); }
+                }
+            }
+            Rectangle { horizontal-stretch: 1; }
+            VerticalLayout {
+                alignment: center;
+                TextBtn {
+                    label: "Get on with it";
+                    icon: Icons.check;
+                    primary: true;
+                    clicked => { root.dismissed(); }
+                }
+            }
+        }
+    }
+}
+
+component ProfileCard inherits Rectangle {
+    in property <ProfileRow> entry;
+    callback applied();
+    callback removed();
+
+    height: 54px;
+    border-radius: Theme.r-sm;
+    background: touch.has-hover ? Theme.card-2 : Theme.card;
+    border-width: 1px;
+    border-color: touch.has-hover ? Theme.line-2 : Theme.line;
+    animate background, border-color { duration: Theme.quick; easing: ease-out; }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.applied(); }
+    }
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 10px;
+        spacing: 10px;
+        VerticalLayout {
+            alignment: center;
+            horizontal-stretch: 1;
+            spacing: 2px;
+            Text {
+                text: root.entry.name;
+                color: Theme.text;
+                font-size: 13px;
+                font-weight: 600;
+                overflow: elide;
+            }
+            Text {
+                text: root.entry.note;
+                color: Theme.faint;
+                font-size: 11px;
+                overflow: elide;
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            // Delete is its own hit target rather than a hover-reveal: a control that
+            // only exists while the pointer is over it is one you cannot reach with a
+            // keyboard and cannot find on a touchscreen.
+            IconBtn {
+                icon: Icons.remove;
+                clicked => { root.removed(); }
+            }
+        }
+    }
+}
+
+component ProfilesSheet inherits Rectangle {
+    in property <[ProfileRow]> rows;
+    in property <string> note;
+    in property <int> count;
+    callback closed();
+    callback named(string);
+    callback saved();
+    callback applied(string);
+    callback removed(string);
+
+    background: Theme.card;
+    border-radius: Theme.r-lg;
+    border-width: 1px;
+    border-color: Theme.line-2;
+    clip: true;
+
+    VerticalLayout {
+        padding: 16px;
+        spacing: 11px;
+
+        SheetHead {
+            title: "Saved profiles";
+            note: root.note;
+            closed => { root.closed(); }
+        }
+
+        HorizontalLayout {
+            spacing: 8px;
+            height: 30px;
+            Rectangle {
+                horizontal-stretch: 1;
+                border-radius: Theme.r-sm;
+                background: Theme.card-2;
+                border-width: 1px;
+                border-color: pname.has-focus ? Theme.accent : Theme.line-2;
+                animate border-color { duration: Theme.quick; easing: ease-out; }
+                HorizontalLayout {
+                    padding-left: 10px;
+                    padding-right: 10px;
+                    Rectangle {
+                        pname := TextInput {
+                            width: 100%;
+                            height: 100%;
+                            color: Theme.text;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                            single-line: true;
+                            edited => { root.named(self.text); }
+                            accepted => { root.saved(); pname.text = ""; }
+                        }
+                        if pname.text == "": Text {
+                            x: 0px;
+                            width: 100%;
+                            height: 100%;
+                            text: "name this curve…";
+                            color: Theme.faint;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+            TextBtn {
+                label: "save curve";
+                icon: Icons.save;
+                primary: true;
+                enabled: pname.text != "";
+                clicked => { root.saved(); pname.text = ""; }
+            }
+        }
+
+        Rectangle {
+            vertical-stretch: 1;
+            clip: true;
+            Flickable {
+                viewport-height: plist.preferred-height;
+                plist := VerticalLayout {
+                    width: parent.width;
+                    spacing: 7px;
+                    for r in root.rows: ProfileCard {
+                        entry: r;
+                        applied => { root.applied(r.name); }
+                        removed => { root.removed(r.name); }
+                    }
+                }
+            }
+            if root.count == 0: Text {
+                text: "Nothing saved yet. Name the curve you have now and save it.";
+                color: Theme.faint;
+                font-size: 12px;
+                width: 100%;
+                horizontal-alignment: center;
+                y: 24px;
+            }
+        }
+        Text {
+            text: "Saved on this computer, not on the DAC — so there is no limit and they survive a device slot being overwritten. Each file is an ordinary export: mail one to somebody and they can import it.";
+            color: Theme.faint;
+            font-size: 11px;
+            wrap: word-wrap;
+        }
+    }
+}
+
+component AeqCard inherits Rectangle {
+    in property <AeqRow> entry;
+    callback picked();
+
+    height: 54px;
+    border-radius: Theme.r-sm;
+    background: touch.has-hover ? Theme.card-2 : Theme.card;
+    border-width: 1px;
+    border-color: touch.has-hover ? Theme.line-2 : Theme.line;
+    animate background, border-color { duration: Theme.quick; easing: ease-out; }
+
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+        spacing: 10px;
+        VerticalLayout {
+            alignment: center;
+            horizontal-stretch: 1;
+            spacing: 2px;
+            Text {
+                text: root.entry.model;
+                color: Theme.text;
+                font-size: 13px;
+                font-weight: 600;
+                overflow: elide;
+            }
+            // The rig matters as much as the name: two sources measuring the same
+            // headphone do not agree, so the row says whose measurement this is.
+            Text {
+                text: root.entry.source + "  ·  " + root.entry.form;
+                color: Theme.faint;
+                font-size: 11px;
+                overflow: elide;
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            Sym { d: Icons.show-chart; sz: 16px; tint: touch.has-hover ? Theme.accent : Theme.faint; width: 16px; }
+        }
+    }
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.picked(); }
+    }
+}
+
+component AutoEqSheet inherits Rectangle {
+    in property <[AeqRow]> rows;
+    in property <string> note;
+    in property <bool> busy;
+    in property <int> count;
+    callback closed();
+    callback searched(string);
+    callback reloaded();
+    callback picked(string, string, string);
+
+    background: Theme.card;
+    border-radius: Theme.r-lg;
+    border-width: 1px;
+    border-color: Theme.line-2;
+    clip: true;
+
+    VerticalLayout {
+        padding: 16px;
+        spacing: 11px;
+
+        SheetHead {
+            title: "Headphone corrections";
+            note: root.busy ? "working…" : root.note;
+            closed => { root.closed(); }
+        }
+
+        HorizontalLayout {
+            spacing: 8px;
+            height: 30px;
+            Rectangle {
+                horizontal-stretch: 1;
+                border-radius: Theme.r-sm;
+                background: Theme.card-2;
+                border-width: 1px;
+                border-color: field.has-focus ? Theme.accent : Theme.line-2;
+                animate border-color { duration: Theme.quick; easing: ease-out; }
+                HorizontalLayout {
+                    padding-left: 10px;
+                    padding-right: 10px;
+                    spacing: 7px;
+                    Sym { d: Icons.search; sz: 15px; tint: Theme.faint; width: 15px; }
+                    // The hint sits *behind* the field rather than beside it — as a
+                    // sibling in the layout it took its own column and pushed the
+                    // caret into the middle of the box.
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        field := TextInput {
+                            width: 100%;
+                            height: 100%;
+                            color: Theme.text;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                            single-line: true;
+                            edited => { root.searched(self.text); }
+                        }
+                        if field.text == "": Text {
+                            x: 0px;
+                            width: 100%;
+                            height: 100%;
+                            text: "search 6,015 headphones…";
+                            color: Theme.faint;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+            TextBtn {
+                label: "reload";
+                icon: Icons.refresh;
+                enabled: !root.busy;
+                clicked => { root.reloaded(); }
+            }
+        }
+
+        Rectangle {
+            vertical-stretch: 1;
+            clip: true;
+            Flickable {
+                viewport-height: alist.preferred-height;
+                alist := VerticalLayout {
+                    width: parent.width;
+                    spacing: 7px;
+                    for r in root.rows: AeqCard {
+                        entry: r;
+                        picked => { root.picked(r.model, r.source, r.form); }
+                    }
+                }
+            }
+            if root.count == 0: Text {
+                text: root.busy ? "" : "No headphone matches that.";
+                color: Theme.faint;
+                font-size: 12px;
+                width: 100%;
+                horizontal-alignment: center;
+                y: 24px;
+            }
+        }
+        Text {
+            text: "AutoEQ publishes ten filters per headphone and this DAC has eight, so two are always left out — the preview names them. Corrections by Jaakko Pasanen and the measurers credited on each row (MIT).";
+            color: Theme.faint;
+            font-size: 11px;
+            wrap: word-wrap;
+        }
+    }
+}
+
 // ── window ──────────────────────────────────────────────────────────────────────
 export component MainWindow inherits Window {
     title: "Hub Moon";
@@ -2221,6 +2901,15 @@ export component MainWindow inherits Window {
     in property <int> selected: -1;
     in property <bool> help-open;
     in property <bool> settings-open;
+    in property <bool> prof-open;
+    in property <string> prof-note;
+    in property <int> prof-count;
+    in property <[ProfileRow]> prof-rows;
+    in property <bool> aeq-open;
+    in property <bool> aeq-busy;
+    in property <string> aeq-note;
+    in property <int> aeq-count;
+    in property <[AeqRow]> aeq-rows;
     in property <bool> hub-open;
     in property <bool> hub-busy;
     in property <string> hub-note;
@@ -2246,6 +2935,10 @@ export component MainWindow inherits Window {
     in property <int> update-channel;
     in property <bool> update-auto;
     in property <string> install-note;
+    in property <string> about-text;
+    in property <bool> whatsnew-open;
+    in property <string> whatsnew-from;
+    in property <[string]> whatsnew-notes;
 
     // ── everything the view can ask for ──
     callback refresh();
@@ -2277,6 +2970,15 @@ export component MainWindow inherits Window {
     callback dismiss-welcome();
     callback show-welcome();
     callback toggle-community();
+    callback toggle-profiles();
+    callback profile-name-edited(string);
+    callback profile-save();
+    callback profile-apply(string);
+    callback profile-delete(string);
+    callback toggle-autoeq();
+    callback autoeq-search(string);
+    callback autoeq-reload();
+    callback autoeq-pick(string, string, string);
     callback community-search(string);
     callback community-apply(string);
     callback community-reload();
@@ -2290,8 +2992,10 @@ export component MainWindow inherits Window {
     callback set-auto-update(bool);
     callback open-logs();
     callback open-notes();
+    callback copy-diagnostics();
+    callback dismiss-whatsnew();
 
-    property <bool> sheet-open: root.help-open || root.hub-open || root.settings-open;
+    property <bool> sheet-open: root.help-open || root.hub-open || root.settings-open || root.aeq-open || root.prof-open || root.whatsnew-open;
 
     // Theme is a global, and a global cannot bind to a property on a component — so the
     // flow runs the other way: the bridge pushes `dark` here and this forwards it once.
@@ -2314,7 +3018,10 @@ export component MainWindow inherits Window {
             // is stacked. The welcome screen is deliberately not in this list: it is
             // where you are, not something on top of you.
             if (e.text == Key.Escape) {
-                if (root.preview-open) { root.preview-close(); }
+                if (root.whatsnew-open) { root.dismiss-whatsnew(); }
+                else if (root.preview-open) { root.preview-close(); }
+                else if (root.prof-open) { root.toggle-profiles(); }
+                else if (root.aeq-open) { root.toggle-autoeq(); }
                 else if (root.hub-open) { root.toggle-community(); }
                 else if (root.help-open) { root.toggle-help(); }
                 else if (root.settings-open) { root.toggle-settings(); }
@@ -2452,6 +3159,14 @@ export component MainWindow inherits Window {
                     }
                 }
 
+                VerticalLayout {
+                    alignment: center;
+                    TextBtn {
+                        label: "headphones";
+                        icon: Icons.headphones;
+                        clicked => { root.toggle-autoeq(); }
+                    }
+                }
                 VerticalLayout {
                     alignment: center;
                     TextBtn {
@@ -2633,6 +3348,7 @@ export component MainWindow inherits Window {
                     horizontal-stretch: 1;
                     overflow: elide;
                 }
+                TextBtn { label: "profiles"; icon: Icons.favorite; clicked => { root.toggle-profiles(); } }
                 TextBtn { label: "import"; icon: Icons.upload-file; clicked => { root.import-file(); } }
                 TextBtn { label: "export"; icon: Icons.download; clicked => { root.export-file(); } }
                 TextBtn { label: "revert"; icon: Icons.undo; clicked => { root.revert(); } }
@@ -2729,6 +3445,7 @@ export component MainWindow inherits Window {
         update-channel: root.update-channel;
         update-auto: root.update-auto;
         install-note: root.install-note;
+        about-text: root.about-text;
         closed => { root.toggle-settings(); }
         dark-picked(v) => { root.set-dark(v); }
         readout-picked(v) => { root.set-readout(v); }
@@ -2741,6 +3458,46 @@ export component MainWindow inherits Window {
         auto-picked(v) => { root.set-auto-update(v); }
         logs-clicked => { root.open-logs(); }
         notes-clicked => { root.open-notes(); }
+        copy-clicked => { root.copy-diagnostics(); }
+    }
+    if root.whatsnew-open: WhatsNew {
+        x: (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2;
+        width: min(560px, root.width - 80px);
+        height: min(500px, root.height - 120px);
+        version: root.app-version;
+        from-version: root.whatsnew-from;
+        notes: root.whatsnew-notes;
+        dismissed => { root.dismiss-whatsnew(); }
+        changelog => { root.open-notes(); }
+    }
+    if root.prof-open: ProfilesSheet {
+        x: (root.width - self.width) / 2;
+        y: 60px;
+        width: min(640px, root.width - 80px);
+        height: min(620px, root.height - 130px);
+        rows: root.prof-rows;
+        note: root.prof-note;
+        count: root.prof-count;
+        closed => { root.toggle-profiles(); }
+        named(t) => { root.profile-name-edited(t); }
+        saved => { root.profile-save(); }
+        applied(n) => { root.profile-apply(n); }
+        removed(n) => { root.profile-delete(n); }
+    }
+    if root.aeq-open: AutoEqSheet {
+        x: (root.width - self.width) / 2;
+        y: 60px;
+        width: min(720px, root.width - 80px);
+        height: root.height - 130px;
+        rows: root.aeq-rows;
+        note: root.aeq-note;
+        busy: root.aeq-busy;
+        count: root.aeq-count;
+        closed => { root.toggle-autoeq(); }
+        searched(t) => { root.autoeq-search(t); }
+        reloaded => { root.autoeq-reload(); }
+        picked(m, s, f) => { root.autoeq-pick(m, s, f); }
     }
     if root.help-open: HelpSheet {
         x: (root.width - self.width) / 2;

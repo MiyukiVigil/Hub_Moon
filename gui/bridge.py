@@ -51,7 +51,9 @@ except ImportError:
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     import moondrop_control as mc  # noqa: E402
 
+from . import autoeq
 from . import curve as curve_mod
+from . import profiles as prof
 from . import updater
 from .diagnostics import log
 from .icons import PATHS as ICON_PATHS
@@ -110,6 +112,10 @@ READOUT_COLS = [0.0, 0.13270, 0.23300, 0.33270, 0.46598,
 # removes the round-trip, the timing bug and the resize cost together. The main graph
 # keeps its pixel-space sampling because its dashed trace would shear under a
 # non-uniform viewbox scale.
+# The catalogue is 8,827 rows. The list is capped rather than paginated: nobody
+# scrolls past 200 headphones, and building more cards than that costs a frame.
+AEQ_LIMIT = 200
+
 PREVIEW_W = 1000.0
 PREVIEW_H = 600.0
 
@@ -280,7 +286,9 @@ def load_settings():
             "channel": channel if channel in updater.CHANNELS else "stable",
             # A version the user said no to. Offered once, then only again when
             # something newer than it turns up.
-            "skipped_version": str(data.get("skipped_version", "") or "")}
+            "skipped_version": str(data.get("skipped_version", "") or ""),
+            # what ran last, so a new version can say what changed
+            "last_run_version": str(data.get("last_run_version", "") or "")}
 
 
 def save_settings(settings):
@@ -725,6 +733,51 @@ class IoWorker(_Worker):
         self._post("imported", (data, os.path.basename(path)))
 
 
+class AutoEqWorker(_Worker):
+    """The AutoEQ catalogue, on a thread of its own.
+
+    Separate from HubWorker even though both fetch curves over HTTPS: the community
+    index is ~4 MB with no pagination, and a search that queued behind one would look
+    frozen. They are also never both busy — the two sheets are mutually exclusive — so
+    this thread is idle almost all of the time and costs nothing to keep.
+    """
+
+    def __init__(self, post):
+        super().__init__("autoeqworker")
+        self._post = post
+        self.index = None
+
+    def on_crash(self, exc):
+        self._post("aeq_error", _net_message(exc))
+
+    def load(self, query, refresh=False):
+        self._post("aeq_busy", True)
+        try:
+            if self.index is None or refresh:
+                self.index = autoeq.load_index(refresh=refresh)
+            rows = autoeq.search(self.index, query, limit=AEQ_LIMIT)
+        except Exception as exc:
+            log.warning("AutoEQ catalogue: %s", exc)
+            self._post("aeq_error", _net_message(exc))
+            return
+        finally:
+            self._post("aeq_busy", False)
+        self._post("aeq_rows", (rows, self.index.get("count", 0)))
+
+    def pick(self, row, band_count):
+        self._post("aeq_busy", True)
+        try:
+            text = autoeq.fetch_profile(self.index, row)
+            bands, preamp, dropped, warnings = autoeq.fit(text, band_count)
+        except Exception as exc:
+            log.warning("AutoEQ profile %s: %s", row.get("model"), exc)
+            self._post("aeq_error", _net_message(exc))
+            return
+        finally:
+            self._post("aeq_busy", False)
+        self._post("aeq_profile", (row, bands, preamp, dropped, warnings))
+
+
 def _net_message(exc):
     """Turn a urllib failure into a sentence about the world rather than about
     Python. "urlopen error [Errno -3]" tells a user nothing they can act on."""
@@ -846,6 +899,29 @@ class Bridge:
         self.update_found = None      # the dict from updater.check(), when there is one
         self.update_note = ""
         self.update_progress = 0.0
+        # ── what's new ──
+        self.whatsnew_open = False
+        self.whatsnew_from = ""
+        self.whatsnew_notes = []
+
+        # ── saved profiles ──
+        self.prof_open = False
+        self.prof_rows = []
+        self.prof_note = ""
+        self.prof_name = ""
+        self._prof_model = None
+        self._prof_sig = None
+
+        # ── AutoEQ ──
+        self.aeq_open = False
+        self.aeq_busy = False
+        self.aeq_note = ""
+        self.aeq_query = ""
+        self.aeq_rows = []
+        self.aeq_total = 0
+        self._aeq_model = None
+        self._aeq_sig = None
+
         self.install_kind = updater.install_kind()
         self.install_note = updater.describe_install(self.install_kind)
         # Set once an updater helper is armed and waiting for this process to exit.
@@ -856,7 +932,8 @@ class Bridge:
         self.hub = HubWorker(self._post)
         self.io = IoWorker(self._post)
         self.upd = UpdateWorker(self._post)
-        for w in (self.dev, self.hub, self.io, self.upd):
+        self.aeq = AutoEqWorker(self._post)
+        for w in (self.dev, self.hub, self.io, self.upd, self.aeq):
             w.start()
 
         window.refresh = self.refresh
@@ -894,6 +971,17 @@ class Bridge:
         window.preview_apply = self.preview_apply
         window.preview_close = self.preview_close
         window.dismiss_toast = lambda: (self.toast(""), self.push())
+        window.dismiss_whatsnew = self.dismiss_whatsnew
+        window.copy_diagnostics = self.copy_diagnostics
+        window.toggle_profiles = self.toggle_profiles
+        window.profile_name_edited = self.profile_name_edited
+        window.profile_save = self.profile_save
+        window.profile_apply = self.profile_apply
+        window.profile_delete = self.profile_delete
+        window.toggle_autoeq = self.toggle_autoeq
+        window.autoeq_search = self.autoeq_search
+        window.autoeq_pick = self.autoeq_pick
+        window.autoeq_reload = self.autoeq_reload
         window.check_update = lambda: self.check_update(True)
         window.install_update = self.install_update
         window.skip_update = self.skip_update
@@ -981,6 +1069,19 @@ class Bridge:
             self._filter_hub()
         elif kind == "hub_bands":
             self._adopt_hub_bands(*payload)
+        elif kind == "aeq_busy":
+            self.aeq_busy = bool(payload)
+        elif kind == "aeq_error":
+            self.aeq_busy = False
+            self.aeq_note = str(payload)
+        elif kind == "aeq_rows":
+            rows, total = payload
+            self.aeq_rows = rows
+            self.aeq_total = total
+            self.aeq_note = ("%d of %d headphones" % (len(rows), total)
+                             if rows else "No headphone matches that.")
+        elif kind == "aeq_profile":
+            self._adopt_autoeq(*payload)
         elif kind == "update_result":
             self.update_found = payload
             if payload is None:
@@ -1036,6 +1137,7 @@ class Bridge:
 
     # ── UI → workers ──
     def start(self):
+        self._check_whats_new()
         self.dev.submit(self.dev.refresh)
         # The opening update check is quiet and cached: it only reaches the network
         # once a day, it never raises, and it says nothing at all unless there is
@@ -1044,6 +1146,259 @@ class Bridge:
         if self.settings["check_updates"]:
             self.upd.submit(self.upd.check, self.settings["channel"],
                             mc.__version__, False)
+
+    # ── about, and what changed ──
+    def diagnostics_text(self):
+        """The facts a bug report needs, in the order someone would ask for them.
+
+        This exists because of what the coverage table says: eleven of the twelve
+        supported DACs and the whole of USB HID on Windows have never been exercised.
+        Closing that gap depends on strangers reporting what happened on hardware
+        nobody here owns, and the cheapest way to make a good report is a button that
+        writes one.
+        """
+        import platform
+
+        from . import diagnostics
+
+        lines = [
+            "Hub Moon %s" % mc.__version__,
+            "install    %s" % self.install_kind,
+            "channel    %s" % self.settings["channel"],
+            "os         %s %s (%s)" % (platform.system(), platform.release(),
+                                       platform.machine()),
+            "python     %s" % platform.python_version(),
+            "frozen     %s" % bool(getattr(sys, "frozen", False)),
+            "device     %s" % (self.device_name if self.connected
+                               else "none connected"),
+        ]
+        if self.connected:
+            lines.append("firmware   %s" % (self.firmware or "unknown"))
+            lines.append("product id 0x%04X · %d bands" % (self.product_id,
+                                                           self.band_count))
+        lines += [
+            "config     %s" % mc.config_dir(),
+            "cache      %s" % mc.cache_dir(),
+            "log        %s" % diagnostics.log_path(),
+        ]
+        return "\n".join(lines)
+
+    def copy_diagnostics(self):
+        """Put the About text on the clipboard, using whatever the desktop has.
+
+        Slint has no clipboard API, so this shells out — and if none of the usual
+        programs is installed it says so rather than pretending it worked, because a
+        silent no-op here means somebody pastes nothing into an issue.
+        """
+        text = self.diagnostics_text()
+        cmds = {
+            "win32": [["clip"]],
+            "darwin": [["pbcopy"]],
+        }.get(sys.platform, [["wl-copy"], ["xclip", "-selection", "clipboard"],
+                             ["xsel", "--clipboard", "--input"]])
+        for argv in cmds:
+            if not shutil.which(argv[0]):
+                continue
+            try:
+                kw = {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)} \
+                    if sys.platform == "win32" else {}
+                subprocess.run(argv, input=text, text=True, timeout=10,
+                               check=True, **kw)
+                self.toast("System info copied.", False)
+                self.push()
+                return
+            except (OSError, subprocess.SubprocessError):
+                continue
+        log.warning("no clipboard tool found; system info not copied")
+        self.toast("No clipboard tool found — the same text is in the log.", True)
+        log.info("system info:\n%s", text)
+        self.push()
+
+    def _check_whats_new(self):
+        """Show what changed, once, the first time a new version runs.
+
+        Not shown on a first install — there is nothing to have changed *from*, and
+        the welcome screen is already doing that job. The notes come from the cached
+        manifest, which is the one the updater downloaded before installing this
+        version, so this works with no network.
+        """
+        was = self.settings.get("last_run_version") or ""
+        if was == mc.__version__:
+            return
+        self.settings["last_run_version"] = mc.__version__
+        save_settings(self.settings)
+        if not was:
+            return                              # fresh install; welcome covers it
+        if not updater.is_newer(mc.__version__, was):
+            return                              # a downgrade says nothing useful
+        self.whatsnew_from = was
+        self.whatsnew_notes = updater.release_notes(self.settings["channel"])
+        self.whatsnew_open = True
+        self.welcome_open = False               # one opening screen, not two
+        log.info("updated from %s to %s; showing what changed", was, mc.__version__)
+
+    def dismiss_whatsnew(self):
+        self.whatsnew_open = False
+        self.push()
+
+    # ── saved profiles ──
+    def toggle_profiles(self):
+        self.prof_open = not self.prof_open
+        if self.prof_open:
+            self.aeq_open = self.hub_open = self.help_open = self.settings_open = False
+            self._reload_profiles()
+        self.push()
+
+    def _reload_profiles(self):
+        self.prof_rows = prof.load_all()
+        self.prof_note = ("%d saved" % len(self.prof_rows) if self.prof_rows
+                          else "Nothing saved yet.")
+
+    def profile_name_edited(self, text):
+        self.prof_name = str(text or "")
+
+    def profile_save(self):
+        """Keep the curve that is on screen, under a name.
+
+        What is saved is the *edited* state, not what the DAC last confirmed — the
+        whole point is to keep something you are in the middle of making. It does not
+        touch flash and it does not touch the device.
+        """
+        name = self.prof_name.strip()
+        if not name:
+            self.toast("Give the profile a name first.", True)
+            self.push()
+            return
+        try:
+            prof.save(name, self.bands, self.pregain,
+                      global_gain=self.global_gain,
+                      device=self.device_name if self.connected else "",
+                      slot=self.slot)
+        except OSError as exc:
+            log.error("saving profile %r failed", name, exc_info=True)
+            self.toast("Could not save: %s" % exc, True)
+            self.push()
+            return
+        log.info("saved profile %r", name)
+        self.prof_name = ""
+        self._reload_profiles()
+        self.toast("Saved “%s”." % name, False)
+        self.push()
+
+    def profile_apply(self, name):
+        """Load a saved curve onto the current device.
+
+        A profile saved on a device with more bands than this one has is not refused —
+        it is fitted, and the toast says how many were dropped. Refusing would make a
+        library useless the moment somebody owns two DACs.
+        """
+        row = next((r for r in self.prof_rows if r["name"] == str(name)), None)
+        if not row:
+            return
+        bands, dropped = [], 0
+        for n, f in enumerate(row["bands"]):
+            if n >= self.band_count:
+                dropped += 1
+                continue
+            ftype, freq, gain, q = clamp_band(f["type"], f["frequency"],
+                                              f["gain"], f["q"])
+            bands.append({"index": n, "type": ftype, "frequency": freq,
+                          "gain": gain, "q": q})
+        while len(bands) < self.band_count:
+            bands.append(_disabled_band(len(bands)))
+
+        self._replace_bands(bands, float(row["pregain"]))
+        if row.get("global_gain") is not None:
+            self.set_global_gain(float(row["global_gain"]))
+        self.active_preset = ""
+        self.prof_open = False
+        note = "Loaded “%s”." % row["name"]
+        if dropped:
+            note += " %d band%s past this device's %d were dropped." % (
+                dropped, "" if dropped == 1 else "s", self.band_count)
+        self.toast(note, False)
+        self.push()
+
+    def profile_delete(self, name):
+        if prof.delete(str(name)):
+            log.info("deleted profile %r", name)
+            self._reload_profiles()
+            self.toast("Deleted “%s”." % name, False)
+        else:
+            self.toast("Could not delete “%s”." % name, True)
+        self.push()
+
+    # ── AutoEQ ──
+    def toggle_autoeq(self):
+        self.aeq_open = not self.aeq_open
+        if self.aeq_open:
+            self.prof_open = False
+            self.hub_open = self.help_open = self.settings_open = False
+            if not self.aeq_rows:
+                self.aeq_note = "Loading the catalogue…"
+                self.aeq.submit(self.aeq.load, self.aeq_query, False)
+        self.push()
+
+    def autoeq_search(self, text):
+        self.aeq_query = str(text or "")
+        self.aeq.submit(self.aeq.load, self.aeq_query, False)
+        self.push()
+
+    def autoeq_reload(self):
+        self.aeq_note = "Refetching the catalogue…"
+        self.aeq.submit(self.aeq.load, self.aeq_query, True)
+        self.push()
+
+    def autoeq_pick(self, model, source, form):
+        """Fetch one headphone's correction and hold it for review — the same preview
+        the community library uses, because nothing should reach the DAC unseen."""
+        self.aeq.submit(self.aeq.pick,
+                        {"model": str(model), "source": str(source), "form": str(form)},
+                        self.band_count)
+        self.push()
+
+    def _adopt_autoeq(self, row, raw, preamp, dropped, warnings):
+        """An AutoEQ correction, clamped onto this device and held for review.
+
+        Unlike a community config, this one arrives with a pre-gain of its own —
+        AutoEQ computes the headroom its curve needs, and that figure is better than
+        anything derived here, so it is kept. What is *not* kept quiet is the fit:
+        every AutoEQ profile has ten filters and this DAC has eight, so two are always
+        left behind and the note says which.
+        """
+        bands = []
+        for n in range(self.band_count):
+            if n < len(raw):
+                ftype, freq, gain, q = clamp_band(raw[n]["type"], raw[n]["frequency"],
+                                                  raw[n]["gain"], raw[n]["q"])
+            else:
+                ftype, freq, gain, q = "disabled", 1000, 0.0, 1.0
+            bands.append({"index": n, "type": ftype, "frequency": freq,
+                          "gain": gain, "q": q})
+
+        pre = round(_clamp(float(preamp), PREGAIN_MIN, PREGAIN_MAX), 1)
+        used = sum(1 for b in bands if b["type"] != "disabled")
+        note = "%d of %d bands · pre-gain %+.1f dB (AutoEQ's own)" % (
+            used, self.band_count, pre)
+        if dropped:
+            note += " · left out: " + ", ".join(
+                "%.0f Hz %+.1f dB" % (d["frequency"], d["gain"]) for d in dropped)
+        for w in warnings:
+            note += " · " + w
+
+        self.preview = {
+            "uuid": "",
+            "title": row["model"],
+            # The dialog renders this as "by <author>", so it must not say "measured
+            # by" itself — that read "by measured by oratory1990".
+            "author": "%s · %s" % (row["source"], row["form"]),
+            "desc": "AutoEQ correction, fitted to this device's %d bands. %s"
+                    % (self.band_count, autoeq.CREDIT),
+            "bands": bands,
+            "pregain": pre,
+            "note": note,
+        }
+        self.aeq_note = ""
 
     # ── updates ──
     def check_update(self, force=False):
@@ -1484,6 +1839,8 @@ class Bridge:
         self._replace_bands([dict(b) for b in p["bands"]], p["pregain"])
         self.active_preset = ""
         self.hub_open = False
+        self.aeq_open = False
+        self.prof_open = False
         self.toast("Applied “%s”." % p["title"], False)
         self.push()
 
@@ -1495,6 +1852,8 @@ class Bridge:
     def toggle_help(self):
         self.help_open = not self.help_open
         if self.help_open:
+            self.aeq_open = False
+            self.prof_open = False
             self.hub_open = False
             self.settings_open = False
         self.push()
@@ -1502,6 +1861,8 @@ class Bridge:
     def toggle_settings(self):
         self.settings_open = not self.settings_open
         if self.settings_open:
+            self.aeq_open = False
+            self.prof_open = False
             self.hub_open = False
             self.help_open = False
         self.push()
@@ -1549,7 +1910,7 @@ class Bridge:
         other two workers were then never waited on at all. A worker wedged in a
         blocking read must not be able to hold up the two that are not.
         """
-        workers = (self.dev, self.hub, self.io, self.upd)
+        workers = (self.dev, self.hub, self.io, self.upd, self.aeq)
         self.dev.submit(self.dev.shutdown_device)
         for w in workers:
             w.shutdown()
@@ -1652,6 +2013,35 @@ class Bridge:
                 for r in self.hub_visible
             ])
             w.hub_rows = self._hub_model
+
+        w.whatsnew_open = self.whatsnew_open
+        w.whatsnew_from = self.whatsnew_from
+        w.whatsnew_notes = slint.ListModel(list(self.whatsnew_notes)) \
+            if self.whatsnew_notes else slint.ListModel([])
+        w.about_text = self.diagnostics_text()
+
+        w.prof_open = self.prof_open
+        w.prof_note = self.prof_note
+        w.prof_count = len(self.prof_rows)
+        psig = tuple((r["name"], r["saved"]) for r in self.prof_rows)
+        if psig != self._prof_sig:
+            self._prof_sig = psig
+            self._prof_model = slint.ListModel([
+                {"name": r["name"], "note": prof.summary(r, self.band_count)}
+                for r in self.prof_rows])
+            w.prof_rows = self._prof_model
+
+        w.aeq_open = self.aeq_open
+        w.aeq_busy = self.aeq_busy
+        w.aeq_note = self.aeq_note
+        w.aeq_count = len(self.aeq_rows)
+        asig = tuple((r["model"], r["source"]) for r in self.aeq_rows)
+        if asig != self._aeq_sig:
+            self._aeq_sig = asig
+            self._aeq_model = slint.ListModel([
+                {"model": r["model"], "source": r["source"], "form": r["form"]}
+                for r in self.aeq_rows])
+            w.aeq_rows = self._aeq_model
 
         if self._plot_w > 1 and self._plot_h > 1:
             # Fewer samples while a handle is under the pointer: the curve is resampled

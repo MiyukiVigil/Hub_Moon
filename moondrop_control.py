@@ -18,7 +18,7 @@ import sys
 import os
 import json
 import math
-import platform
+import re
 import time
 import struct
 import argparse
@@ -28,7 +28,7 @@ import argparse
 # bundle, the GUI shows it, and the updater compares against it. Everything that
 # used to carry its own copy — and had already drifted, the .app was still
 # announcing 0.2.0 at 1.0.0 — now asks this.
-__version__ = "1.1.0"
+__version__ = "1.2.0b1"
 
 try:
     import hid
@@ -186,6 +186,145 @@ FILTER_TYPES = {
     "low_pass": 4,
     "high_pass": 5
 }
+
+# ── parametric EQ text (REW / AutoEQ) ────────────────────────────────────────
+#
+# The shape tokens these files use, mapped onto ours.
+#
+# `LSC` and `HSC` are the ones that actually matter, and they were missing until
+# 1.2.0. **AutoEQ writes every shelf that way** — a survey of 38 of its published
+# profiles found exactly three tokens in use, `PK`, `LSC` and `HSC` — and the old
+# lookup fell back to peaking for anything it did not recognise. So importing any
+# AutoEQ profile silently turned both of its shelves, which are usually the two
+# largest filters in the file, into peaks at the same frequency. The curve that
+# reached the DAC was not the curve AutoEQ computed, and nothing said so.
+#
+# Falling back to peaking is right when the *vendor's* app does it (see
+# HUB_FILTER_TYPES), because there the goal is to reproduce what a preset's author
+# heard. It is wrong here: an LSC is a shelf, it is documented as a shelf, and
+# guessing is not required.
+PEQ_TEXT_TYPES = {
+    "PK": "peaking", "PEQ": "peaking", "BELL": "peaking", "MODAL": "peaking",
+    "LS": "low_shelf", "LSC": "low_shelf", "LSQ": "low_shelf", "LOWSHELF": "low_shelf",
+    "HS": "high_shelf", "HSC": "high_shelf", "HSQ": "high_shelf", "HIGHSHELF": "high_shelf",
+    "LP": "low_pass", "LPQ": "low_pass",
+    "HP": "high_pass", "HPQ": "high_pass",
+}
+
+# Shapes these files can express that this hardware cannot. Named rather than
+# silently dropped, so an import that loses something says which and why.
+PEQ_TEXT_UNSUPPORTED = {
+    "NO": "notch", "NOTCH": "notch", "AP": "all-pass", "BP": "band-pass",
+    "LR": "Linkwitz-Riley crossover", "BPQ": "band-pass",
+}
+
+# `Filter 3: ON PK Fc 8445 Hz Gain 3.3 dB Q 1.61`, and the variants around it:
+# REW pads with spaces, writes some corners in kHz, and omits Gain on a pass filter
+# and Q on the fixed-slope shelves (`LS 6dB`).
+_PEQ_LINE = re.compile(
+    r"^Filter\s+(\d+)\s*:\s*(ON|OFF)\s+"
+    r"([A-Za-z]+(?:\s+\d+\s*dB)?)"                      # PK / LSC / "LS 6dB"
+    r"(?:\s+Fc\s+([\d.]+)\s*(k?)Hz)?"
+    r"(?:\s+Gain\s+([-+]?[\d.]+)\s*dB)?"
+    r"(?:\s+Q\s+([\d.]+))?",
+    re.IGNORECASE)
+_PEQ_PREAMP = re.compile(r"^(?:Preamp|Pre-gain|Pre-amp)\s*:\s*([-+]?[\d.]+)\s*dB",
+                         re.IGNORECASE)
+
+
+def parse_peq_text(text):
+    """Read a REW / AutoEQ parametric EQ file into this tool's band model.
+
+    Pure: it opens nothing, writes nothing and touches no device, which is what lets
+    the CLI, the GUI and the tests all use the one implementation. Through 1.1.0 this
+    logic lived inline in ``main()``, interleaved with ``write_peq_index`` calls and
+    ``print``, so it could be neither reused nor tested.
+
+    Returns ``{"preamp": float, "filters": [...], "warnings": [str, ...]}``. Filters
+    keep the file's own order and carry a zero-based ``index``. Nothing is dropped
+    quietly: a shape this hardware cannot make, or a line that does not parse, comes
+    back as a warning naming the line.
+    """
+    preamp = 0.0
+    filters = []
+    warnings = []
+    seen_any = False
+
+    for lineno, raw in enumerate(text.splitlines(), 1):
+        line = raw.strip()
+        if not line or line.startswith(("#", ";", "//")):
+            continue
+
+        got = _PEQ_PREAMP.match(line)
+        if got:
+            preamp = float(got.group(1))
+            continue
+
+        got = _PEQ_LINE.match(line)
+        if not got:
+            if line.lower().startswith("filter"):
+                warnings.append("line %d: could not read %r" % (lineno, line[:60]))
+            continue
+
+        seen_any = True
+        num, state, shape, fc, kilo, gain, q = got.groups()
+        token = re.sub(r"\s+", "", shape).upper()
+        token = re.sub(r"\d+DB$", "", token)          # "LS6dB" -> "LS"
+
+        if state.upper() == "OFF":
+            continue                                   # an off filter is simply absent
+
+        kind = PEQ_TEXT_TYPES.get(token)
+        if kind is None:
+            what = PEQ_TEXT_UNSUPPORTED.get(token)
+            warnings.append(
+                "line %d: %s is a %s, which this DAC cannot make — skipped"
+                % (lineno, token, what) if what else
+                "line %d: unknown filter shape %r — skipped" % (lineno, token))
+            continue
+
+        if fc is None:
+            warnings.append("line %d: no corner frequency — skipped" % lineno)
+            continue
+
+        freq = float(fc) * (1000.0 if kilo else 1.0)
+        filters.append({
+            "index": int(num) - 1,
+            "type": kind,
+            "frequency": freq,
+            "gain": float(gain) if gain is not None else 0.0,
+            "q": float(q) if q is not None else 0.707,
+        })
+
+    if not seen_any:
+        warnings.append("no filter lines found — is this a REW or AutoEQ export?")
+    return {"preamp": preamp, "filters": filters, "warnings": warnings}
+
+
+def fit_peq_to_bands(filters, band_count):
+    """Choose which filters survive when a file has more of them than the DAC has bands.
+
+    This is the normal case rather than an edge one: AutoEQ publishes **ten** filters
+    for every headphone it covers, and no Moondrop DAC here has more than eight bands.
+    Keeping the first eight in file order would be arbitrary — that order is the
+    optimiser's, not a ranking — so the ones kept are the ones that move the curve
+    most, measured as |gain| with a wider filter breaking a tie, since a low-Q filter
+    colours far more of the spectrum than a narrow one of the same height.
+
+    Returns ``(kept, dropped)``. `kept` is renumbered onto slots 0..n-1 and put back
+    in the file's own order; `dropped` keeps its parameters so the caller can say
+    exactly what was left out.
+    """
+    usable = [f for f in filters if f["type"] != "disabled"]
+    if len(usable) <= band_count:
+        kept, dropped = usable, []
+    else:
+        ranked = sorted(usable, key=lambda f: (-abs(f["gain"]), f["q"]))
+        keep_ids = {id(f) for f in ranked[:band_count]}
+        kept = [f for f in usable if id(f) in keep_ids]
+        dropped = [f for f in usable if id(f) not in keep_ids]
+    kept = [dict(f, index=i) for i, f in enumerate(kept)]
+    return kept, dropped
 REV_FILTER_TYPES = {v: k for k, v in FILTER_TYPES.items()}
 
 # ---------------------------------------------------------------------------
@@ -1397,61 +1536,31 @@ def main():
                     print("Import completed and configurations saved to Flash.")
 
             if args.import_rew:
-                import re
-                print(f"Parsing REW configuration file: {args.import_rew}...")
+                print(f"Parsing parametric EQ file: {args.import_rew}...")
                 with open(args.import_rew, 'r', encoding='utf-8') as f:
-                    lines = f.readlines()
+                    parsed = parse_peq_text(f.read())
 
-                filters = []
-                preamp = 0.0
-                rew_types = {
-                    "PK": "peaking",
-                    "LS": "low_shelf",
-                    "HS": "high_shelf",
-                    "LP": "low_pass",
-                    "HP": "high_pass"
-                }
+                preamp = parsed["preamp"]
+                for note in parsed["warnings"]:
+                    print(f"  note: {note}")
 
-                for line in lines:
-                    line = line.strip()
-                    preamp_match = re.match(r'(?:Preamp|Pre-gain|Pre-amp):\s*([\d\.-]+)\s*dB', line, re.IGNORECASE)
-                    if preamp_match:
-                        preamp = float(preamp_match.group(1))
-                        continue
-
-                    filter_match = re.match(r'Filter\s+(\d+):\s*(ON|OFF)\s+([a-zA-Z0-9_]+)\s+Fc\s+([\d\.]+)\s*Hz\s+Gain\s+([\d\.-]+)\s*dB\s+Q\s+([\d\.]+)', line, re.IGNORECASE)
-                    if filter_match:
-                        idx = int(filter_match.group(1)) - 1
-                        state = filter_match.group(2).upper()
-                        t_rew = filter_match.group(3).upper()
-                        freq = float(filter_match.group(4))
-                        gain = float(filter_match.group(5))
-                        q = float(filter_match.group(6))
-
-                        t_mapped = rew_types.get(t_rew, "peaking")
-                        if state == "OFF":
-                            t_mapped = "disabled"
-
-                        filters.append({
-                            "index": idx,
-                            "type": t_mapped,
-                            "frequency": freq,
-                            "gain": gain,
-                            "q": q
-                        })
-
-                filters = sorted(filters, key=lambda x: x["index"])
-                usable = [f for f in filters if 0 <= f["index"] < dev.bands]
-                if len(usable) < len(filters):
-                    print(f"Note: {len(filters) - len(usable)} filter(s) from the REW file fall outside "
-                          f"this device's {dev.bands} bands and will be ignored.")
+                usable, dropped = fit_peq_to_bands(parsed["filters"], dev.bands)
+                if dropped:
+                    # AutoEQ publishes ten filters for every headphone and no device
+                    # here has more than eight bands, so this is the ordinary path.
+                    # Say precisely what was left out rather than "2 ignored".
+                    print(f"This file has {len(parsed['filters'])} filters and the device has "
+                          f"{dev.bands} bands. Keeping the {len(usable)} that move the curve most; "
+                          f"leaving out:")
+                    for f in dropped:
+                        print(f"    {f['type']} @ {f['frequency']:g} Hz, {f['gain']:+.1f} dB, Q={f['q']:.2f}")
 
                 if preamp != 0.0:
                     print(f"Setting Pre-Gain to {preamp:.2f} dB...")
                     dev.set_pregain(preamp, save=False)
 
                 for f in usable:
-                    print(f"Writing PEQ Slot {f['index']}: {f['type']} @ {f['frequency']}Hz, {f['gain']}dB, Q={f['q']:.3f}...")
+                    print(f"Writing PEQ Slot {f['index']}: {f['type']} @ {f['frequency']:g}Hz, {f['gain']}dB, Q={f['q']:.3f}...")
                     dev.write_peq_index(f["index"], f["type"], f["frequency"], f["gain"], f["q"])
 
                 configured_indices = {f["index"] for f in usable}

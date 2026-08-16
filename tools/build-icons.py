@@ -85,7 +85,12 @@ def scan_ui(ligs, gname):
     carries it. The few false positives — a string that happens to share a name with an
     icon, like "title" or "score" — cost a few hundred bytes each.
     """
-    seq = lambda t: "".join(gname.get(ch, "\0") for ch in t)
+    def seq(t):
+        """A name as the glyph sequence it shapes from, which is the key the ligature
+        table is built on. NUL for a character the font has no glyph for, so an
+        unmappable name simply fails to match rather than half-matching."""
+        return "".join(gname.get(ch, "\0") for ch in t)
+
     tokens = set()
     for pattern in UI_GLOBS:
         for path in glob.glob(os.path.join(ROOT, pattern), recursive=True):

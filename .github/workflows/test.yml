@@ -1,0 +1,103 @@
+name: Tests
+
+# Runs on every push and pull request. The three build-* workflows only fire on a
+# tag, which meant nothing checked this code until a release was already being cut.
+#
+# The version matrix is the point rather than thoroughness for its own sake. The
+# 1.0.0 quit crash was a name collision with `threading.Thread._stop`: fatal on the
+# 3.12 the release bundles are built with, and *impossible to trigger* on 3.13+,
+# where CPython removed the method that called it. It was written and tested on 3.14,
+# so it shipped. One job per supported interpreter is what turns that into a red X.
+
+on:
+  push:
+    branches: ["main", "test"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: py${{ matrix.python }} · ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        python: ["3.9", "3.10", "3.11", "3.12", "3.13", "3.14"]
+        include:
+          # The config/cache/log paths branch per platform and the file choosers
+          # shell out to three different programs, so the other two OSes get a run
+          # even though the bulk of the matrix is Linux.
+          - os: windows-latest
+            python: "3.12"
+          - os: macos-latest
+            python: "3.12"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          # hidapi only: moondrop_control imports `hid` at module scope, and slint is
+          # an optional extra the suite skips around. Keeping the test environment
+          # this thin is deliberate — it proves the CLI really does stand alone.
+          pip install hidapi pytest
+
+      - name: Test
+        run: python -m pytest tests/ -q
+
+  ui:
+    name: slint compiles
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install with the GUI extra
+        run: |
+          python -m pip install --upgrade pip
+          pip install ".[gui]"
+
+      - name: Compile the UI
+        # `.slint` sources are compiled at startup, so a syntax error in them is a
+        # runtime failure with no window and no traceback anyone will read. Compiling
+        # here turns that into a build error.
+        run: |
+          python - <<'PY'
+          import slint
+          slint.load_file("gui/ui/app.slint")
+          print("gui/ui/app.slint compiles")
+          PY
+
+      - name: Every icon the UI names exists
+        run: |
+          python - <<'PY'
+          import re, sys
+          ui = open("gui/ui/app.slint", encoding="utf-8").read()
+          icons = open("gui/ui/icons.slint", encoding="utf-8").read()
+          have = set(re.findall(r"out property <string>\s+([a-z0-9-]+)", icons))
+          want = set(re.findall(r"\bIcons\.([a-z][a-z0-9-]*)", ui))
+          missing = sorted(want - have)
+          print("%d icons referenced, %d available" % (len(want), len(have)))
+          if missing:
+              sys.exit("UI references icons that icons.slint does not define: %s" % missing)
+          PY
+
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ruff
+      - name: ruff
+        run: ruff check --output-format=github .

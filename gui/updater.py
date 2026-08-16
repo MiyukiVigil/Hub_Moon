@@ -205,17 +205,30 @@ ASSET_FOR = {
 }
 
 #: What to tell someone whose install we must not touch.
+#
+#: These have to be commands that *work*, which is a sharper constraint than it looks.
+#: Hub Moon is published on **neither PyPI nor the AUR** — 1.1.0 printed
+#: ``pip install --upgrade hub-moon`` and ``yay -Syu hub-moon``, and both fail with
+#: "no matching distribution" / "target not found". There is no apt or dnf repository
+#: either: the .deb and .rpm are files you download, so ``apt install --only-upgrade``
+#: had nothing to look in. Every line below mirrors what the install guide actually
+#: tells people to run, and the ones needing a file first are listed in NEEDS_DOWNLOAD.
 MANUAL_HINT = {
-    "deb": "sudo apt update && sudo apt install --only-upgrade hub-moon",
-    "rpm": "sudo dnf upgrade hub-moon",
-    "pacman": "yay -Syu hub-moon",
+    "deb": "sudo apt install ./hub-moon_<version>_amd64.deb",
+    "rpm": "sudo dnf install ./hub-moon-<version>.x86_64.rpm",
+    "pacman": "makepkg -si        # from packaging/PKGBUILD in the repo",
     "nix": "nix profile upgrade hub-moon",
     "pipx": "pipx upgrade hub-moon",
-    "pip": "pip install --upgrade 'hub-moon[gui]'",
-    "system": "update through the package manager that installed it",
+    "pip": "pip install --upgrade 'hub-moon[gui] @ "
+           "git+https://github.com/MiyukiVigil/Hub_Moon'",
+    "system": "update it with whatever package manager installed it",
     "source": "git pull",
     "unknown": "download the new build from " + RELEASES_URL,
 }
+
+#: Kinds whose command operates on a file that has to be fetched from the release
+#: page first — so the instruction has to say that, not just print the command.
+NEEDS_DOWNLOAD = frozenset({"deb", "rpm"})
 
 
 def asset_key(kind=None):
@@ -322,6 +335,26 @@ def fetch_manifest(channel, force=False, ttl=CHECK_TTL):
     return None
 
 
+def release_notes(channel="stable", version=None):
+    """What changed in `version`, from the manifest already on disk.
+
+    Read from the cache rather than fetched, and that is the point: this is called
+    the first time the app runs *after* an update, when the manifest describing that
+    version is exactly what the check downloaded before installing it. So the What's
+    New screen works with no network at all — which is the common case, because the
+    machine has just restarted.
+
+    Returns [] when there is nothing to say, never raising: a missing manifest means
+    no notes, and no notes is a screen that is simply not shown.
+    """
+    want = version or mc.__version__
+    for chan in ([channel] + [c for c in CHANNELS if c != channel]):
+        data = _read_cache(chan, ttl=float("inf"))
+        if data and str(data.get("version")) == str(want):
+            return [str(n) for n in (data.get("notes") or [])]
+    return []
+
+
 def check(channel="stable", current=None, force=False, ttl=CHECK_TTL):
     """Is there something newer? Returns a dict the UI can render, or None.
 
@@ -357,6 +390,11 @@ def check(channel="stable", current=None, force=False, ttl=CHECK_TTL):
         hint = RELEASES_URL
         reason = ("That release has no download for this platform yet — the build may "
                   "still be running. You can get it from:")
+    elif kind in NEEDS_DOWNLOAD:
+        hint = MANUAL_HINT[kind]
+        reason = ("This copy is managed by a package manager, so Hub Moon will not "
+                  "replace its own files. Download the new package from %s, then:"
+                  % RELEASES_URL)
     else:
         hint = MANUAL_HINT.get(kind, RELEASES_URL)
         reason = ("This copy is managed by a package manager, so Hub Moon will not "
@@ -364,6 +402,7 @@ def check(channel="stable", current=None, force=False, ttl=CHECK_TTL):
 
     return {
         "version": man["version"],
+        "notes": [str(n) for n in (man.get("notes") or [])],
         "channel": channel,
         "date": man.get("date", ""),
         "summary": man.get("summary", ""),
@@ -417,7 +456,7 @@ def download(asset, dest_dir=None, on_progress=None):
                 if on_progress:
                     on_progress(done, total)
     except (urllib.error.URLError, OSError) as exc:
-        raise UpdateError("download failed: %s" % exc)
+        raise UpdateError("download failed: %s" % exc) from exc
 
     got = digest.hexdigest()
     if got != want:
@@ -527,7 +566,7 @@ def apply_macos_app(path):
                         "-mountpoint", mount, path], check=True,
                        capture_output=True, timeout=180)
     except (OSError, subprocess.SubprocessError) as exc:
-        raise UpdateError("could not open the disk image: %s" % exc)
+        raise UpdateError("could not open the disk image: %s" % exc) from exc
 
     try:
         src = next((os.path.join(mount, e) for e in os.listdir(mount)
