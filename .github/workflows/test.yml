@@ -90,6 +90,16 @@ jobs:
               sys.exit("UI references icons that icons.slint does not define: %s" % missing)
           PY
 
+      - name: The bridge against the real window
+        # tests/test_bridge_smoke.py skips itself without slint, so the matrix above
+        # never runs it. This is the only job that has slint installed, and therefore
+        # the only place a property the .slint does not declare — or a callback bound
+        # to a name that does not exist — turns into a red X instead of a launch that
+        # dies on somebody's machine.
+        run: |
+          pip install pytest
+          xvfb-run -a python -m pytest tests/test_bridge_smoke.py -q
+
   lint:
     name: lint
     runs-on: ubuntu-latest

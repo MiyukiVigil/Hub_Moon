@@ -76,3 +76,11 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 # The spec is executed by PyInstaller with SPECPATH and friends already bound.
 "packaging/hub-moon.spec" = ["F821"]
+
+# Collect only the real test tree. `makepkg` leaves a full copy of the repo under
+# packaging/src/, and pytest finding two files named tests/test_updater.py refuses to
+# collect either — a build artefact breaking the test run is a confusing way to lose
+# an afternoon.
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+norecursedirs = ["packaging/src", "packaging/pkg", "build", "dist", ".git"]

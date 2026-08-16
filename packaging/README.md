@@ -52,16 +52,27 @@ that is how the `.app` ended up announcing `0.2.0` throughout 1.0.0.
 # 1. bump the one constant, and write the changelog entry
 $EDITOR moondrop_control.py CHANGELOG.md
 
-# 2. tag it — the three workflows fire on the tag and build the release
+# 2. compile the changelog into the build. `tests/test_release_notes_tool.py` fails
+#    if this is skipped, so a version can't ship unable to say what is in it.
+python3 tools/build-release-notes.py
+
+# 3. tag it — the three workflows fire on the tag and build the release
 git commit -am "v1.1.0" && git tag v1.1.0 && git push origin main --tags
 
-# 3. once all three workflows are green, build the update manifest from the release
+# 4. once all three workflows are green, build the update manifest from the release
 python3 tools/build-update-manifest.py v1.1.0
 
-# 4. put it where the app looks: packaging/update.json on main (stable),
+# 5. put it where the app looks: packaging/update.json on main (stable),
 #    packaging/update-beta.json on test (beta)
 git add packaging/update.json && git commit -m "manifest: 1.1.0" && git push
 ```
+
+**Step 2 is not optional, and it is not the same thing as step 4.** The manifest's
+notes come from the GitHub release body and are shown to somebody deciding whether to
+install; `gui/notes.py` is compiled into the build and is what the app shows *after*
+updating, or on any build that never came from a release — a `makepkg -si`, a wheel
+from a git URL, a beta whose workflows have not finished. The beta channel is mostly
+made of those, which is why 1.2.0b1's What's New panel opened empty.
 
 For a **beta**, tag it `v1.2.0-beta.1`, mark the GitHub release as a *pre-release*, and
 push the generated `update-beta.json` to the `test` branch. `build-update-manifest.py`

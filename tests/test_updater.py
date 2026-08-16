@@ -166,20 +166,29 @@ def test_a_manifest_that_is_not_json_is_treated_as_unreachable(tmp_path, monkeyp
 
 
 def test_package_manager_install_is_told_the_command(cached, monkeypatch):
-    monkeypatch.setattr(U, "install_kind", lambda: "pacman")
+    """A kind nothing can ever be downloaded for — pip installs from a git URL, so
+    there is no artefact and the only useful answer is the command."""
+    monkeypatch.setattr(U, "install_kind", lambda: "pip")
     cached("stable", manifest("1.2.0"))
     got = U.check("stable", current="1.1.0")
-    assert got["can_install"] is False
-    assert got["hint"] == U.MANUAL_HINT["pacman"]
+    assert got["can_install"] is False and got["can_fetch"] is False
+    assert got["hint"] == U.MANUAL_HINT["pip"]
     assert "package manager" in got["reason"]
 
 
-def test_a_downloadable_package_is_told_where_to_get_it(cached, monkeypatch):
-    """`apt install ./file.deb` is useless without saying where the file comes from."""
+def test_a_fetchable_kind_with_a_package_explains_the_root_prompt(cached, monkeypatch):
+    """When the release does carry the package, the reason is about authorisation —
+    not about where to find a file, because the app is fetching it."""
     monkeypatch.setattr(U, "install_kind", lambda: "deb")
-    cached("stable", manifest("1.2.0"))
+    monkeypatch.setattr(U.shutil, "which", lambda n: "/usr/bin/" + n)
+    cached("stable", manifest("1.2.0", **{"deb-package": {
+        "url": "https://example.invalid/hub-moon.deb", "sha256": "a" * 64, "size": 9}}))
     got = U.check("stable", current="1.1.0")
-    assert U.RELEASES_URL in got["reason"] and "./" in got["hint"]
+    assert got["can_fetch"] is True
+    assert "root" in got["reason"]
+    # A placeholder, not a path: the real one is not known until the download has
+    # finished, and the exact line with the path in it replaces this afterwards.
+    assert got["hint"] == "sudo apt install <the downloaded file>"
 
 
 def test_missing_asset_is_not_blamed_on_a_package_manager(cached, monkeypatch):
@@ -227,3 +236,250 @@ def test_asset_without_a_url_is_refused(tmp_path):
 def test_install_refuses_a_kind_it_must_not_touch():
     with pytest.raises(U.UpdateError, match="makepkg"):
         U.install({"install_kind": "pacman", "asset": {}})
+
+
+# ── what's new ───────────────────────────────────────────────────────────────
+
+def test_release_notes_come_from_the_cache(cached):
+    cached("stable", dict(manifest("1.2.0"), notes=["one", "two"]))
+    assert U.release_notes("stable", "1.2.0") == ["one", "two"]
+
+
+def test_release_notes_match_a_version_spelled_either_way(cached):
+    """`v1.2.0-beta.1` and `1.2.0b1` are the same release. PEP 440 spells it one way,
+    and Arch's pkgver forbids the hyphen in the other — so the tag and __version__ can
+    legitimately differ in text, and matching on text would show an empty panel."""
+    cached("beta", dict(manifest("1.2.0-beta.1"), notes=["hello"]))
+    assert U.release_notes("beta", "1.2.0b1") == ["hello"]
+    assert U.release_notes("beta", "1.2.0-beta.1") == ["hello"]
+
+
+def test_release_notes_for_another_version_do_not_come_from_its_manifest(cached):
+    """The one thing that must never happen: 1.2.0's notes shown for 1.1.0."""
+    cached("stable", dict(manifest("1.2.0"), notes=["one"]))
+    assert "one" not in U.release_notes("stable", "1.1.0")
+
+
+def test_release_notes_with_no_manifest_fall_back_to_this_build(tmp_path, monkeypatch):
+    """The beta case, and the reason gui/notes.py exists.
+
+    A build from the repo — `makepkg -si`, a wheel from a git URL, a beta whose release
+    has not been published — has no manifest to read and never will. Announcing a new
+    version and then showing an empty panel is worse than not announcing it.
+    """
+    monkeypatch.setattr(U.mc, "cache_dir", lambda: str(tmp_path))
+    from gui.notes import NOTES
+    assert U.release_notes("beta", "1.1.0") == NOTES["1.1.0"]
+
+
+def test_a_manifest_that_carries_no_notes_falls_back_too(cached):
+    """Matching the version is not the same as having something to say about it."""
+    cached("stable", dict(manifest("1.1.0"), notes=[]))
+    assert U.release_notes("stable", "1.1.0")
+
+
+def test_release_notes_with_nothing_anywhere_are_empty(tmp_path, monkeypatch):
+    monkeypatch.setattr(U.mc, "cache_dir", lambda: str(tmp_path))
+    assert U.release_notes("stable", "9.9.9") == []
+
+
+def test_bundled_notes_match_a_version_spelled_either_way(tmp_path, monkeypatch):
+    monkeypatch.setattr(U.mc, "cache_dir", lambda: str(tmp_path))
+    from gui.notes import NOTES
+    tag = next(t for t in NOTES if "b" in t)          # e.g. 1.2.0b1
+    assert U.bundled_notes(tag) == NOTES[tag]
+    assert U.bundled_notes(tag.replace("b", "-beta.")) == NOTES[tag]
+
+
+def test_this_version_has_notes_compiled_in():
+    """A version bump with no `python3 tools/build-release-notes.py` after it ships a
+    build that cannot say what is in it. That is invisible until somebody updates."""
+    assert U.bundled_notes(U.mc.__version__), (
+        "no notes for %s — run tools/build-release-notes.py" % U.mc.__version__)
+
+
+def test_release_notes_finds_the_other_channel(cached):
+    """A beta user who moved to stable still gets the notes for what they installed."""
+    cached("beta", dict(manifest("1.2.0b1"), notes=["from beta"]))
+    assert U.release_notes("stable", "1.2.0b1") == ["from beta"]
+
+
+# ── packages we fetch but never install ──────────────────────────────────────
+
+def test_a_fetchable_install_is_offered_the_download(cached, monkeypatch):
+    monkeypatch.setattr(U, "install_kind", lambda: "pacman")
+    cached("stable", manifest("1.2.0", **{"arch-package": {
+        "url": "https://example.invalid/hub-moon-1.2.0-1-x86_64.pkg.tar.zst",
+        "sha256": "a" * 64, "size": 10}}))
+    got = U.check("stable", current="1.1.0")
+    assert got["can_install"] is False, "root is never taken"
+    assert got["can_fetch"] is True
+    assert "root" in got["reason"] and "pacman -U" in got["hint"]
+
+
+def test_fetchable_falls_back_to_a_command_when_the_asset_is_absent(cached, monkeypatch):
+    """No Arch package in that release — say what to run, do not offer a button."""
+    monkeypatch.setattr(U, "install_kind", lambda: "pacman")
+    cached("stable", manifest("1.2.0"))          # appimage only
+    got = U.check("stable", current="1.1.0")
+    assert got["can_fetch"] is False and got["can_install"] is False
+    assert got["hint"] == U.MANUAL_HINT["pacman"]
+
+
+def test_nothing_fetchable_is_ever_self_installable():
+    """The invariant the whole design rests on."""
+    assert not (U.FETCHABLE & U.SELF_UPDATABLE)
+    for kind in U.FETCHABLE:
+        assert kind not in U.APPLIERS
+        assert kind in U.INSTALL_COMMAND
+        assert kind in U.ASSET_FOR
+
+
+def test_the_handover_command_quotes_a_path_with_spaces(tmp_path, monkeypatch):
+    payload = tmp_path / "my downloads"
+    payload.mkdir()
+    monkeypatch.setattr(U, "download", lambda a, dest_dir=None, on_progress=None:
+                        str(payload / "hub-moon-1.2.0-1-x86_64.pkg.tar.zst"))
+    path, command = U.fetch({"install_kind": "pacman", "asset": {}},
+                            dest_dir=str(payload))
+    assert command.startswith("sudo pacman -U '")
+    assert command.endswith("'")
+
+
+# ── getting off the beta channel ─────────────────────────────────────────────
+
+def test_switching_to_stable_from_a_beta_offers_the_way_back(cached, monkeypatch):
+    """Without this a beta tester is stranded: stable is older than what they run, so
+    the ordinary "is it newer" test says nothing is available and the channel switch
+    does nothing at all."""
+    monkeypatch.setattr(U, "install_kind", lambda: "appimage")
+    cached("stable", manifest("1.1.0"))
+    got = U.check("stable", current="1.2.0b1")
+    assert got is not None
+    assert got["version"] == "1.1.0"
+    assert got["rollback"] is True
+
+
+def test_a_normal_update_is_not_flagged_as_a_rollback(cached, monkeypatch):
+    monkeypatch.setattr(U, "install_kind", lambda: "appimage")
+    cached("stable", manifest("1.3.0"))
+    assert U.check("stable", current="1.2.0b1")["rollback"] is False
+
+
+def test_stable_users_are_never_offered_a_downgrade(cached, monkeypatch):
+    """The rollback path must not fire for somebody already on a final release."""
+    monkeypatch.setattr(U, "install_kind", lambda: "appimage")
+    cached("stable", manifest("1.1.0"))
+    assert U.check("stable", current="1.2.0") is None
+
+
+def test_the_beta_channel_never_rolls_back(cached, monkeypatch):
+    """Staying on beta means staying on beta; only switching to stable goes back."""
+    monkeypatch.setattr(U, "install_kind", lambda: "appimage")
+    cached("beta", manifest("1.1.0"))
+    assert U.check("beta", current="1.2.0b1") is None
+
+
+def test_a_beta_superseded_by_its_own_release_is_a_normal_update(cached, monkeypatch):
+    """Once 1.2.0 final ships, a 1.2.0b1 user gets an ordinary upgrade, not a rollback."""
+    monkeypatch.setattr(U, "install_kind", lambda: "appimage")
+    cached("stable", manifest("1.2.0"))
+    got = U.check("stable", current="1.2.0b1")
+    assert got["version"] == "1.2.0" and got["rollback"] is False
+
+
+# ── installing with authorisation ────────────────────────────────────────────
+
+def test_only_package_installs_are_elevatable(monkeypatch):
+    monkeypatch.setattr(U.shutil, "which", lambda n: "/usr/bin/" + n)
+    for kind in U.FETCHABLE:
+        assert U.can_elevate(kind), kind
+    for kind in ("appimage", "linux-tarball", "source", "pip", "nix"):
+        assert not U.can_elevate(kind), kind
+
+
+def test_no_polkit_means_no_elevation(monkeypatch):
+    monkeypatch.setattr(U.shutil, "which", lambda n: None if n == "pkexec" else "/x/" + n)
+    assert not U.can_elevate("pacman")
+
+
+def test_no_package_manager_means_no_elevation(monkeypatch):
+    """apt-get is not on an Arch box, and pacman is not on a Debian one."""
+    monkeypatch.setattr(U.shutil, "which",
+                        lambda n: "/usr/bin/pkexec" if n == "pkexec" else None)
+    assert not U.can_elevate("pacman")
+
+
+def test_the_elevated_command_is_argv_never_a_shell_string(monkeypatch):
+    """A path is data. Passing it through a shell would let a filename become an
+    argument, or an argument become a command."""
+    seen = {}
+
+    def fake_run(argv, **kw):
+        seen["argv"] = argv
+        seen["shell"] = kw.get("shell", False)
+        class R:
+            returncode = 0
+            stdout = stderr = ""
+        return R()
+
+    monkeypatch.setattr(U.shutil, "which", lambda n: "/usr/bin/" + n)
+    monkeypatch.setattr(U.subprocess, "run", fake_run)
+    ok, _ = U.install_elevated("pacman", "/tmp/a b;rm -rf ~/hub-moon.pkg.tar.zst")
+    assert ok is True
+    assert isinstance(seen["argv"], list) and seen["shell"] is False
+    assert seen["argv"][0] == "pkexec"
+    assert seen["argv"][-1] == "/tmp/a b;rm -rf ~/hub-moon.pkg.tar.zst"
+
+
+def test_declining_the_prompt_is_not_an_error(monkeypatch):
+    """Saying no is an ordinary answer — the caller falls back to showing a command."""
+    class R:
+        returncode = 126
+        stdout = stderr = ""
+    monkeypatch.setattr(U.shutil, "which", lambda n: "/usr/bin/" + n)
+    monkeypatch.setattr(U.subprocess, "run", lambda *a, **k: R())
+    ok, message = U.install_elevated("pacman", "/tmp/x.pkg.tar.zst")
+    assert ok is False and "ancel" in message
+
+
+def test_a_failing_package_manager_reports_its_own_last_line(monkeypatch):
+    class R:
+        returncode = 1
+        stdout = ""
+        stderr = "error: could not open file\nerror: failed to commit transaction"
+    monkeypatch.setattr(U.shutil, "which", lambda n: "/usr/bin/" + n)
+    monkeypatch.setattr(U.subprocess, "run", lambda *a, **k: R())
+    ok, message = U.install_elevated("pacman", "/tmp/x.pkg.tar.zst")
+    assert ok is False and "failed to commit" in message
+
+
+def test_elevation_is_never_offered_for_something_self_updatable(monkeypatch):
+    """The two paths must stay disjoint: a kind that replaces its own files must
+    never also try to run a package manager over itself."""
+    monkeypatch.setattr(U.shutil, "which", lambda n: "/usr/bin/" + n)
+    for kind in U.SELF_UPDATABLE:
+        assert not U.can_elevate(kind), kind
+    assert not (set(U.ELEVATED_ARGV) & U.SELF_UPDATABLE)
+
+
+def test_a_release_without_a_package_says_so_rather_than_blaming_the_manager(cached, monkeypatch):
+    """1.1.0 predates the Arch package, so a pacman install has nothing to download.
+    Saying "Hub Moon will not replace its own files" is true but not the reason, and
+    sends the reader looking for a setting that does not exist."""
+    monkeypatch.setattr(U, "install_kind", lambda: "pacman")
+    cached("stable", manifest("1.3.0"))          # appimage only, no arch-package
+    got = U.check("stable", current="1.2.0b1")
+    assert got["can_fetch"] is False and got["can_elevate"] is False
+    assert "does not include a package" in got["reason"]
+    assert "will not replace" not in got["reason"]
+    assert got["hint"] == U.MANUAL_HINT["pacman"]
+
+
+def test_a_release_with_a_package_still_offers_the_button(cached, monkeypatch):
+    monkeypatch.setattr(U, "install_kind", lambda: "pacman")
+    monkeypatch.setattr(U.shutil, "which", lambda n: "/usr/bin/" + n)
+    cached("stable", manifest("1.3.0", **{"arch-package": {
+        "url": "https://example.invalid/x.pkg.tar.zst", "sha256": "a" * 64, "size": 9}}))
+    got = U.check("stable", current="1.2.0b1")
+    assert got["can_fetch"] is True and got["can_elevate"] is True

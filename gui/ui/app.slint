@@ -1396,14 +1396,34 @@ component Segmented inherits Rectangle {
     }
 }
 
-component SettingRow inherits HorizontalLayout {
+// A labelled row: description on the left, its control on the right.
+//
+// Not a HorizontalLayout, and that is the whole point. A `Text` with `wrap:
+// word-wrap` reports its preferred height at its *natural* width — the width it
+// would take on one line — so a layout asked to size a row around one is told every
+// note is a single line tall. Setting `height` gave overlapping rows; setting
+// `min-height` gave exactly the same overlap, because the number being maxed against
+// was already wrong.
+//
+// So the text column is given an explicit width first, which lets it compute the
+// height it really needs, and the row is sized from that. Fixing the measurement
+// rather than the symptom.
+component SettingRow inherits Rectangle {
     in property <string> label;
     in property <string> note;
-    height: 68px;
-    spacing: 16px;
-    VerticalLayout {
-        alignment: center;
-        horizontal-stretch: 1;
+    // Wide enough for the widest control in the column, not a round number with room
+    // to spare: every pixel reserved here and not used is a pixel the description has
+    // to wrap in, and a two-line note beside a control with 10px of air after it is
+    // the wrong trade.
+    in property <length> control-width: 190px;
+
+    property <length> gap: 20px;
+    height: max(66px, col.preferred-height + 20px);
+
+    col := VerticalLayout {
+        x: 0px;
+        y: (root.height - self.preferred-height) / 2;
+        width: root.width - root.control-width - root.gap;
         spacing: 3px;
         Text {
             text: root.label;
@@ -1418,7 +1438,19 @@ component SettingRow inherits HorizontalLayout {
             wrap: word-wrap;
         }
     }
-    @children
+    Rectangle {
+        x: root.width - root.control-width;
+        width: root.control-width;
+        height: root.height;
+        // `alignment: end`, so a control narrower than the column sits flush with the
+        // panel edge instead of floating in the middle of its own reservation. That
+        // is what lines a 190px switch up with the buttons underneath it, which are
+        // right-aligned against the same edge.
+        HorizontalLayout {
+            alignment: end;
+            @children
+        }
+    }
 }
 
 // A row in the settings rail. Not a tab strip across the top: three groups with
@@ -1488,6 +1520,10 @@ component SettingsSheet inherits Rectangle {
     in property <string> update-note;
     in property <string> update-version;
     in property <string> update-hint;
+    in property <string> update-command;
+    in property <bool> update-can-fetch;
+    in property <bool> update-rollback;
+    in property <bool> update-can-elevate;
     in property <string> update-reason;
     in property <float> update-progress;
     in property <bool> update-can-install;
@@ -1507,10 +1543,33 @@ component SettingsSheet inherits Rectangle {
     callback logs-clicked();
     callback notes-clicked();
     callback copy-clicked();
+    callback copy-command();
+    callback whatsnew-clicked();
+    callback preview-notes();
+    callback restart-clicked();
 
-    property <int> tab: 0;
+    // Opens on whichever group has something to say. A binding, not a constant, so
+    // it picks the right starting tab — and the moment the reader clicks the rail
+    // that assignment replaces it, and their choice sticks.
+    property <int> tab: root.update-state == "available" || root.update-state == "fetched"
+        || root.update-state == "installed" || root.busy ? 1 : 0;
     property <bool> busy: root.update-state == "checking"
-        || root.update-state == "downloading" || root.update-state == "staged";
+        || root.update-state == "downloading" || root.update-state == "staged"
+        || root.update-state == "authorising";
+    property <bool> has-banner: root.busy || root.update-state == "available"
+        || root.update-state == "fetched" || root.update-state == "installed";
+
+    // How tall this sheet would like to be, for the parent to clamp. Three tabs of
+    // very different lengths share one panel: a height that fits the longest leaves
+    // 400px of nothing under the shortest, and one that fits the shortest clips the
+    // longest. Neither is a dialog anybody would design on purpose.
+    //
+    // `pane` is the scrolling content, so this is exact for it; the chrome around it
+    // is a constant (16px padding twice, a 30px head, a rule, two 10px gaps) and the
+    // banner an allowance. Being a little out either way costs a little slack or a
+    // little scrolling, and the Flickable already handles the second.
+    out property <length> wanted: pane.preferred-height + 83px
+        + (root.has-banner ? 112px : 0px);
 
     background: Theme.card;
     border-radius: Theme.r-lg;
@@ -1532,7 +1591,7 @@ component SettingsSheet inherits Rectangle {
         // A waiting update is pinned above everything, on every tab. Most people open
         // this sheet to change the theme, and something that needs a decision must not
         // be two clicks and a scroll away.
-        if root.busy || root.update-state == "available": Rectangle {
+        if root.has-banner: Rectangle {
             height: banner.preferred-height + 20px;
             border-radius: Theme.r-sm;
             background: Theme.accent-soft;
@@ -1545,9 +1604,14 @@ component SettingsSheet inherits Rectangle {
                     spacing: 2px;
                     Text {
                         text: root.update-state == "available"
-                            ? "Hub Moon " + root.update-version + " is available"
+                            ? (root.update-rollback
+                               ? "Return to stable — Hub Moon " + root.update-version
+                               : "Hub Moon " + root.update-version + " is available")
                             : root.update-state == "staged" ? "Update ready"
                             : root.update-state == "downloading" ? "Downloading update"
+                            : root.update-state == "fetched" ? "Downloaded — one command to go"
+                            : root.update-state == "authorising" ? "Waiting for permission"
+                            : root.update-state == "installed" ? "Installed — restart to use it"
                             : "Checking for updates";
                         color: Theme.text;
                         font-size: 13px;
@@ -1562,16 +1626,33 @@ component SettingsSheet inherits Rectangle {
                     if root.update-state == "downloading" || root.update-state == "staged":
                         Meter { value: root.update-progress; }
                 }
-                if root.update-state == "available" && root.update-can-install:
+                // `can-fetch` belongs here too. Without it a machine that can download
+                // the package but has no polkit agent to install it with got no button
+                // at all — and no explanation either, because the box that explains a
+                // missing button only appears when there is nothing to download.
+                if root.update-state == "available"
+                        && (root.update-can-install || root.update-can-elevate
+                            || root.update-can-fetch):
                     VerticalLayout {
                         alignment: center;
                         TextBtn {
-                            label: "Install";
+                            label: root.update-rollback ? "Go back"
+                                : (root.update-can-install || root.update-can-elevate)
+                                ? "Install" : "Download";
                             icon: Icons.download;
                             primary: true;
                             clicked => { root.install-clicked(); }
                         }
                     }
+                if root.update-state == "installed": VerticalLayout {
+                    alignment: center;
+                    TextBtn {
+                        label: "Restart now";
+                        icon: Icons.restart-alt;
+                        primary: true;
+                        clicked => { root.restart-clicked(); }
+                    }
+                }
             }
         }
 
@@ -1634,6 +1715,10 @@ component SettingsSheet inherits Rectangle {
 
                                     SettingRow {
                                         label: "Accent";
+                                        // six 30px swatches with five 8px gaps, which
+                                        // is 220px exactly — wider than the default
+                                        // column, which clipped the last one off
+                                        control-width: 220px;
                                         note: "One hue, used for the primary action, the active state and the equalised curve. The reference and output traces stay put — those are learned colours.";
                                         VerticalLayout {
                                             alignment: center;
@@ -1693,14 +1778,6 @@ component SettingsSheet inherits Rectangle {
                                             }
                                         }
                                     }
-                                    Rectangle { height: 1px; background: Theme.line; }
-
-                                    Text {
-                                        text: "The graph also has a toggle of its own, at its top-right corner.";
-                                        color: Theme.faint;
-                                        font-size: 11px;
-                                        wrap: word-wrap;
-                                    }
                             Text {
                                 text: "The graph also has a toggle of its own, at its top-right corner.";
                                 color: Theme.faint;
@@ -1756,10 +1833,17 @@ component SettingsSheet inherits Rectangle {
                                                 horizontal-stretch: 1;
                                                 spacing: 3px;
                                                 Text {
-                                                    text: root.update-state == "available"
-                                                        ? "Hub Moon " + root.update-version + " is available"
-                                                        : "You are running Hub Moon " + root.app-version;
-                                                    color: root.update-state == "available" ? Theme.accent : Theme.text;
+                                                    // What is running, and only that.
+                                                    // Announcing the offer here as well
+                                                    // said the same sentence twice, 250px
+                                                    // apart — and said it *differently*
+                                                    // on a rollback, where the banner read
+                                                    // "Return to stable" and this read
+                                                    // "1.1.0 is available". The banner is
+                                                    // pinned above every tab; it does not
+                                                    // need repeating on this one.
+                                                    text: "You are running Hub Moon " + root.app-version;
+                                                    color: Theme.text;
                                                     font-size: 13px;
                                                     font-weight: 600;
                                                 }
@@ -1788,18 +1872,20 @@ component SettingsSheet inherits Rectangle {
 
                                         if root.update-state == "available": HorizontalLayout {
                                             spacing: 8px;
-                                            // An install this app must not perform says so, and shows the command
-                                            // that will, rather than offering a button that cannot keep its word.
-                                            if root.update-can-install: TextBtn {
-                                                label: "Download and install";
-                                                icon: Icons.download;
-                                                primary: true;
-                                                clicked => { root.install-clicked(); }
-                                            }
+                                            // No install button here: it is in the banner
+                                            // above, which is pinned to every tab. Three
+                                            // copies of one action in one panel is not
+                                            // three chances to find it.
+                                            //
+                                            // In-app and offline, unlike the website
+                                            // link this replaced: the notes are in the
+                                            // manifest the check just read, and a
+                                            // build with no published release behind
+                                            // it falls back to the ones compiled in.
                                             TextBtn {
-                                                label: "Release notes";
+                                                label: "What's new";
                                                 icon: Icons.note;
-                                                clicked => { root.notes-clicked(); }
+                                                clicked => { root.preview-notes(); }
                                             }
                                             TextBtn {
                                                 label: "Skip this one";
@@ -1809,7 +1895,44 @@ component SettingsSheet inherits Rectangle {
                                             Rectangle { horizontal-stretch: 1; }
                                         }
 
-                                        if root.update-state == "available" && !root.update-can-install: Rectangle {
+                                        // After a package has been fetched: the exact line to run, path and all.
+            if root.update-state == "fetched": Rectangle {
+                height: donebox.preferred-height + 18px;
+                border-radius: Theme.r-sm;
+                background: Theme.card-2;
+                border-width: 1px;
+                border-color: Theme.accent-line;
+                donebox := VerticalLayout {
+                    padding: 9px;
+                    spacing: 6px;
+                    Text {
+                        text: "Downloaded and checked. Installing it needs root, so this is yours to run:";
+                        color: Theme.faint;
+                        font-size: 11px;
+                        wrap: word-wrap;
+                    }
+                    Text {
+                        text: root.update-command;
+                        color: Theme.text;
+                        font-family: Theme.mono;
+                        font-size: 12px;
+                        wrap: word-wrap;
+                    }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        TextBtn {
+                            label: "Copy command";
+                            icon: Icons.upload-file;
+                            primary: true;
+                            clicked => { root.copy-command(); }
+                        }
+                        Rectangle { horizontal-stretch: 1; }
+                    }
+                }
+            }
+
+            if root.update-state == "available" && !root.update-can-install
+                    && !root.update-can-fetch: Rectangle {
                                             height: cmd.preferred-height + 18px;
                                             border-radius: Theme.r-sm;
                                             background: Theme.card-2;
@@ -1882,6 +2005,15 @@ component SettingsSheet inherits Rectangle {
                                         overflow: elide;
                                     }
                                 }
+                            }
+                            HorizontalLayout {
+                                spacing: 8px;
+                                TextBtn {
+                                    label: "What's new";
+                                    icon: Icons.info;
+                                    clicked => { root.whatsnew-clicked(); }
+                                }
+                                Rectangle { horizontal-stretch: 1; }
                             }
                             HorizontalLayout {
                                 spacing: 8px;
@@ -2383,8 +2515,14 @@ component WhatsNew inherits Rectangle {
     in property <string> version;
     in property <string> from-version;
     in property <[string]> notes;
+    // The same panel, before and after. `preview` is a version that is being offered
+    // rather than one that is running, and every sentence in here that says "installed"
+    // would be false in that state — so each of them asks.
+    in property <bool> preview;
+    in property <bool> can-install;
     callback dismissed();
     callback changelog();
+    callback install();
 
     background: Theme.card;
     border-radius: Theme.r-lg;
@@ -2458,7 +2596,7 @@ component WhatsNew inherits Rectangle {
                             opacity: root.shown ? 1.0 : 0.0;
                             animate opacity { duration: 460ms; delay: 300ms; }
                             chip := Text {
-                                text: "from " + root.from-version;
+                                text: (root.preview ? "you have " : "from ") + root.from-version;
                                 color: Theme.sub;
                                 font-family: Theme.mono;
                                 font-size: 10.5px;
@@ -2469,7 +2607,8 @@ component WhatsNew inherits Rectangle {
                             }
                         }
                         Text {
-                            text: "already installed and running";
+                            text: root.preview ? "not installed yet — this is what changes"
+                                : "already installed and running";
                             color: Theme.sub;
                             font-size: 11.5px;
                             vertical-alignment: center;
@@ -2510,7 +2649,9 @@ component WhatsNew inherits Rectangle {
                     // A release whose manifest carried no notes still says something
                     // true rather than showing an empty box.
                     if root.notes.length == 0: Text {
-                        text: "This version is installed and running. The full changelog is on the website.";
+                        text: root.preview
+                            ? "No notes came with this release. The full changelog is on the website."
+                            : "This version is installed and running. The full changelog is on the website.";
                         color: Theme.sub;
                         font-size: 12.5px;
                         wrap: word-wrap;
@@ -2532,13 +2673,30 @@ component WhatsNew inherits Rectangle {
                 }
             }
             Rectangle { horizontal-stretch: 1; }
+            // Read it, then act on it — without going back to Settings to find the
+            // button again. Only when there is something this build can actually
+            // install: offering "Install" on a copy that has to be updated by pacman
+            // would be a button that cannot keep its word.
+            if root.preview && root.can-install: VerticalLayout {
+                alignment: center;
+                TextBtn {
+                    label: "Not now";
+                    icon: Icons.close;
+                    clicked => { root.dismissed(); }
+                }
+            }
             VerticalLayout {
                 alignment: center;
                 TextBtn {
-                    label: "Get on with it";
-                    icon: Icons.check;
+                    label: root.preview
+                        ? (root.can-install ? "Install it" : "Close")
+                        : "Get on with it";
+                    icon: root.preview && root.can-install ? Icons.download : Icons.check;
                     primary: true;
-                    clicked => { root.dismissed(); }
+                    clicked => {
+                        if (root.preview && root.can-install) { root.install(); }
+                        else { root.dismissed(); }
+                    }
                 }
             }
         }
@@ -2929,6 +3087,10 @@ export component MainWindow inherits Window {
     in property <string> update-note;
     in property <string> update-version;
     in property <string> update-hint;
+    in property <string> update-command;
+    in property <bool> update-can-fetch;
+    in property <bool> update-rollback;
+    in property <bool> update-can-elevate;
     in property <string> update-reason;
     in property <float> update-progress;
     in property <bool> update-can-install;
@@ -2938,6 +3100,8 @@ export component MainWindow inherits Window {
     in property <string> about-text;
     in property <bool> whatsnew-open;
     in property <string> whatsnew-from;
+    in property <string> whatsnew-version;
+    in property <bool> whatsnew-preview;
     in property <[string]> whatsnew-notes;
 
     // ── everything the view can ask for ──
@@ -2993,7 +3157,11 @@ export component MainWindow inherits Window {
     callback open-logs();
     callback open-notes();
     callback copy-diagnostics();
+    callback copy-update-command();
     callback dismiss-whatsnew();
+    callback show-whatsnew();
+    callback preview-whatsnew();
+    callback restart-app();
 
     property <bool> sheet-open: root.help-open || root.hub-open || root.settings-open || root.aeq-open || root.prof-open || root.whatsnew-open;
 
@@ -3424,12 +3592,15 @@ export component MainWindow inherits Window {
     }
     if root.settings-open: SettingsSheet {
         x: (root.width - self.width) / 2;
-        y: 60px;
-        width: min(620px, root.width - 80px);
-        // Taller than the 306px it was, and scrolling inside: the sheet grew an update
-        // section, and a fixed height that no longer fits its content is a panel with
-        // controls silently clipped off the bottom of it.
-        height: min(700px, root.height - 130px);
+        y: max(24px, (root.height - self.height) / 2);
+        // The largest sheet in the app, and deliberately so. It is the only one whose
+        // rows are description-plus-control rather than a list: width here goes
+        // straight into how many lines each description takes, and 620px was making
+        // three-line notes out of two-line sentences.
+        width: min(760px, root.width - 56px);
+        // Its own content height, floored so a two-row tab still reads as a dialog and
+        // capped by the window. It scrolls inside either way.
+        height: clamp(self.wanted, 340px, min(820px, root.height - 60px));
         dark: root.dark;
         readout: root.readout;
         accent-index: root.accent-index;
@@ -3439,6 +3610,10 @@ export component MainWindow inherits Window {
         update-note: root.update-note;
         update-version: root.update-version;
         update-hint: root.update-hint;
+        update-command: root.update-command;
+        update-can-fetch: root.update-can-fetch;
+        update-rollback: root.update-rollback;
+        update-can-elevate: root.update-can-elevate;
         update-reason: root.update-reason;
         update-progress: root.update-progress;
         update-can-install: root.update-can-install;
@@ -3459,17 +3634,24 @@ export component MainWindow inherits Window {
         logs-clicked => { root.open-logs(); }
         notes-clicked => { root.open-notes(); }
         copy-clicked => { root.copy-diagnostics(); }
+        copy-command => { root.copy-update-command(); }
+        whatsnew-clicked => { root.show-whatsnew(); }
+        preview-notes => { root.preview-whatsnew(); }
+        restart-clicked => { root.restart-app(); }
     }
     if root.whatsnew-open: WhatsNew {
         x: (root.width - self.width) / 2;
         y: (root.height - self.height) / 2;
         width: min(560px, root.width - 80px);
         height: min(500px, root.height - 120px);
-        version: root.app-version;
+        version: root.whatsnew-version;
         from-version: root.whatsnew-from;
+        preview: root.whatsnew-preview;
+        can-install: root.update-can-install || root.update-can-elevate;
         notes: root.whatsnew-notes;
         dismissed => { root.dismiss-whatsnew(); }
         changelog => { root.open-notes(); }
+        install => { root.install-update(); }
     }
     if root.prof-open: ProfilesSheet {
         x: (root.width - self.width) / 2;

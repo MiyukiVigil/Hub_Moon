@@ -49,6 +49,12 @@ PATTERNS = [
     (r"^HubMoon-.*-macOS-(x86_64|intel)\.dmg$",  "macos-dmg-x86_64"),
     (r"^HubMoon-.*\.AppImage$",                  "appimage"),
     (r"^HubMoon-.*-linux-x86_64\.tar\.gz$",      "linux-tarball"),
+    # Packages a package manager installs. Hub Moon never replaces these files
+    # itself — they are listed so the app can fetch and verify the right one and
+    # hand over the command that installs it.
+    (r"^hub-moon.*\.pkg\.tar\.zst$",            "arch-package"),
+    (r"^hub-moon.*\.deb$",                       "deb-package"),
+    (r"^hub-moon.*\.rpm$",                       "rpm-package"),
 ]
 
 

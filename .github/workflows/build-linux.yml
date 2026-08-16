@@ -77,6 +77,10 @@ jobs:
           sed -i "s/^version:.*/version: $v/" packaging/nfpm.yaml   # keep pkg version in sync with the tag
           ./nfpm pkg --packager deb -f packaging/nfpm.yaml -t dist/
           ./nfpm pkg --packager rpm -f packaging/nfpm.yaml -t dist/
+          # An Arch package too, so Arch users have something to install without the
+          # AUR and without running makepkg. packaging/PKGBUILD stays the from-source
+          # recipe; this is its prebuilt equivalent.
+          ./nfpm pkg --packager archlinux -f packaging/nfpm.yaml -t dist/
 
       # Hashed here, on the runner that built them, which is the only place the bytes
       # are known to be the ones that came out of the build. tools/build-update-manifest.py
@@ -86,7 +90,7 @@ jobs:
         run: |
           cd dist
           sha256sum HubMoon-*-linux-x86_64.tar.gz HubMoon-*-x86_64.AppImage \
-                    *.deb *.rpm > SHA256SUMS-linux.txt
+                    *.deb *.rpm *.pkg.tar.zst > SHA256SUMS-linux.txt
           cat SHA256SUMS-linux.txt
 
       - name: Upload build artifacts
@@ -98,6 +102,7 @@ jobs:
             dist/HubMoon-*-x86_64.AppImage
             dist/*.deb
             dist/*.rpm
+            dist/*.pkg.tar.zst
             dist/SHA256SUMS-linux.txt
           if-no-files-found: error
 
@@ -110,4 +115,5 @@ jobs:
             dist/HubMoon-*-x86_64.AppImage
             dist/*.deb
             dist/*.rpm
+            dist/*.pkg.tar.zst
             dist/SHA256SUMS-linux.txt

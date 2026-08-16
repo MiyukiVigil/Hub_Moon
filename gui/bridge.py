@@ -824,6 +824,44 @@ class UpdateWorker(_Worker):
                  found["version"] if found else "already current")
         self._post("update_result", found)
 
+    def fetch(self, update):
+        """Download a package we must not install. Verifies, then hands back the
+        path and the one command that installs it."""
+        self._post("update_progress", (0, 0))
+        try:
+            path, command = updater.fetch(
+                update, on_progress=lambda d, t: self._post("update_progress", (d, t)))
+        except Exception as exc:
+            log.error("fetching %s failed", update.get("version"), exc_info=True)
+            self._post("update_error", str(exc))
+            return
+        log.info("downloaded %s to %s", update.get("version"), path)
+        self._post("update_fetched", (path, command, ""))
+
+    def fetch_and_install(self, update):
+        """Download, verify, then ask the desktop for permission to install.
+
+        Declining is an ordinary outcome and lands back on the "here is the command"
+        state, with the file already downloaded — so saying no costs nothing but the
+        keystroke.
+        """
+        self._post("update_progress", (0, 0))
+        try:
+            path, command = updater.fetch(
+                update, on_progress=lambda d, t: self._post("update_progress", (d, t)))
+        except Exception as exc:
+            log.error("fetching %s failed", update.get("version"), exc_info=True)
+            self._post("update_error", str(exc))
+            return
+        kind = update.get("install_kind") or updater.install_kind()
+        self._post("update_authorising", (path, command))
+        ok, message = updater.install_elevated(kind, path)
+        log.info("elevated install of %s: %s (%s)", update.get("version"), ok, message)
+        if ok:
+            self._post("update_installed", update.get("version", ""))
+        else:
+            self._post("update_fetched", (path, command, message))
+
     def install(self, update):
         self._post("update_progress", (0, 0))
         try:
@@ -899,10 +937,21 @@ class Bridge:
         self.update_found = None      # the dict from updater.check(), when there is one
         self.update_note = ""
         self.update_progress = 0.0
+        # The one command that installs a package we fetched but must not install.
+        self.update_command = ""
+
         # ── what's new ──
         self.whatsnew_open = False
         self.whatsnew_from = ""
         self.whatsnew_notes = []
+        # Which version the panel is describing, and whether it is installed. The same
+        # panel does both jobs: what you just got, and what a check is offering you.
+        self.whatsnew_version = mc.__version__
+        self.whatsnew_preview = False
+        # True while a check the user clicked is in flight. A background check that
+        # finds something must not throw a full-screen panel over whatever they were
+        # doing; one they asked for is a question they are waiting on an answer to.
+        self.update_asked = False
 
         # ── saved profiles ──
         self.prof_open = False
@@ -972,7 +1021,10 @@ class Bridge:
         window.preview_close = self.preview_close
         window.dismiss_toast = lambda: (self.toast(""), self.push())
         window.dismiss_whatsnew = self.dismiss_whatsnew
+        window.show_whatsnew = self.show_whatsnew
+        window.preview_whatsnew = self.preview_whatsnew
         window.copy_diagnostics = self.copy_diagnostics
+        window.copy_update_command = self.copy_update_command
         window.toggle_profiles = self.toggle_profiles
         window.profile_name_edited = self.profile_name_edited
         window.profile_save = self.profile_save
@@ -985,6 +1037,7 @@ class Bridge:
         window.check_update = lambda: self.check_update(True)
         window.install_update = self.install_update
         window.skip_update = self.skip_update
+        window.restart_app = self.restart_app
         window.set_channel = self.set_channel
         window.set_auto_update = self.set_auto_update
         window.open_logs = self.open_logs
@@ -1096,11 +1149,23 @@ class Bridge:
             else:
                 self.update_state = "available"
                 self.update_note = payload.get("summary") or ""
+                if payload.get("rollback"):
+                    self.update_note = ("Going back to the stable release. This is "
+                                        "older than what you are running.")
+                # Asked, and there is an answer: show what is in it. Not on a rollback
+                # — "what's new in 1.1.0" is the wrong question when 1.1.0 is older
+                # than what is running, and the notes would describe changes already
+                # installed.
+                if self.update_asked and not payload.get("rollback"):
+                    self.preview_whatsnew()
+            self.update_asked = False
         elif kind == "update_error":
+            self.update_asked = False
             self.update_state = "idle"
             self.update_note = str(payload)
             self.update_progress = 0.0
         elif kind == "update_quiet":
+            self.update_asked = False
             # A background check that got nowhere. It leaves no trace in the UI, so
             # the panel still reads "nothing has been checked yet" — which is true.
             self.update_state = "idle"
@@ -1113,6 +1178,25 @@ class Bridge:
                                 if not total else
                                 "Downloading… %.1f of %.1f MB"
                                 % (done / 1048576.0, total / 1048576.0))
+        elif kind == "update_authorising":
+            path, command = payload
+            self.update_state = "authorising"
+            self.update_progress = 1.0
+            self.update_command = command
+            self.update_note = "Waiting for permission to install…"
+        elif kind == "update_fetched":
+            path, command, why = payload
+            self.update_state = "fetched"
+            self.update_progress = 1.0
+            self.update_command = command
+            self.update_note = ("%s Saved to %s" % (why, path)) if why \
+                else "Saved to %s" % path
+        elif kind == "update_installed":
+            self.update_state = "installed"
+            self.update_progress = 1.0
+            self.update_command = ""
+            self.update_note = ("Hub Moon %s is installed. Restart to start using it."
+                                % payload)
         elif kind == "update_staged":
             # The helper is armed and waiting on this process. Everything from here is
             # about leaving quickly and cleanly — the device handle still has to be
@@ -1190,7 +1274,13 @@ class Bridge:
         programs is installed it says so rather than pretending it worked, because a
         silent no-op here means somebody pastes nothing into an issue.
         """
-        text = self.diagnostics_text()
+        self._to_clipboard(self.diagnostics_text(), "System info copied.")
+
+    def copy_update_command(self):
+        if self.update_command:
+            self._to_clipboard(self.update_command, "Command copied.")
+
+    def _to_clipboard(self, text, ok_message):
         cmds = {
             "win32": [["clip"]],
             "darwin": [["pbcopy"]],
@@ -1204,14 +1294,14 @@ class Bridge:
                     if sys.platform == "win32" else {}
                 subprocess.run(argv, input=text, text=True, timeout=10,
                                check=True, **kw)
-                self.toast("System info copied.", False)
+                self.toast(ok_message, False)
                 self.push()
                 return
             except (OSError, subprocess.SubprocessError):
                 continue
-        log.warning("no clipboard tool found; system info not copied")
-        self.toast("No clipboard tool found — the same text is in the log.", True)
-        log.info("system info:\n%s", text)
+        log.warning("no clipboard tool found; nothing copied")
+        self.toast("No clipboard tool found — the text is in the log.", True)
+        log.info("clipboard text was:\n%s", text)
         self.push()
 
     def _check_whats_new(self):
@@ -1232,13 +1322,57 @@ class Bridge:
         if not updater.is_newer(mc.__version__, was):
             return                              # a downgrade says nothing useful
         self.whatsnew_from = was
+        self.whatsnew_version = mc.__version__
+        self.whatsnew_preview = False
         self.whatsnew_notes = updater.release_notes(self.settings["channel"])
         self.whatsnew_open = True
         self.welcome_open = False               # one opening screen, not two
         log.info("updated from %s to %s; showing what changed", was, mc.__version__)
 
+    def show_whatsnew(self):
+        """Open it on request, for the version that is running.
+
+        The notes come from the cached manifest, and failing that from the ones
+        compiled into this build — so this answers even on a copy that never came from
+        a release. When there are genuinely none it still opens and says so, because a
+        button that sometimes does nothing is worse than one that always answers.
+        """
+        self.whatsnew_from = self.settings.get("last_run_version") or ""
+        self.whatsnew_version = mc.__version__
+        self.whatsnew_preview = False
+        self.whatsnew_notes = updater.release_notes(self.settings["channel"])
+        self.whatsnew_open = True
+        self.settings_open = False
+        self.push()
+
+    def preview_whatsnew(self):
+        """What is in the version being offered — before installing it.
+
+        The notes travel in the manifest the check just read, so this costs no extra
+        request. A build whose release carried none falls back to what that version
+        compiled in, which is only reachable for a version already installed — so an
+        empty list here is shown as an empty list, not papered over with this build's
+        own notes.
+        """
+        found = self.update_found
+        if not found:
+            return
+        self.whatsnew_from = mc.__version__
+        self.whatsnew_version = found.get("version", "")
+        self.whatsnew_preview = True
+        self.whatsnew_notes = list(found.get("notes") or [])
+        self.whatsnew_open = True
+        self.settings_open = False
+        self.push()
+
     def dismiss_whatsnew(self):
         self.whatsnew_open = False
+        # A preview is only ever reached from Settings — the Updates tab's button, or a
+        # check made there. Dismissing it back to the main window would strand somebody
+        # who has just read what is in the release next to the button that installs it.
+        if self.whatsnew_preview:
+            self.settings_open = True
+        self.whatsnew_preview = False
         self.push()
 
     # ── saved profiles ──
@@ -1402,8 +1536,10 @@ class Bridge:
 
     # ── updates ──
     def check_update(self, force=False):
-        """Ask now. `force` is what the button does: bypass the cache, and report a
-        failure instead of swallowing it."""
+        """Ask now. `force` is what the button does: bypass the cache, report a failure
+        instead of swallowing it, and — because it is a question somebody is waiting on
+        — show what the answer contains rather than only that there is one."""
+        self.update_asked = bool(force)
         self.update_state = "checking"
         self.update_note = "Checking for updates…"
         self.update_progress = 0.0
@@ -1416,17 +1552,46 @@ class Bridge:
         found = self.update_found
         if not found:
             return
-        if not found.get("can_install"):
-            # Nothing to do here but tell the truth: this install belongs to a package
-            # manager, and the command that updates it is already on screen.
-            self.toast("This build updates with:  %s" % found.get("hint", ""), False)
-            self.push()
-            return
+        # Reached from the preview panel as well as from Settings. Leaving that open
+        # over a progress bar it cannot show would hide the thing it just started.
+        self.whatsnew_open = False
+        self.settings_open = True
         self.update_state = "downloading"
         self.update_progress = 0.0
-        self.update_note = "Starting download…"
-        self.upd.submit(self.upd.install, found)
+        self.update_command = ""
+        if found.get("can_install"):
+            self.update_note = "Starting download…"
+            self.upd.submit(self.upd.install, found)
+        elif found.get("can_elevate"):
+            # Fetch it, then let the desktop's own polkit agent ask for the password.
+            # Nothing about it passes through this process.
+            self.update_note = "Downloading the package…"
+            self.upd.submit(self.upd.fetch_and_install, found)
+        elif found.get("can_fetch"):
+            # No agent to ask with, so the download is all we can usefully do.
+            self.update_note = "Downloading the package…"
+            self.upd.submit(self.upd.fetch, found)
+        else:
+            self.update_state = "available"
+            self.toast("This build updates with:  %s" % found.get("hint", ""), False)
         self.push()
+
+    def restart_app(self):
+        """Relaunch, once this process has actually exited.
+
+        Needed after an install replaced the files under us: what is running is the
+        old code, still perfectly alive in memory.
+        """
+        try:
+            updater.relaunch()
+        except Exception:
+            log.error("could not arm the relaunch", exc_info=True)
+            self.toast("Close and reopen Hub Moon to finish.", False)
+            self.push()
+            return
+        self.handing_over = True
+        log.info("restarting after an update")
+        slint.Timer.single_shot(timedelta(milliseconds=250), slint.quit_event_loop)
 
     def skip_update(self):
         """Not this one. Asked again only when something newer than it appears."""
@@ -1959,6 +2124,10 @@ class Bridge:
         w.update_version = (self.update_found or {}).get("version", "")
         w.update_can_install = bool((self.update_found or {}).get("can_install"))
         w.update_hint = (self.update_found or {}).get("hint", "")
+        w.update_command = self.update_command
+        w.update_can_fetch = bool((self.update_found or {}).get("can_fetch"))
+        w.update_rollback = bool((self.update_found or {}).get("rollback"))
+        w.update_can_elevate = bool((self.update_found or {}).get("can_elevate"))
         w.update_reason = (self.update_found or {}).get("reason", "")
         w.update_channel = updater.CHANNELS.index(self.settings["channel"])
         w.update_auto = self.settings["check_updates"]
@@ -2016,6 +2185,8 @@ class Bridge:
 
         w.whatsnew_open = self.whatsnew_open
         w.whatsnew_from = self.whatsnew_from
+        w.whatsnew_version = self.whatsnew_version
+        w.whatsnew_preview = self.whatsnew_preview
         w.whatsnew_notes = slint.ListModel(list(self.whatsnew_notes)) \
             if self.whatsnew_notes else slint.ListModel([])
         w.about_text = self.diagnostics_text()

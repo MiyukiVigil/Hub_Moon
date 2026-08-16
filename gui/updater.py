@@ -26,9 +26,15 @@ failure that actually happens.
 
 **Channels.** ``stable`` is the tagged release; ``beta`` is whatever is being tested
 next, published from the ``test`` branch. They are separate manifests rather than one
-file with two keys, so a broken beta manifest cannot take stable down with it. Moving
-from beta back to stable is offered whenever stable is *newer*; this never proposes a
-downgrade on its own.
+file with two keys, so a broken beta manifest cannot take stable down with it.
+
+Going *backwards* is offered in exactly one situation: you are running a pre-release
+and you switch to the stable channel. That is a person asking to get off the betas,
+and stable being older than what they have is the normal state of affairs — so the
+"is it newer" test would otherwise strand them. It comes back flagged ``rollback`` so
+the UI can call it a return to stable instead of an update, because installing 1.1.0
+over a 1.2.0b1 is a downgrade and saying otherwise is a lie they find out about
+later. Nothing else here ever proposes going back.
 """
 from __future__ import annotations
 
@@ -202,6 +208,27 @@ ASSET_FOR = {
     "macos-bundle": "macos-dmg",
     "appimage": "appimage",
     "linux-tarball": "linux-tarball",
+    # Package-manager installs. Present so the *download* can be offered — never so
+    # the files can be replaced; see FETCHABLE.
+    "pacman": "arch-package",
+    "deb": "deb-package",
+    "rpm": "rpm-package",
+}
+
+#: Kinds Hub Moon must not install, but **can** fetch and verify.
+#:
+#: The middle ground, and the honest one. Installing a system package needs root,
+#: which this app will never ask for. Downloading the right file and checking its
+#: SHA-256 needs nothing at all, and it is the tedious half — so the app does that
+#: part and hands over one command with the real path already in it, instead of
+#: naming a file and leaving somebody to go and find it.
+FETCHABLE = frozenset({"pacman", "deb", "rpm"})
+
+#: The command that installs a fetched package, given its path.
+INSTALL_COMMAND = {
+    "pacman": "sudo pacman -U %s",
+    "deb": "sudo apt install %s",
+    "rpm": "sudo dnf install %s",
 }
 
 #: What to tell someone whose install we must not touch.
@@ -335,24 +362,56 @@ def fetch_manifest(channel, force=False, ttl=CHECK_TTL):
     return None
 
 
-def release_notes(channel="stable", version=None):
-    """What changed in `version`, from the manifest already on disk.
+def bundled_notes(version=None):
+    """What changed in `version`, from the notes compiled into this build.
 
-    Read from the cache rather than fetched, and that is the point: this is called
-    the first time the app runs *after* an update, when the manifest describing that
-    version is exactly what the check downloaded before installing it. So the What's
-    New screen works with no network at all — which is the common case, because the
-    machine has just restarted.
-
-    Returns [] when there is nothing to say, never raising: a missing manifest means
-    no notes, and no notes is a screen that is simply not shown.
+    `gui/notes.py` is generated from CHANGELOG.md by tools/build-release-notes.py, so
+    every build knows what is in it regardless of where it came from. That matters for
+    exactly the builds a manifest cannot describe: a `makepkg -si` from the repo, a
+    beta whose release has not been published, a wheel installed from a git URL.
     """
-    want = version or mc.__version__
+    want = parse_version(version or mc.__version__)
+    if not want:
+        return []
+    try:
+        from .notes import NOTES
+    except Exception:                       # pragma: no cover - generated, always there
+        return []
+    for tag, lines in NOTES.items():
+        if parse_version(tag) == want:
+            return [str(n) for n in lines]
+    return []
+
+
+def release_notes(channel="stable", version=None):
+    """What changed in `version` — the manifest on disk first, then this build's own.
+
+    The manifest is preferred because it is written from the GitHub release body, so
+    it can say things decided after the code was frozen. It is read from the cache
+    rather than fetched, and that is the point: this is called the first time the app
+    runs *after* an update, when the manifest describing that version is exactly what
+    the check downloaded before installing it. So What's New works with no network at
+    all — the common case, because the machine has just restarted.
+
+    Falling back to the compiled-in notes is what makes this work off the beta channel
+    at all. A beta is very often a build with no published release behind it, and
+    "there is a new version" followed by an empty panel is worse than no panel.
+
+    Returns [] when there is nothing to say, never raising.
+    """
+    want = parse_version(version or mc.__version__)
     for chan in ([channel] + [c for c in CHANNELS if c != channel]):
         data = _read_cache(chan, ttl=float("inf"))
-        if data and str(data.get("version")) == str(want):
-            return [str(n) for n in (data.get("notes") or [])]
-    return []
+        # Compared as parsed versions, not as strings. A tag of `v1.2.0-beta.1` and a
+        # `__version__` of `1.2.0b1` are the same release written two ways — PEP 440
+        # spells it one way and Arch's pkgver forbids the hyphen in the other — and
+        # matching on text would quietly show an empty What's New for one of them.
+        if data and want and parse_version(data.get("version")) == want:
+            notes = [str(n) for n in (data.get("notes") or [])]
+            if notes:
+                return notes
+            break        # the right manifest, and it has nothing to say
+    return bundled_notes(version)
 
 
 def check(channel="stable", current=None, force=False, ttl=CHECK_TTL):
@@ -371,7 +430,23 @@ def check(channel="stable", current=None, force=False, ttl=CHECK_TTL):
         return None
     current = current or mc.__version__
     man = fetch_manifest(channel, force=force, ttl=ttl)
-    if not man or not is_newer(man.get("version"), current):
+    if not man:
+        return None
+
+    offered = man.get("version")
+    forward = is_newer(offered, current)
+    # Leaving the beta channel. Somebody running 1.2.0b1 who switches to stable is
+    # asking to get off the betas, and stable is *older* than what they have — so the
+    # normal "is it newer" test says no and strands them on a pre-release with no way
+    # back. That is the one case where going backwards is the thing being asked for,
+    # and it is offered as an explicit return rather than dressed up as an update.
+    running = parse_version(current)
+    rollback = bool(
+        channel == "stable"
+        and running and running[1] == 0          # what is running is a pre-release
+        and offered and not forward
+        and parse_version(offered))
+    if not forward and not rollback:
         return None
     kind = install_kind()
     assets = man.get("assets") or {}
@@ -384,12 +459,32 @@ def check(channel="stable", current=None, force=False, ttl=CHECK_TTL):
     # There are two different reasons this app might not install an update for you,
     # and telling a Mac user their .app is "managed by a package manager" because a
     # release happened to be missing a .dmg would be a confusing lie. Say which.
+    fetchable = bool(asset) and kind in FETCHABLE
+
     if can:
         hint = reason = ""
+    elif fetchable:
+        hint = INSTALL_COMMAND.get(kind, "") % "<the downloaded file>"
+        if can_elevate(kind):
+            reason = ("Installing a system package needs root. Hub Moon will download "
+                      "it, check it, and ask your desktop for permission — the "
+                      "password goes to the system, never through this app.")
+        else:
+            reason = ("Installing a system package needs root, and there is no polkit "
+                      "agent here to ask with. Hub Moon can download and verify the "
+                      "right one, and then you run:")
     elif kind in SELF_UPDATABLE:
         hint = RELEASES_URL
         reason = ("That release has no download for this platform yet — the build may "
                   "still be running. You can get it from:")
+    elif kind in FETCHABLE:
+        # A package-manager install *with no package in that release*. Blaming the
+        # package manager here would be misleading: the reason there is no button is
+        # that there is nothing to download, which is what an older release looks
+        # like once a new package format has been added to the build.
+        hint = MANUAL_HINT.get(kind, RELEASES_URL)
+        reason = ("That release does not include a package for this platform, so "
+                  "there is nothing to download. Update it with:")
     elif kind in NEEDS_DOWNLOAD:
         hint = MANUAL_HINT[kind]
         reason = ("This copy is managed by a package manager, so Hub Moon will not "
@@ -402,6 +497,10 @@ def check(channel="stable", current=None, force=False, ttl=CHECK_TTL):
 
     return {
         "version": man["version"],
+        # True when this is a return to stable from a pre-release, not an upgrade.
+        # The UI has to say so: "install 1.1.0" over a 1.2.0b1 is a downgrade, and
+        # calling it an update would be a lie the user finds out about afterwards.
+        "rollback": rollback,
         "notes": [str(n) for n in (man.get("notes") or [])],
         "channel": channel,
         "date": man.get("date", ""),
@@ -409,6 +508,8 @@ def check(channel="stable", current=None, force=False, ttl=CHECK_TTL):
         "notes_url": man.get("notes_url") or RELEASES_URL,
         "install_kind": kind,
         "can_install": can,
+        "can_fetch": fetchable,
+        "can_elevate": fetchable and can_elevate(kind),
         "asset": asset,
         "hint": hint,
         "reason": reason,
@@ -664,6 +765,112 @@ APPLIERS = {
     "appimage": apply_appimage,
     "linux-tarball": apply_linux_tarball,
 }
+
+
+def fetch(update, on_progress=None, dest_dir=None):
+    """Download and verify a package this app must not install itself.
+
+    Lands in the user's Downloads directory where they can find it — not a temp
+    directory that gets swept, because the whole point is that *they* run the next
+    command, possibly not immediately. Returns ``(path, command)``.
+    """
+    if dest_dir is None:
+        downloads = os.path.expanduser("~/Downloads")
+        dest_dir = downloads if os.path.isdir(downloads) else os.path.expanduser("~")
+    path = download(update["asset"], dest_dir=dest_dir, on_progress=on_progress)
+    kind = update.get("install_kind") or install_kind()
+    template = INSTALL_COMMAND.get(kind)
+    if not template:
+        raise UpdateError("no install command is known for a %s install" % kind)
+    # Quoted: a Downloads path can contain spaces, and a command that has to be
+    # edited before it runs is not a command that was handed over.
+    return path, template % ("'%s'" % path if " " in path else path)
+
+
+# ── installing a system package, with authorisation ──────────────────────────
+#
+# This is the one place Hub Moon runs anything as root, and the rules it follows are
+# worth stating because they are what make it defensible:
+#
+# * The file is one **this** program downloaded and checked against a SHA-256 from a
+#   manifest fetched over TLS. Nothing else is ever passed.
+# * It is an **argv list**, never a shell string, so a path cannot become an argument
+#   and an argument cannot become a command.
+# * Authorisation goes through **polkit**, which means the desktop's own agent draws
+#   the prompt, the password never passes through this process, and the policy of who
+#   may do it belongs to the system rather than to this app.
+# * Declining is a normal outcome, not an error. The command is still shown so it can
+#   be run by hand.
+
+#: The exact argv, minus the elevation wrapper, that installs a fetched package.
+ELEVATED_ARGV = {
+    "pacman": ["pacman", "-U", "--noconfirm"],
+    "deb": ["apt-get", "install", "-y", "--allow-downgrades"],
+    "rpm": ["dnf", "install", "-y", "--allowerasing"],
+}
+
+#: pkexec's own exit codes for "the user said no" and "there is no agent".
+_PKEXEC_DISMISSED = 126
+_PKEXEC_NOT_FOUND = 127
+
+
+def can_elevate(kind=None):
+    """Can we ask for authorisation graphically for this kind of install?"""
+    kind = kind or install_kind()
+    if kind not in ELEVATED_ARGV:
+        return False
+    tool = ELEVATED_ARGV[kind][0]
+    return bool(shutil.which("pkexec") and shutil.which(tool))
+
+
+def install_elevated(kind, path, timeout=1800):
+    """Install a fetched package as root, prompting through polkit.
+
+    Returns ``(ok, message)``. ``ok`` is False for a decline as well as a failure —
+    the caller shows the command either way — and `message` says which, because
+    "you cancelled" and "the package manager refused" need different next steps.
+    """
+    argv = ELEVATED_ARGV.get(kind)
+    if not argv:
+        return False, "This kind of install cannot be updated automatically."
+    if not shutil.which("pkexec"):
+        return False, ("No polkit agent is available to ask for a password, so this "
+                       "has to be run in a terminal.")
+    full = ["pkexec"] + argv + [path]
+    try:
+        done = subprocess.run(full, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return False, "The installer took too long and was stopped."
+    except OSError as exc:
+        return False, "Could not start the installer: %s" % exc
+
+    if done.returncode == 0:
+        return True, "Installed."
+    if done.returncode == _PKEXEC_DISMISSED:
+        return False, "Cancelled — nothing was changed."
+    if done.returncode == _PKEXEC_NOT_FOUND:
+        return False, "Could not run the package manager."
+    tail = (done.stderr or done.stdout or "").strip().splitlines()
+    return False, (tail[-1][:200] if tail else
+                   "The package manager exited with code %d." % done.returncode)
+
+
+def relaunch():
+    """Start a fresh copy once this one has exited.
+
+    Needed after a package install replaces the files underneath a running process:
+    the code already in memory keeps working, but it is the old code.
+    """
+    if getattr(sys, "frozen", False):
+        argv = [sys.executable]
+    else:
+        argv = [sys.executable] + list(sys.argv)
+    quoted = " ".join("'%s'" % a.replace("'", "'\\''") for a in argv)
+    script = _write_script(
+        "#!/bin/sh\n" + _sh_wait_for_exit(os.getpid()) +
+        "%s &\n" % quoted +
+        'rm -f "$0"\n', ".sh")
+    _detach(["/bin/sh", script])
 
 
 def install(update, on_progress=None):
