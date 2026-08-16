@@ -5,6 +5,174 @@ All notable changes to **moondrop_control.py** are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0b3] - 2026-08-16
+
+Everything in b2 that turned out to be wrong once it was installed rather than tested.
+The headline is that **no Linux binary release could ever see the DAC** — a bug a year
+old, hidden the whole time by the source install every piece of hardware verification
+was done on.
+
+### Fixed
+
+- **No Linux binary release could see the DAC without root.** The tarball, the
+  AppImage, the `.deb`, the `.rpm` and the Arch package are all the same PyInstaller
+  bundle, built with `pip install`, which brings the manylinux `hidapi` wheel — and
+  that wheel is **libusb**-backed. The shipped udev rule covered `SUBSYSTEM=="hidraw"`
+  only. A libusb backend never opens `/dev/hidrawN`; it opens `/dev/bus/usb/BBB/DDD`
+  and claims the interface, which needs write access to a node nothing was granting.
+  So `/dev/hidraw2` was handed over perfectly and the program was never going to look
+  at it.
+
+  This hid behind the source install, where it cannot happen: a distro's own
+  `python-hidapi` is hidraw-backed, so every hand-built and AUR-style install worked,
+  including the one all the hardware verification was done on. `70-moondrop.rules`
+  now carries both subsystems. **Anyone on a binary release needs to reinstall the
+  package (or add the line by hand), reload udev, and replug the DAC** — udev does not
+  revisit nodes that already exist.
+- **A `.deb`, `.rpm` or Arch install reported itself as a loose tarball.** All three
+  ship the PyInstaller tree into `/opt`, and `install_kind()` decided "frozen on
+  Linux" meant `linux-tarball` — which is in `SELF_UPDATABLE`, so the app offered
+  **Download and install** on a copy a package manager owns, and told the About panel
+  the wrong thing about where it came from.
+
+  It stopped short of damage on an ordinary machine: `/opt` is root-owned, so the
+  applier refuses with "no permission to replace /opt/hub-moon" before it moves
+  anything. But a button that fails is exactly what `install_kind` exists to prevent,
+  and on a system where `/opt` *is* writable it would have overwritten files the
+  package database still claims. It now asks `dpkg`/`rpm`/`pacman` who owns the
+  executable, as the unfrozen path already did, and falls back to `linux-tarball`
+  only when nobody claims it.
+- **The main window was slow, and worst when it was largest.** Every `push()`
+  resampled all three traces — about 8 ms of Python across eight biquads at a 980 px
+  plot, on the UI thread. Two things made that much worse than it had to be: it ran on
+  pushes that cannot change the curve at all (a toast, an update check finishing, a
+  sheet opening, a hover), and it computed *both* views every time, when the editor
+  draws three traces and the readout draws two and only one view is ever on screen.
+  The traces are now keyed on what they are a function of, and only the visible view
+  is sampled. A push that does not touch the curve went from 9.7 ms to 1.6 ms.
+- **What's New said "from 1.2.0b2" on 1.2.0b2.** Opening it from Settings read
+  "Hub Moon 1.2.0b2 · from 1.2.0b2 · already installed and running", because
+  `last_run_version` is set to the running version the moment the panel is first
+  shown. There is no "from" when you open it yourself, so the chip is no longer drawn.
+- The new bridge tests aborted the interpreter partway through, naming a worker
+  thread rather than anything in the test. A Bridge starts five workers, every row
+  handed to Slint is a `PyStruct` pyo3 marks unsendable, and the cyclic collector runs
+  on whichever thread trips the allocation threshold — so a worker allocating anything
+  could start a collection that walks a UI-thread struct. `gui/app.py` has guarded the
+  real app against this since 1.0.0; the fixture now does the same.
+- **Every button was 26px too wide, with all of it after the label.** `TextBtn` sized
+  itself as `inner.preferred-width + 26px`, but `inner` already contained its own
+  11px padding either side — so the 26px was slack, and a `HorizontalLayout` gives its
+  slack to the last stretchy child, which piled all of it up to the right of the text.
+  That is the wide empty margin inside every pill in the app. The padding is now one
+  number in one place, the button is the width of its contents, and the contents are
+  centred in it whatever width a caller sets. `HoldBtn` had inherited the same bug and
+  gets the same fix — one button style, one behaviour.
+
+  It is also why **save to flash** was running off the right edge of the action bar:
+  eight buttons were each carrying 26px they had no use for.
+- **The header's three icon buttons were spaced like three unrelated things.** The
+  row's 12px gap is meant to separate *groups*; every child was getting it, so the
+  home, settings and reload icons sat apart in the corner. They are one group now, as
+  are the three pills beside them.
+- **The welcome screen's four cards.** They were fixed at 236px, so the fourth was cut
+  off below about 1000px — where a tiling window manager will routinely put you. The
+  first attempt at fixing that, four stretching cards with a `max-width`, was worse:
+  the row ended up centred somewhere other than the rest of the screen. They now split
+  a centred container of definite width, so the four shares are a division rather than
+  a negotiation.
+- **The palette picker overflowed into the row below it.** `SettingRow` sized itself
+  from its description column alone, on the unstated assumption that a control is one
+  switch tall — true for every row until a picker arrived as a column of four. A row
+  is now as tall as the taller of the two things in it. The description column also
+  had no explicit height, so on a tall row it stretched and pushed the label and its
+  note to opposite ends.
+- **The About tab closed over its own last paragraph.** The sheet sizes to
+  `pane.preferred-height`, which under-reports a column of wrapping prose — a `Text`
+  with `wrap: word-wrap` reports the height it would take on one line. About is eight
+  paragraphs of it, so it measured about a third of what it draws.
+
+### Changed
+
+- **The tuning guide has figures.** It was seven paragraphs about the shape of a
+  filter, asking the reader to picture something the program is perfectly able to
+  draw. Each topic now opens on a diagram — three Q values at the same gain and centre
+  frequency, a shelf against a peak at the same 100 Hz, the same tone reached by
+  boosting once versus cutting either side, the dashed output trace under the solid
+  one — and the seven topics are a rail rather than one long scroll.
+
+  Every figure is produced by `gui/curve.py`, the sampler the editor plots with, fed
+  synthetic bands. Nothing is illustrated: the page about a high shelf overflowing the
+  firmware's coefficient format draws the actual overflow. Tests assert the claims the
+  captions make, so a page saying "the same gain at the same frequency" cannot drift
+  into being about something else.
+
+### Added
+
+- **A/B compare.** Hold **compare** in the action bar to hear the headphone with none
+  of your tuning, release to hear it back. Pre-gain goes to 0 for the duration, and
+  that is what makes it worth trusting: a curve with a +6 dB peak carries −6 dB of
+  pre-gain, so leaving it in would compare your tuning against a signal six decibels
+  quieter, and louder always wins a blind comparison. Both sides now peak at the same
+  place, so what you are judging is tone.
+
+  It is a hold rather than a toggle because the answer to "which am I hearing" should
+  be the state of your thumb, not something you look away from the music to read. The
+  DAC is written to directly; the curve on screen is never touched, nothing is marked
+  dirty and nothing reaches flash.
+- **Per-band mute.** The slot number on each band card turns into a mute control on
+  hover — click it to hear the curve without that band, click again to bring it back
+  at the filter type it had. It is written as the firmware's own `disabled` type,
+  which the DAC treats as a pass-through, so this is genuinely the curve minus that
+  band rather than the band flattened to a gain of zero.
+- **Undo.** Distinct from **revert**, which goes all the way back to what flash holds
+  — this is for the move you just wish you had not made. A drag is one step rather
+  than the two hundred frames it was made of, and a step that turns out not to have
+  moved anything is skipped on the way back, because a button that visibly does
+  nothing is worse than no button.
+- **A walkthrough that points at the real thing.** *Show me around* on the home
+  screen dims the window and puts a ring around each region in turn — the control row,
+  the presets, the graph, the band cards, the action bar — with a caption saying what
+  is genuinely non-obvious about it rather than reading its label back. The target
+  rectangle is read from the element with `absolute-position`, so it cannot drift out
+  of step with the layout the way a list of hardcoded coordinates would the first time
+  a row changed height.
+- **The supported-device list, in the app.** It has been in the readme since 1.0.0 and
+  nowhere else, which is exactly backwards: the person who needs it is holding a DAC
+  that did not come up, and they are looking at this window. Eleven devices with their
+  band count, custom slot and whether they take pre-gain — all read out of
+  `moondrop_control`'s own tables, so a device added to the registry appears here
+  without anyone updating a second list. **One is marked verified.** The other ten are
+  transcribed from the vendor's registry and have never been near the hardware they
+  describe, and the panel says so.
+- **No DAC now lands on the home screen** instead of dropping into an editor that is
+  not editing anything, with the only explanation in a toast that scrolls away. It
+  names what was not found, offers the device list, and still has **Try the demo** on
+  it. Only on the first miss of a session — a reload that fails while you are
+  deliberately playing with the demo leaves you where you are.
+- **Keyboard editing.** `1`–`8` picks a band, arrows move its gain and frequency
+  (`shift` for coarse), `[` and `]` change Q, `0` flattens it, `m` mutes, `s` solos,
+  and holding `space` bypasses the whole curve. `Ctrl-Z` undoes. Until now the only
+  keys were `Esc`, `Ctrl-S` and `Ctrl-R`, which for a tool you use while listening —
+  one hand on the headphones, eyes anywhere but the screen — was most of the work
+  still on the mouse. None of them fire while a panel is open, so typing a headphone
+  name into the AutoEQ search stays typing.
+- **Solo.** The counterpart to mute, and the faster question most of the time: "what
+  is this band doing" beats "what is everything except this band doing" when you are
+  hunting for the one that owns a problem. Soloing a second band moves the solo rather
+  than making you end the first, and ending a solo puts back exactly what it turned
+  off — a band you had muted by hand stays muted.
+- **Four palettes.** Until now the only thing you could change was the accent hue,
+  which is the least consequential decision on the screen — a few hundred pixels of
+  button, while the surfaces and the ink are everything else. **Moon** is the original
+  warm mauve; **Paper** is warm and neutral with more contrast; **Slate** is cool
+  blue-grey; **Carbon** is near-untinted and pushed furthest apart at both ends.
+
+  Each carries a light and a dark half picked separately, for the same reason the
+  accent table does — a palette that is inverted rather than re-picked comes out with
+  the right lightnesses and the wrong saturations. The accent stays orthogonal: any of
+  the six hues sits on any of the four grounds.
+
 ## [1.2.0b2] - 2026-08-16
 
 The second beta. All of it is 1.2.0b1 read back off the screen — a settings panel that

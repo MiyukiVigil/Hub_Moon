@@ -1,9 +1,31 @@
-# Hub Moon — let the logged-in user read/write Moondrop DAC HID nodes without root.
+# Hub Moon — let the logged-in user reach a Moondrop DAC without root.
 #
 # `uaccess` hands the device to whoever owns the active login session (the modern,
 # seat-aware way — no world-writable node). MODE=0660 is a fallback for systems
-# whose logind build doesn't apply uaccess to hidraw.
+# whose logind build doesn't apply uaccess to these subsystems.
 #
 # Install to /usr/lib/udev/rules.d/ (packages) or /etc/udev/rules.d/ (by hand), then:
 #   sudo udevadm control --reload-rules && sudo udevadm trigger
+# and replug the DAC — udev does not revisit nodes that already exist.
+#
+# ── why there are two lines, and why one is not enough ──
+#
+# hidapi has two Linux backends and Hub Moon ships builds that use both.
+#
+#   hidraw  — what a distro's own python-hidapi is built against, so it is what a
+#             source install, an AUR build or `pip install` against system libs uses.
+#             It talks to /dev/hidrawN.
+#   libusb  — what the manylinux `hidapi` wheel on PyPI bundles, so it is what every
+#             PyInstaller build here uses: the tarball, the AppImage, the .deb, the
+#             .rpm and the Arch package. It never opens /dev/hidrawN at all. It opens
+#             /dev/bus/usb/BBB/DDD and claims the interface, which needs *write*
+#             access to that node.
+#
+# Shipping only the hidraw line is why every binary release looked like "no DAC
+# detected" while a source install on the same machine worked: /dev/hidraw2 was
+# handed over correctly and the program was never going to look at it. The usb node
+# was crw-rw-r--, readable but not writable, so libusb_claim_interface failed.
+#
+# Both lines are harmless on a build that only needs one of them.
 SUBSYSTEM=="hidraw", ATTRS{idVendor}=="35d8", TAG+="uaccess", MODE="0660"
+SUBSYSTEM=="usb", ATTRS{idVendor}=="35d8", TAG+="uaccess", MODE="0660"

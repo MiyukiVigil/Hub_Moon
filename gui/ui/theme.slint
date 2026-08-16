@@ -51,27 +51,94 @@ export global Accents {
     ];
 }
 
+// The ground everything sits on, chosen rather than derived.
+//
+// Until now there was one palette with a light half and a dark half, and the only
+// thing a user could change was the accent hue. That is one decision, and it is the
+// least consequential one: the accent is a few hundred pixels of button, while the
+// surfaces and the ink are the entire screen. Somebody who finds the plum-tinted grey
+// too warm has nothing to reach for.
+//
+// So the surfaces are a table too, on the same principle as the accents: every entry
+// carries both halves, because a palette that is inverted rather than re-picked comes
+// out with the right lightnesses and the wrong saturations. Four is enough to cover
+// the real disagreements — warm or cool, tinted or neutral, soft or high-contrast —
+// and few enough that each one could be looked at properly.
+//
+// The accent stays orthogonal. Any of the six hues sits on any of the four grounds,
+// because the accent table already picks its own light and dark values and does not
+// care what is behind them.
+export struct Skin {
+    name: string,
+    note: string,
+    bg: color,     card: color,     card-2: color,   well: color,
+    line: color,   line-2: color,   text: color,     sub: color,      faint: color,
+    bg-d: color,   card-d: color,   card-2-d: color, well-d: color,
+    line-d: color, line-2-d: color, text-d: color,   sub-d: color,    faint-d: color,
+}
+
+export global Skins {
+    out property <[Skin]> all: [
+        // The original, and still the default: a soft mauve-grey that keeps a little
+        // plum in it at both ends, so the rose accent reads as belonging rather than
+        // as applied.
+        { name: "Moon", note: "warm mauve — the original",
+          bg: #efe9eb, card: #fbf8f9, card-2: #f3edef, well: #e8dfe3,
+          line: #e3d8dc, line-2: #d0c0c7, text: #2b2126, sub: #6f5f66, faint: #a2929a,
+          bg-d: #171216, card-d: #1f181d, card-2-d: #272029, well-d: #322833,
+          line-d: #342b34, line-2-d: #4a3d47, text-d: #f3e8ee, sub-d: #b9a5b0, faint-d: #7f6d78 },
+
+        // No tint worth naming, and warmer than neutral — the colour of paper rather
+        // than of a screen. For anyone who found the plum too present.
+        { name: "Paper", note: "warm neutral, higher contrast",
+          bg: #eae7e2, card: #fdfcfa, card-2: #f2efe9, well: #e2ded6,
+          line: #ded9d1, line-2: #c6bfb4, text: #26231f, sub: #66605a, faint: #9b948b,
+          bg-d: #1a1917, card-d: #232220, card-2-d: #2c2b28, well-d: #383632,
+          line-d: #35332f, line-2-d: #4b4843, text-d: #f0ece5, sub-d: #b3ada4, faint-d: #7c766e },
+
+        // Cool and slightly blue, which is what most audio software looks like. Here
+        // because "looks like the other tools on my machine" is a real preference and
+        // not a lesser one.
+        { name: "Slate", note: "cool blue-grey",
+          bg: #e8ebee, card: #fbfcfd, card-2: #eff2f5, well: #dde2e8,
+          line: #d9dfe5, line-2: #bcc5ce, text: #1c2229, sub: #5c666f, faint: #94a0aa,
+          bg-d: #12161a, card-d: #1b2026, card-2-d: #232a31, well-d: #2d353d,
+          line-d: #2b333a, line-2-d: #3f4a54, text-d: #e7edf3, sub-d: #a4b1bc, faint-d: #6f7d89 },
+
+        // Nearly untinted, and pushed further apart at both ends. The one to pick for
+        // a bright room, a dim room, or eyes that want the contrast — the graph reads
+        // hardest against this and softest against Moon.
+        { name: "Carbon", note: "near-neutral, maximum contrast",
+          bg: #f4f4f5, card: #ffffff, card-2: #ebebec, well: #dededf,
+          line: #e2e2e3, line-2: #b9b9bc, text: #101012, sub: #545457, faint: #8a8a8e,
+          bg-d: #0b0b0c, card-d: #141416, card-2-d: #1c1c1f, well-d: #262629,
+          line-d: #242427, line-2-d: #3a3a3f, text-d: #f5f5f6, sub-d: #adadb2, faint-d: #75757b },
+    ];
+}
+
 export global Theme {
     // Both flipped by MainWindow, which gets them from the saved settings. Everything
     // below is a binding on them, so one write repaints the whole app.
     in-out property <bool> dark: false;
     in-out property <int> accent-index: 0;
+    in-out property <int> skin-index: 0;
 
     out property <Accent> ac: Accents.all[Theme.accent-index];
+    out property <Skin> sk: Skins.all[Theme.skin-index];
 
     // ── surfaces: page → cards → wells ──
-    out property <color> bg:     root.dark ? #171216 : #efe9eb;   // the page itself
-    out property <color> card:   root.dark ? #1f181d : #fbf8f9;   // panels, the plot
-    out property <color> card-2: root.dark ? #272029 : #f3edef;   // inputs, hover
-    out property <color> well:   root.dark ? #322833 : #e8dfe3;   // slider grooves
+    out property <color> bg:     root.dark ? root.sk.bg-d : root.sk.bg;         // the page itself
+    out property <color> card:   root.dark ? root.sk.card-d : root.sk.card;     // panels, the plot
+    out property <color> card-2: root.dark ? root.sk.card-2-d : root.sk.card-2; // inputs, hover
+    out property <color> well:   root.dark ? root.sk.well-d : root.sk.well;     // slider grooves
 
-    out property <color> line:   root.dark ? #342b34 : #e3d8dc;   // hairlines
-    out property <color> line-2: root.dark ? #4a3d47 : #d0c0c7;   // borders that must be seen
+    out property <color> line:   root.dark ? root.sk.line-d : root.sk.line;       // hairlines
+    out property <color> line-2: root.dark ? root.sk.line-2-d : root.sk.line-2;   // borders that must be seen
 
     // ── ink ──
-    out property <color> text:  root.dark ? #f3e8ee : #2b2126;
-    out property <color> sub:   root.dark ? #b9a5b0 : #6f5f66;
-    out property <color> faint: root.dark ? #7f6d78 : #a2929a;
+    out property <color> text:  root.dark ? root.sk.text-d : root.sk.text;
+    out property <color> sub:   root.dark ? root.sk.sub-d : root.sk.sub;
+    out property <color> faint: root.dark ? root.sk.faint-d : root.sk.faint;
 
     // ── the one accent, from the table above ──
     // Light gets a deep hue that holds up as a fill; dark needs it lifted well past

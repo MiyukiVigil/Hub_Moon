@@ -1,6 +1,30 @@
-# moondrop_control.py
+# Hub Moon
 
-A command-line tool for controlling Moondrop USB DACs over USB HID — read and write the parametric EQ, pre-gain, and DAC offset without the official web app. The protocol was reverse engineered from https://hub.moondroplab.tech/.
+Parametric EQ for Moondrop USB DACs, written to the device's own DSP over USB HID — without the
+official web app. The protocol was reverse engineered from https://hub.moondroplab.tech/.
+
+There are two ways in, and **for almost everybody it is the desktop app**:
+
+```bash
+hub-moon --gui        # or the launcher the packages install
+```
+
+The window shows the whole device on one screen: the response graph with a draggable handle per
+band, the eight band cards, pre-gain with a one-tap **match** that works out the headroom your curve
+needs, and a live A/B you hold to hear the headphone without any of it. Behind three buttons it also
+has **8,827 AutoEQ corrections for 6,015 headphones**, the ~59,700-curve community library, and
+saved profiles of your own. It edits live on the DSP so you hear every move, and only **save to
+flash** keeps anything after you unplug. It updates itself, and it explains what it is doing while
+it does it.
+
+Everything below documents the **command line**, which is the same engine with a different front.
+Reach for it to script something, to drive Hub Moon from another program (see *Building a front-end
+on this*), or because you would rather not have a window open. It is not the reduced version — the
+GUI imports it — but it is the one that assumes you already know what a shelf filter is.
+
+**New here?** [Install it](https://hubmoon.miyukivigil.tech/install.html), open the app, and press
+**Show me around**. The welcome screen also lists every supported DAC, which is the fastest way to
+find out whether yours is one of them.
 
 ## Scope
 
@@ -44,10 +68,20 @@ Reading raw HID may work unprivileged depending on your distro's defaults — it
 
 ```
 # /etc/udev/rules.d/70-moondrop.rules
-SUBSYSTEM=="hidraw", ATTRS{idVendor}=="35d8", MODE="0666"
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="35d8", TAG+="uaccess", MODE="0660"
+SUBSYSTEM=="usb",    ATTRS{idVendor}=="35d8", TAG+="uaccess", MODE="0660"
 ```
 
-Then reload with `sudo udevadm control --reload-rules && sudo udevadm trigger`.
+Then reload with `sudo udevadm control --reload-rules && sudo udevadm trigger`, **and replug the DAC** — udev does not revisit nodes that already exist.
+
+**Both lines are needed**, because hidapi has two Linux backends and which one you get depends on how you installed:
+
+| Install | hidapi backend | Node it opens |
+|---|---|---|
+| Distro package, or `pip` against system libs | hidraw | `/dev/hidrawN` |
+| Any binary release here — tarball, AppImage, `.deb`, `.rpm`, Arch | libusb | `/dev/bus/usb/BBB/DDD` |
+
+The binary releases all bundle the manylinux `hidapi` wheel, which is libusb-backed. It never opens `/dev/hidrawN` at all, so a hidraw-only rule grants access to a node the program will not look at, and the DAC appears to be missing. `uaccess` hands the device to whoever owns the active login session, which is better than `MODE="0666"` — that made the node world-writable for every user on the machine.
 
 ## Supported devices
 

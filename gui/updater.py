@@ -148,6 +148,25 @@ def _win_installed_by_inno():
     return False
 
 
+def _package_owner(path):
+    """Which package manager owns `path`, or None if none of them claims it.
+
+    Asked rather than inferred from the location, because the location does not say:
+    /opt/hub-moon is where the .deb, the .rpm and the Arch package all put the same
+    PyInstaller tree, and also where somebody who unpacked the tarball by hand would
+    reasonably put it. Only the package database knows the difference.
+    """
+    for kind, argv in (("deb", ["dpkg", "-S", path]),
+                       ("rpm", ["rpm", "-qf", path]),
+                       ("pacman", ["pacman", "-Qo", path])):
+        try:
+            if subprocess.run(argv, capture_output=True, timeout=5).returncode == 0:
+                return kind
+        except (OSError, subprocess.SubprocessError):
+            continue
+    return None
+
+
 def install_kind():
     """How this copy of Hub Moon got onto this machine.
 
@@ -164,7 +183,12 @@ def install_kind():
             return "windows-installer" if _win_installed_by_inno() else "windows-portable"
         if sys.platform == "darwin":
             return "macos-app" if ".app/Contents/" in exe else "macos-bundle"
-        return "linux-tarball"
+        # A frozen bundle is not automatically a loose tarball. The .deb, .rpm and
+        # Arch packages all ship this same PyInstaller tree into /opt, and calling
+        # one of those "linux-tarball" put it in SELF_UPDATABLE — so the app would
+        # cheerfully overwrite files a package manager owns and leave the package
+        # database describing something that is no longer on disk.
+        return _package_owner(exe) or "linux-tarball"
 
     here = os.path.abspath(mc.__file__)
     # Checked before anything else unfrozen: a repo cloned into the home directory
@@ -175,18 +199,8 @@ def install_kind():
     if "/nix/store/" in here.replace("\\", "/"):
         return "nix"
     if _under(here, "/usr/lib", "/usr/lib64", "/usr/share", "/usr/local/lib"):
-        # A system-wide install we did not make ourselves: deb, rpm or pacman. Which
-        # one only matters for the sentence we print, so ask the package managers.
-        for kind, argv in (("deb", ["dpkg", "-S", here]),
-                           ("rpm", ["rpm", "-qf", here]),
-                           ("pacman", ["pacman", "-Qo", here])):
-            try:
-                if subprocess.run(argv, capture_output=True,
-                                  timeout=5).returncode == 0:
-                    return kind
-            except (OSError, subprocess.SubprocessError):
-                continue
-        return "system"
+        # A system-wide install we did not make ourselves: deb, rpm or pacman.
+        return _package_owner(here) or "system"
     if os.sep + "pipx" + os.sep in here or ".local/pipx" in here.replace("\\", "/"):
         return "pipx"
     slash = here.replace("\\", "/")

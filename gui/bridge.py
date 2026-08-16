@@ -34,6 +34,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import queue
 import shutil
 import subprocess
@@ -53,6 +54,8 @@ except ImportError:
 
 from . import autoeq
 from . import curve as curve_mod
+from . import devices as devices_mod
+from . import guide as guide_mod
 from . import profiles as prof
 from . import updater
 from .diagnostics import log
@@ -202,6 +205,26 @@ def fmt_hz(f):
     return "%d" % round(f)
 
 
+def _skin_count():
+    """How many palettes theme.slint defines.
+
+    Counted from the source rather than written down here, because the clamp on the
+    saved setting has to move when the table does — and a hardcoded 4 that is wrong is
+    a settings file that silently loses the palette somebody picked.
+    """
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui", "theme.slint")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            body = fh.read()
+        table = body.split("out property <[Skin]> all:", 1)[1].split("];", 1)[0]
+        return max(1, len(re.findall(r"\{\s*name:", table)))
+    except Exception:
+        return 1
+
+
+SKINS = _skin_count()
+
+
 def clamp_band(ftype, freq, gain, q):
     """Pull a band back to something the firmware can actually be given.
 
@@ -269,6 +292,7 @@ def load_settings():
     except (OSError, json.JSONDecodeError):
         data = {}
     accent = data.get("accent", 0)
+    skin = data.get("skin", 0)
     channel = data.get("channel")
     # Update checking defaults on where we ship the build ourselves and OFF where a
     # package manager owns the files. A distro package that phones home on launch is
@@ -281,6 +305,9 @@ def load_settings():
     return {"dark": bool(data.get("dark", False)),
             "readout": bool(data.get("readout", False)),
             "accent": int(accent) if isinstance(accent, (int, float)) else 0,
+            # The surfaces and the ink, independent of the accent hue. Index into
+            # Skins.all in theme.slint; out-of-range falls back to the original.
+            "skin": int(skin) if isinstance(skin, (int, float)) else 0,
             "seen_welcome": bool(data.get("seen_welcome", False)),
             "check_updates": bool(data.get("check_updates", auto_default)),
             "channel": channel if channel in updater.CHANNELS else "stable",
@@ -444,6 +471,29 @@ class DeviceWorker(_Worker):
             self._dev.write_peq_index(index, ftype, freq, gain, q)
         except ValueError as exc:
             self._post("error", str(exc))
+
+    def audition(self, bands, pregain):
+        """Write a set of bands live and say nothing about it.
+
+        The difference from `apply_bands` is the read-back it does *not* do. This is
+        what A/B uses, and A/B writes a curve the app must never adopt as its state —
+        posting a snapshot would let the flat set it just wrote overwrite the one the
+        user is editing, and letting go of the key would restore flat onto flat.
+
+        Nothing here touches flash, and nothing sets `dirty`: the DAC is being asked a
+        question, not told a fact.
+        """
+        if self._dev is None:
+            return
+        for b in bands:
+            try:
+                self._dev.write_peq_index(b["index"], b["type"],
+                                          int(round(b["frequency"])),
+                                          float(b["gain"]), float(b["q"]))
+            except ValueError as exc:
+                self._post("error", str(exc))
+        if self._dev.supports_pregain and pregain is not None:
+            self._dev.set_pregain(float(pregain), save=False)
 
     def apply_bands(self, bands, pregain, global_gain):
         """Batch write — preset, import, community curve, revert. All bands live,
@@ -908,6 +958,9 @@ class Bridge:
         # First run gets the welcome screen. After that it is on request only — an
         # opening screen you have already read is an obstacle, not a welcome.
         self.welcome_open = not self.settings["seen_welcome"]
+        # Whether the opening screen has been shown for this run, by any route — a
+        # first launch or a DAC that did not turn up. Either counts.
+        self._greeted = self.welcome_open
         self.help_open = False
         self.settings_open = False
         self.hub_open = False
@@ -925,6 +978,9 @@ class Bridge:
         self._drag = -1
         self._q_gen = 0
         self._grid_for = None
+        self._dev_sig = object()   # never equal to a real pid, so the first push builds
+        # Set by _push_curves; None means "nothing drawn yet, compute it".
+        self._curve_sig = None
         self._grid_path = ""
         # Models are built once and updated in place — see push() for why that matters.
         self._band_model = None
@@ -939,6 +995,35 @@ class Bridge:
         self.update_progress = 0.0
         # The one command that installs a package we fetched but must not install.
         self.update_command = ""
+
+        # ── A/B, bypass, undo ──
+        # True only while the compare control is held. Never persisted, never saved to
+        # flash, and never allowed to become `self.bands` — see `compare_hold`.
+        self.comparing = False
+        # index -> the filter type a band had before it was bypassed. Kept beside the
+        # band rather than in it, because `self.bands` is what gets exported and saved
+        # and a band that is off should export as off rather than as a secret.
+        self._muted = {}
+        # Bounded, and holding whole states rather than deltas: a state is four floats
+        # per band and there are eight bands, so forty of them is nothing, and an
+        # inverse operation per edit type is a great deal to keep correct for no gain.
+        self._history = []
+        # What the last edit was, as (band, which knob). A fader dragged across thirty
+        # frames is one gesture and must be one undo step, so a snapshot is taken when
+        # this *changes* rather than on every call. Cleared by `_remember`, so anything
+        # that is not a fine edit ends the run and the next nudge starts a new step.
+        self._edit_mark = None
+        # Which band is soloed, or -1. Its own store rather than sharing `_muted`,
+        # so ending a solo puts back exactly what solo turned off and leaves a band
+        # you had muted by hand still muted.
+        self._solo = -1
+        self._solo_muted = {}
+
+        # ── the supported-device list and the walkthrough ──
+        self.dev_open = False
+        # -1 when the tour is not running. It points at real elements rather than
+        # describing them, so the steps are numbered by what they highlight.
+        self.tour_step = -1
 
         # ── what's new ──
         self.whatsnew_open = False
@@ -1011,6 +1096,7 @@ class Bridge:
         window.set_dark = self.set_dark
         window.set_readout = self.set_readout
         window.set_accent = self.set_accent
+        window.set_skin = self.set_skin
         window.dismiss_welcome = self.dismiss_welcome
         window.show_welcome = self.show_welcome
         window.toggle_community = self.toggle_community
@@ -1020,6 +1106,16 @@ class Bridge:
         window.preview_apply = self.preview_apply
         window.preview_close = self.preview_close
         window.dismiss_toast = lambda: (self.toast(""), self.push())
+        window.toggle_band = self.toggle_band
+        window.compare_hold = self.compare_hold
+        window.toggle_devices = self.toggle_devices
+        window.start_tour = self.start_tour
+        window.tour_next = self.tour_next
+        window.tour_end = self.tour_end
+        window.step_gain = self.step_gain
+        window.reset_band = self.reset_band
+        window.solo_band = self.solo_band
+        window.undo = self.undo
         window.dismiss_whatsnew = self.dismiss_whatsnew
         window.show_whatsnew = self.show_whatsnew
         window.preview_whatsnew = self.preview_whatsnew
@@ -1049,6 +1145,9 @@ class Bridge:
 
         # The view is handed the finished outline rather than a name: it has no way to
         # look a name up, and giving it one would mean a second copy of the icon table.
+        # Fixed strings built from fixed filters, so this is a one-off: nothing in
+        # the guide depends on the window size or on what is connected.
+        window.guide_pages = slint.ListModel(guide_mod.pages())
         window.presets = slint.ListModel([
             {"name": name, "icon": ICON_PATHS.get(icon, "")}
             for name, icon, _b, _p in PRESETS
@@ -1098,6 +1197,17 @@ class Bridge:
             # gets to take its own pristine.
             self.pristine = None
             self.toast(str(payload) + "  Showing a demo curve.", False)
+            # Land on the home screen rather than dropping straight into an editor
+            # that is not editing anything. It names what was not found, offers the
+            # supported-device list, and still has "Try the demo" on it — which is a
+            # better first thirty seconds than a curve wired to nothing and a toast
+            # that scrolls away.
+            #
+            # Only on the first miss of the session: a refresh that fails while
+            # somebody is deliberately playing with the demo should stay where it is.
+            if not self._greeted:
+                self._greeted = True
+                self.welcome_open = True
         elif kind == "busy":
             self.busy = bool(payload)
         elif kind == "saved":
@@ -1337,7 +1447,12 @@ class Bridge:
         a release. When there are genuinely none it still opens and says so, because a
         button that sometimes does nothing is worse than one that always answers.
         """
-        self.whatsnew_from = self.settings.get("last_run_version") or ""
+        # `last_run_version` is set to the running version the moment the panel is
+        # shown after an update, so by the time anybody opens it from Settings it says
+        # what they are already running: "Hub Moon 1.2.0b2 — from 1.2.0b2". An empty
+        # string means the chip is not drawn at all, which is the truth here.
+        was = self.settings.get("last_run_version") or ""
+        self.whatsnew_from = "" if was == mc.__version__ else was
         self.whatsnew_version = mc.__version__
         self.whatsnew_preview = False
         self.whatsnew_notes = updater.release_notes(self.settings["channel"])
@@ -1677,6 +1792,187 @@ class Bridge:
             self.toast("Demo mode — nothing to save.", False)
             self.push()
 
+    # ── the walkthrough ──
+    #
+    # Five stops, in the order somebody meets them going down the window. Each one
+    # names a thing that is genuinely non-obvious rather than describing what is
+    # already written on the control: a tour that says "this is the preset row" for
+    # a row labelled PRESETS has spent somebody's attention and given nothing back.
+    TOUR = [
+        ("Headroom lives here",
+         "The slot is the DAC's own EQ profile — the bands you edit are written to "
+         "it, so moving the device off it means you stop hearing your own work. "
+         "Pre-gain is what stops a boosted curve clipping, and match sets it to "
+         "exactly what your curve needs and no more."),
+        ("Somewhere to start",
+         "These are starting points, not the DAC's own presets — they load a curve "
+         "you then edit. Nothing is written to flash until you say so, so trying one "
+         "costs nothing."),
+        ("Two curves, and the dashed one is the truth",
+         "Drag a numbered handle to move that band, scroll anywhere to widen or "
+         "narrow it. The solid line is what the EQ does; the dashed one is what "
+         "actually leaves the DAC once pre-gain is paid. While the dashed line is "
+         "above 0 dB, loud passages clip."),
+        ("The same eight bands, as numbers",
+         "Filter type, a gain fader, and steppers for frequency and Q. Hover the "
+         "slot number to mute a band and hear what it was doing — and every one of "
+         "these has a key, listed under How to tune."),
+        ("Nothing here is permanent",
+         "Edits go live to the DSP so you hear them as you move, and vanish when you "
+         "unplug. Compare is hold-to-bypass. Undo steps back one move; revert goes "
+         "all the way to what flash holds; save to flash is the only thing that "
+         "keeps a curve."),
+    ]
+
+    def start_tour(self):
+        """Walk the window, not a slideshow of it."""
+        self.tour_step = 0
+        self.welcome_open = False
+        self.settings_open = self.help_open = self.hub_open = False
+        self.aeq_open = self.prof_open = self.dev_open = False
+        self.push()
+
+    def tour_next(self):
+        # A stray advance after the tour has ended must not start it again. The
+        # overlay is gone by then, so this would run the whole thing with nothing on
+        # screen to click and no way to stop it.
+        if self.tour_step < 0:
+            return
+        self.tour_step += 1
+        if self.tour_step >= len(self.TOUR):
+            self.tour_end()
+            return
+        self.push()
+
+    def tour_end(self):
+        self.tour_step = -1
+        # Seeing the tour counts as having been welcomed. Somebody who has just been
+        # walked through the window does not need the opening screen next launch.
+        if not self.settings.get("seen_welcome"):
+            self.settings["seen_welcome"] = True
+            save_settings(self.settings)
+        self.push()
+
+    # ── the supported-device list ──
+    def toggle_devices(self):
+        self.dev_open = not self.dev_open
+        if self.dev_open:
+            self.help_open = self.hub_open = self.aeq_open = False
+            self.prof_open = self.settings_open = False
+        self.push()
+
+    # ── A/B, bypass, undo ──
+    HISTORY_MAX = 40
+
+    def _state(self):
+        return {"bands": [dict(b) for b in self.bands],
+                "pregain": self.pregain,
+                "global_gain": self.global_gain,
+                "active_preset": self.active_preset,
+                "muted": dict(self._muted)}
+
+    def _remember(self):
+        """Snapshot before a change. Called by the things that replace the curve
+        wholesale — a preset, an import, an AutoEQ fit, a profile, a bypass — and by
+        the *start* of a drag rather than every frame of one, so one gesture is one
+        undo step instead of two hundred."""
+        self._edit_mark = None
+        state = self._state()
+        if self._history and self._history[-1]["bands"] == state["bands"] \
+                and self._history[-1]["pregain"] == state["pregain"]:
+            return
+        self._history.append(state)
+        del self._history[:-self.HISTORY_MAX]
+
+    def can_undo(self):
+        return bool(self._history)
+
+    def undo(self):
+        """Back one step. Distinct from `revert`, which goes all the way back to what
+        flash holds — this is for the move you just wish you had not made."""
+        # Skip steps that turn out to have changed nothing. Whether a snapshot was
+        # worth taking is only knowable *after* the action it preceded — applying the
+        # preset that is already loaded records a step and then does not move — and a
+        # press of undo that visibly does nothing is worse than no undo at all.
+        here = [dict(b) for b in self.bands]
+        state = None
+        while self._history:
+            candidate = self._history.pop()
+            if candidate["bands"] != here or candidate["pregain"] != self.pregain:
+                state = candidate
+                break
+        if state is None:
+            self.toast("Nothing to undo.", False)
+            self.push()
+            return
+        self.bands = [dict(b) for b in state["bands"]]
+        self.pregain = state["pregain"]
+        self.global_gain = state["global_gain"]
+        self.active_preset = state["active_preset"]
+        self._muted = dict(state["muted"])
+        self.dirty = True
+        if self.connected:
+            self.dev.submit(self.dev.apply_bands, [dict(b) for b in self.bands],
+                            self.pregain, self.global_gain)
+        self.push()
+
+    def toggle_band(self, index):
+        """Mute one band and hear what it was contributing.
+
+        Written to the DAC as the `disabled` filter type, which the firmware treats as
+        a pass-through — so this is genuinely the curve without that band, not the
+        curve with one band flattened by a gain of zero. Its type comes back from
+        `_muted` when you switch it on again.
+        """
+        b = self._band(int(index))
+        if b is None:
+            return
+        self._remember()
+        idx = int(index)
+        if b["type"] == "disabled":
+            b["type"] = self._muted.pop(idx, "peaking")
+        else:
+            self._muted[idx] = b["type"]
+            b["type"] = "disabled"
+        self.selected = idx
+        self.dirty = True
+        self.active_preset = ""
+        if self.connected:
+            self.dev.submit(self.dev.write_band, idx, b["type"],
+                            b["frequency"], b["gain"], b["q"])
+        self.push()
+
+    def compare_hold(self, on):
+        """Hold to hear the headphone without any of it. Release to hear it back.
+
+        Pre-gain goes to 0 for the duration, and that is the whole reason this is
+        trustworthy. A curve with a +6 dB peak carries -6 dB of pre-gain, so leaving
+        that in place would compare your tuning against a flat signal six decibels
+        quieter — and louder always wins a blind comparison. Both sides now peak at
+        the same place, so what you are judging is tone.
+
+        `self.bands` is not touched. The DAC is written to directly and told to put
+        it back on release; nothing here sets `dirty` and nothing reaches flash.
+        """
+        on = bool(on)
+        if on == self.comparing:
+            return
+        self.comparing = on
+        if not self.connected:
+            # Nothing to hear, so say so rather than lighting the control up as if
+            # something happened.
+            self.comparing = False
+            self.toast("Connect a DAC to compare.", False)
+            self.push()
+            return
+        if on:
+            flat = [dict(b, type="disabled") for b in self.bands]
+            self.dev.submit(self.dev.audition, flat, 0.0)
+        else:
+            self.dev.submit(self.dev.audition, [dict(b) for b in self.bands],
+                            self.pregain)
+        self.push()
+
     # ── band edits ──
     def _band(self, index):
         for b in self.bands:
@@ -1684,10 +1980,23 @@ class Bridge:
                 return b
         return None
 
-    def _set_band(self, index, *, ftype=None, freq=None, gain=None, q=None, write=False):
+    def _set_band(self, index, *, ftype=None, freq=None, gain=None, q=None,
+                  write=False, knob=None):
+        """`knob` names which control is being moved, and is what makes a fine edit
+        undoable without making it thirty undos.
+
+        A snapshot is taken when (band, knob) changes — so a fader dragged across many
+        frames, or a stepper pressed five times, collapses to the one step somebody
+        would expect. `None` means the caller has already taken its own snapshot: a
+        graph drag does that when the pointer goes down, which is the same idea with a
+        real gesture boundary to hang it on.
+        """
         b = self._band(index)
         if b is None:
             return
+        if knob is not None and self._edit_mark != (index, knob):
+            self._remember()                      # clears the mark
+            self._edit_mark = (index, knob)
         ftype, freq, gain, q = clamp_band(
             b["type"] if ftype is None else ftype,
             b["frequency"] if freq is None else freq,
@@ -1703,7 +2012,7 @@ class Bridge:
 
     def commit_band(self, index, ftype, freq, gain, q):
         """Kept for callers outside the view (tests, scripts): set and write in one."""
-        self._set_band(index, ftype=ftype, freq=freq, gain=gain, q=q, write=True)
+        self._set_band(index, ftype=ftype, freq=freq, gain=gain, q=q, write=True, knob="set")
 
     def commit_band_edit(self, index):
         """Write whatever the band currently holds. This is the release half of every
@@ -1720,9 +2029,73 @@ class Bridge:
         self.selected = int(index)
         self.push()
 
+    def step_gain(self, index, direction, coarse=False):
+        """Nudge one band's gain. The keyboard's half of the fader.
+
+        0.5 dB a press, 2 dB with shift. Half a decibel because that is about the
+        smallest move worth making — the guide's own advice is that ±1 dB is audible
+        and ±3 dB is a lot — and a step small enough to be inaudible would just mean
+        holding the key down.
+        """
+        b = self._band(int(index))
+        if b is None:
+            return
+        self.selected = int(index)
+        step = (2.0 if coarse else 0.5) * (1 if direction > 0 else -1)
+        self._set_band(int(index), gain=round(b["gain"] + step, 1), write=True, knob="gain")
+
+    def reset_band(self, index):
+        """Back to flat, keeping the type, frequency and Q. What you want after a
+        move that did not work — not the whole band thrown away."""
+        b = self._band(int(index))
+        if b is None or b["gain"] == 0.0:
+            return
+        self._remember()
+        self.selected = int(index)
+        self._set_band(int(index), gain=0.0, write=True)
+
+    def solo_band(self, index):
+        """Hear one band and nothing else.
+
+        The counterpart to mute, and the faster question most of the time: "what is
+        this one doing" beats "what is everything except this one doing" when you are
+        hunting for the band that owns a problem.
+        """
+        idx = int(index)
+        b = self._band(idx)
+        if b is None:
+            return
+        self._remember()
+        if self._solo == idx:
+            for other in self.bands:
+                if other["index"] in self._solo_muted:
+                    other["type"] = self._solo_muted.pop(other["index"])
+            self._solo = -1
+        else:
+            # Ending one solo and starting another in a single step, rather than
+            # making the user turn the first one off first.
+            for other in self.bands:
+                if other["index"] in self._solo_muted:
+                    other["type"] = self._solo_muted.pop(other["index"])
+            if b["type"] == "disabled":
+                b["type"] = self._muted.pop(idx, "peaking")
+            for other in self.bands:
+                if other["index"] == idx or other["type"] == "disabled":
+                    continue
+                self._solo_muted[other["index"]] = other["type"]
+                other["type"] = "disabled"
+            self._solo = idx
+        self.selected = idx
+        self.dirty = True
+        self.active_preset = ""
+        if self.connected:
+            self.dev.submit(self.dev.apply_bands, [dict(x) for x in self.bands],
+                            self.pregain, self.global_gain)
+        self.push()
+
     def set_band_gain(self, index, gain):
         self.selected = int(index)
-        self._set_band(int(index), gain=gain)
+        self._set_band(int(index), gain=gain, knob="gain")
 
     def step_freq(self, index, direction):
         b = self._band(int(index))
@@ -1732,14 +2105,14 @@ class Bridge:
         # A sixth of an octave per press: fine enough to place a notch, coarse enough
         # that walking from 20 Hz to 20 kHz does not take all afternoon.
         factor = 1.06 if direction > 0 else 1 / 1.06
-        self._set_band(int(index), freq=b["frequency"] * factor, write=True)
+        self._set_band(int(index), freq=b["frequency"] * factor, write=True, knob="freq")
 
     def step_q(self, index, direction):
         b = self._band(int(index))
         if b is None:
             return
         self.selected = int(index)
-        self._set_band(int(index), q=b["q"] + (0.1 if direction > 0 else -0.1), write=True)
+        self._set_band(int(index), q=b["q"] + (0.1 if direction > 0 else -0.1), write=True, knob="q")
 
     def cycle_type(self, index, direction):
         b = self._band(int(index))
@@ -1748,7 +2121,7 @@ class Bridge:
         self.selected = int(index)
         n = FILTER_ORDER.index(b["type"]) if b["type"] in FILTER_ORDER else 0
         n = (n + int(direction)) % len(FILTER_ORDER)
-        self._set_band(int(index), ftype=FILTER_ORDER[n], write=True)
+        self._set_band(int(index), ftype=FILTER_ORDER[n], write=True, knob="type")
 
     # ── the graph ──
     def on_plot_resized(self, w, h):
@@ -1777,6 +2150,9 @@ class Bridge:
             if d < best_d:
                 best, best_d = b["index"], d
         if best >= 0 and best_d < 26.0:
+            # Snapshot on the way in, not on every move: a drag is one thing the user
+            # did, and two hundred undo steps for one gesture is not an undo history.
+            self._remember()
             self.selected = best
             self._drag = best
             self.push()
@@ -1803,7 +2179,7 @@ class Bridge:
         b = self._band(self.selected)
         if b is None or b["type"] == "disabled":
             return
-        self._set_band(self.selected, q=b["q"] * (1.12 if delta > 0 else 0.89))
+        self._set_band(self.selected, q=b["q"] * (1.12 if delta > 0 else 0.89), knob="q")
         self._q_gen += 1
         gen = self._q_gen
         idx = self.selected
@@ -1879,6 +2255,9 @@ class Bridge:
         self.push()
 
     def _replace_bands(self, bands, pregain):
+        # Every wholesale change lands here — preset, import, community config,
+        # AutoEQ fit, saved profile — so this is the one place undo has to be told.
+        self._remember()
         self.bands = bands
         self.selected = -1
         self.dirty = True
@@ -2037,6 +2416,17 @@ class Bridge:
         save_settings(self.settings)
         self.push()
 
+    def set_skin(self, index):
+        """The palette the whole screen is drawn on, out of the table in theme.slint.
+
+        Separate from the accent on purpose: the accent is a few hundred pixels of
+        button and the palette is everything else, so somebody who finds the warm
+        mauve too present had nothing to reach for while there was only one ground.
+        """
+        self.settings["skin"] = int(_clamp(int(index), 0, len(SKINS) - 1))
+        save_settings(self.settings)
+        self.push()
+
     def set_accent(self, index):
         """The one accent, out of the table in theme.slint. It drives the primary
         action, the active state and the equalised curve — the reference and output
@@ -2110,6 +2500,7 @@ class Bridge:
         w.dark = self.settings["dark"]
         w.readout = self.settings["readout"]
         w.accent_index = self.settings["accent"]
+        w.skin_index = self.settings["skin"]
         w.welcome_open = self.welcome_open
         w.help_open = self.help_open
         w.settings_open = self.settings_open
@@ -2183,6 +2574,22 @@ class Bridge:
             ])
             w.hub_rows = self._hub_model
 
+        w.comparing = self.comparing
+        w.dev_open = self.dev_open
+        w.tour_step = self.tour_step
+        if 0 <= self.tour_step < len(self.TOUR):
+            head, body = self.TOUR[self.tour_step]
+            w.tour_head = head
+            w.tour_body = body
+        # The device table only changes when something is plugged or unplugged, so it
+        # is rebuilt on that rather than on every push.
+        dsig = self.product_id if self.connected else None
+        if dsig != self._dev_sig:
+            self._dev_sig = dsig
+            w.device_rows = slint.ListModel(devices_mod.rows(dsig))
+            w.device_note = devices_mod.summary()
+        w.soloed = self._solo
+        w.can_undo = bool(self._history)
         w.whatsnew_open = self.whatsnew_open
         w.whatsnew_from = self.whatsnew_from
         w.whatsnew_version = self.whatsnew_version
@@ -2215,30 +2622,44 @@ class Bridge:
             w.aeq_rows = self._aeq_model
 
         if self._plot_w > 1 and self._plot_h > 1:
-            # Fewer samples while a handle is under the pointer: the curve is resampled
-            # on every mouse-move, and 220 points across 8 biquads twice over (the
-            # output trace is a second sweep) is more than a frame's budget.
-            geom = dict(width=self._plot_w, height=self._plot_h,
-                        top_db=TOP_DB, bot_db=BOT_DB,
-                        samples=110 if self._drag >= 0 else 220)
-            w.curve_path = curve_mod.svg_curve(self.bands, **geom)
-            w.flat_path = curve_mod.svg_flat(db=0.0, width=self._plot_w,
-                                             height=self._plot_h,
-                                             top_db=TOP_DB, bot_db=BOT_DB)
-            # The output trace: the same curve shifted by pre-gain, which is what the
-            # DAC actually emits. Drawn dashed so it reads as a consequence of the
-            # solid one rather than a second thing to tune.
-            w.pregain_path = curve_mod.svg_curve(
-                self.bands, offset_db=float(self.pregain), dash=(7.0, 5.0), **geom)
+            self._push_curves(w)
 
+    # Resampling the response is the most expensive thing this class does — about
+    # 2.7 ms per trace across eight biquads at a 980 px plot, on the UI thread. Two
+    # things used to make that much worse than it needed to be, and both are fixed
+    # here rather than by drawing less:
+    #
+    #   * It ran on every push(). A toast, an update check finishing, a sheet opening
+    #     and a hover all call push(), and none of them can change the curve.
+    #   * It computed both views every time. The editor draws curve+flat+pregain and
+    #     the readout draws readout+readout-flat; whichever view is not on screen was
+    #     being sampled anyway and thrown away.
+    #
+    # Together that is roughly a third of the work on an idle frame and all of it on
+    # a frame that changed nothing.
+    def _push_curves(self, w):
+        # Everything the traces are a function of. `_drag` is in here because the
+        # sample count changes with it, so letting go of a handle has to redraw at
+        # full resolution.
+        sig = (tuple((b["type"], b["frequency"], b["gain"], b["q"]) for b in self.bands),
+               float(self.pregain), self._plot_w, self._plot_h,
+               bool(self.settings["readout"]), self._drag >= 0)
+        if sig == self._curve_sig:
+            return
+        self._curve_sig = sig
+
+        # Fewer samples while a handle is under the pointer: the curve is resampled on
+        # every mouse-move, and that is the one moment the budget is real.
+        samples = 110 if self._drag >= 0 else 220
+
+        if self.settings["readout"]:
             # The readout, on its own axis. Only the output curve exists here — the
             # solid one would be the same line drawn 4.8 dB higher, which is precisely
             # the confusion this view is meant to remove.
             box = dict(width=self._plot_w, height=self._plot_h,
                        top_db=READOUT_TOP, bot_db=READOUT_BOT)
             w.readout_path = curve_mod.svg_curve(
-                self.bands, offset_db=float(self.pregain),
-                samples=110 if self._drag >= 0 else 220, **box)
+                self.bands, offset_db=float(self.pregain), samples=samples, **box)
             w.readout_flat_path = curve_mod.svg_flat(db=0.0, **box)
             # Cached on the plot size: fourteen dashed lines come to ~40 KB of path
             # commands, and they only change when the window is resized. Rebuilding
@@ -2250,6 +2671,19 @@ class Bridge:
                     width=self._plot_w, height=self._plot_h,
                     rows=READOUT_ROWS, cols=READOUT_COLS)
                 w.readout_grid_path = self._grid_path
+            return
+
+        geom = dict(width=self._plot_w, height=self._plot_h,
+                    top_db=TOP_DB, bot_db=BOT_DB, samples=samples)
+        w.curve_path = curve_mod.svg_curve(self.bands, **geom)
+        w.flat_path = curve_mod.svg_flat(db=0.0, width=self._plot_w,
+                                         height=self._plot_h,
+                                         top_db=TOP_DB, bot_db=BOT_DB)
+        # The output trace: the same curve shifted by pre-gain, which is what the DAC
+        # actually emits. Drawn dashed so it reads as a consequence of the solid one
+        # rather than a second thing to tune.
+        w.pregain_path = curve_mod.svg_curve(
+            self.bands, offset_db=float(self.pregain), dash=(7.0, 5.0), **geom)
 
     def _row(self, b):
         on = b["type"] != "disabled"

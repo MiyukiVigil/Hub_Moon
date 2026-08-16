@@ -5,11 +5,14 @@ temporary cache directory and read back, which is the same path a real check tak
 once the fetch has happened.
 """
 import json
+import os
 import urllib.error
 
 import pytest
 
 from gui import updater as U
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 # ── ordering ─────────────────────────────────────────────────────────────────
@@ -483,3 +486,66 @@ def test_a_release_with_a_package_still_offers_the_button(cached, monkeypatch):
         "url": "https://example.invalid/x.pkg.tar.zst", "sha256": "a" * 64, "size": 9}}))
     got = U.check("stable", current="1.2.0b1")
     assert got["can_fetch"] is True and got["can_elevate"] is True
+
+
+# ── a frozen bundle a package manager owns ───────────────────────────────────
+
+def _frozen_linux(monkeypatch, exe="/opt/hub-moon/hub-moon"):
+    monkeypatch.setattr(U.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(U.sys, "executable", exe)
+    monkeypatch.setattr(U.sys, "platform", "linux")
+    monkeypatch.delenv("APPIMAGE", raising=False)
+
+
+@pytest.mark.parametrize("owner", ["pacman", "deb", "rpm"])
+def test_a_packaged_frozen_bundle_is_not_called_a_tarball(monkeypatch, owner):
+    """The .deb, the .rpm and the Arch package all ship the same PyInstaller tree
+    into /opt. Calling that "linux-tarball" put it in SELF_UPDATABLE, so the app
+    would overwrite files the package manager owns and leave its database describing
+    something no longer on disk. Observed: a pacman install logging
+    `install: linux-tarball`."""
+    _frozen_linux(monkeypatch)
+    monkeypatch.setattr(U, "_package_owner", lambda p: owner)
+    kind = U.install_kind()
+    assert kind == owner
+    assert kind not in U.SELF_UPDATABLE
+    assert kind in U.FETCHABLE
+
+
+def test_an_unowned_frozen_bundle_is_still_a_tarball(monkeypatch):
+    """Somebody who unpacked the tarball into /opt by hand owns their own files."""
+    _frozen_linux(monkeypatch)
+    monkeypatch.setattr(U, "_package_owner", lambda p: None)
+    assert U.install_kind() == "linux-tarball"
+    assert "linux-tarball" in U.SELF_UPDATABLE
+
+
+def test_the_appimage_is_never_mistaken_for_a_package(monkeypatch):
+    """APPIMAGE is set by the runtime and is checked before anything else — an
+    AppImage run on a machine whose /opt happens to be packaged is still an AppImage."""
+    _frozen_linux(monkeypatch)
+    monkeypatch.setenv("APPIMAGE", "/home/me/HubMoon.AppImage")
+    monkeypatch.setattr(U, "_package_owner", lambda p: "pacman")
+    assert U.install_kind() == "appimage"
+
+
+# ── the udev rule ────────────────────────────────────────────────────────────
+
+def test_the_udev_rule_covers_both_hidapi_backends():
+    """hidapi has two Linux backends and this project ships builds that use both.
+
+    A distro's python-hidapi is hidraw-backed and opens /dev/hidrawN; the manylinux
+    wheel every PyInstaller build here bundles is libusb-backed and opens
+    /dev/bus/usb/BBB/DDD instead, needing write access to it. Shipping only the
+    hidraw line meant every binary release — tarball, AppImage, deb, rpm, Arch —
+    reported no DAC while a source install on the same machine worked.
+    """
+    path = os.path.join(ROOT, "packaging", "70-moondrop.rules")
+    with open(path, encoding="utf-8") as fh:
+        rules = [ln.strip() for ln in fh if ln.strip()
+                 and not ln.lstrip().startswith("#")]
+    subsystems = {ln.split('SUBSYSTEM=="')[1].split('"')[0] for ln in rules}
+    assert subsystems == {"hidraw", "usb"}, subsystems
+    for line in rules:
+        assert 'ATTRS{idVendor}=="35d8"' in line, line
+        assert 'TAG+="uaccess"' in line, line

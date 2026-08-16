@@ -65,6 +65,10 @@ python3 tools/build-update-manifest.py v1.1.0
 # 5. put it where the app looks: packaging/update.json on main (stable),
 #    packaging/update-beta.json on test (beta)
 git add packaging/update.json && git commit -m "manifest: 1.1.0" && git push
+
+# 6. rebuild the two generated pages on the website — the download tables and the
+#    changelog both come from files step 2 and step 4 just wrote
+cd ../self-website/hubmoon && node build-changelog.mjs && node build-downloads.mjs
 ```
 
 **Step 2 is not optional, and it is not the same thing as step 4.** The manifest's

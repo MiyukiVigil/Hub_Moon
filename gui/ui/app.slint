@@ -8,7 +8,7 @@
 // accepts the same curve: there is only one copy of the maths, and it is the one that
 // writes to the hidraw.
 
-import { Theme, Regions, Accents } from "theme.slint";
+import { Theme, Regions, Accents, Skins } from "theme.slint";
 import { Icons } from "icons.slint";
 
 // A Material Symbols glyph, drawn rather than shaped: `d` is an outline from
@@ -165,7 +165,12 @@ component TextBtn inherits Rectangle {
     callback clicked();
 
     height: 32px;
-    width: inner.preferred-width + 26px;
+    // `inner.preferred-width` already contains the padding below. Adding 26px on top
+    // of it did not make the button roomier — it made it 26px too wide, and a
+    // HorizontalLayout hands its slack to the last stretchy child, so all of it piled
+    // up after the label. That is the "big border to the right of the text": the pill
+    // was never sized to its contents, and the contents were never centred in it.
+    width: inner.preferred-width;
     border-radius: 16px;
     opacity: root.enabled ? 1.0 : 0.42;
     background: root.primary
@@ -176,9 +181,14 @@ component TextBtn inherits Rectangle {
     animate background { duration: Theme.quick; easing: ease-out; }
 
     inner := HorizontalLayout {
-        padding-left: 11px;
-        padding-right: 11px;
-        spacing: 6px;
+        // The real padding, in one place, rather than a small number here and a
+        // larger correction on the width. `alignment: center` is the belt to that
+        // brace: anywhere a caller does set an explicit width, the contents sit in
+        // the middle of it instead of against the left edge.
+        alignment: center;
+        padding-left: 14px;
+        padding-right: 14px;
+        spacing: 7px;
         Sym {
             d: root.icon;
             sz: 15px;
@@ -197,6 +207,62 @@ component TextBtn inherits Rectangle {
         enabled: root.enabled;
         mouse-cursor: pointer;
         clicked => { root.clicked(); }
+    }
+}
+
+// A button that reports being held rather than being clicked.
+//
+// Press-and-hold is the right shape for A/B: you are listening, not operating, and the
+// answer to "which am I hearing" has to be the state of your thumb rather than
+// something you look away from the music to read. `pressed` is watched with a changed
+// handler rather than bound, because the callback has to fire on both edges — letting
+// go is as much an instruction as pressing was.
+component HoldBtn inherits Rectangle {
+    in property <string> label;
+    in property <string> icon;
+    in property <bool> held;
+    callback changed(bool);
+
+    height: 32px;
+    // `inner.preferred-width` already contains the padding below. Adding 26px on top
+    // of it did not make the button roomier — it made it 26px too wide, and a
+    // HorizontalLayout hands its slack to the last stretchy child, so all of it piled
+    // up after the label. That is the "big border to the right of the text": the pill
+    // was never sized to its contents, and the contents were never centred in it.
+    width: inner.preferred-width;
+    border-radius: 16px;
+    background: root.held ? Theme.bad
+        : (touch.has-hover ? Theme.card-2 : Theme.card);
+    border-width: 1px;
+    border-color: root.held ? transparent : Theme.line-2;
+    animate background { duration: Theme.quick; easing: ease-out; }
+
+    inner := HorizontalLayout {
+        // The real padding, in one place, rather than a small number here and a
+        // larger correction on the width. `alignment: center` is the belt to that
+        // brace: anywhere a caller does set an explicit width, the contents sit in
+        // the middle of it instead of against the left edge.
+        alignment: center;
+        padding-left: 14px;
+        padding-right: 14px;
+        spacing: 7px;
+        Sym {
+            d: root.icon;
+            sz: 15px;
+            width: 15px;
+            tint: root.held ? Theme.bad-soft : Theme.sub;
+        }
+        Text {
+            text: root.label;
+            color: root.held ? Theme.bad-soft : Theme.text;
+            font-size: 12px;
+            font-weight: root.held ? 700 : 500;
+            vertical-alignment: center;
+        }
+    }
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        changed pressed => { root.changed(self.pressed); }
     }
 }
 
@@ -833,6 +899,7 @@ component BandCard inherits Rectangle {
     in property <BandRow> band;
     in property <bool> selected;
     callback picked();
+    callback muted();
     callback gain-moved(float);
     callback gain-released();
     callback type-cycled(int);
@@ -843,7 +910,10 @@ component BandCard inherits Rectangle {
     border-width: 1px;
     background: root.selected ? Theme.accent-soft : Theme.card;
     border-color: root.selected ? Theme.accent : Theme.line;
-    animate background, border-color { duration: Theme.quick; easing: ease-out; }
+    // A muted band stays legible — you have to be able to read what you turned off
+    // in order to decide to turn it back on — but stops competing for attention.
+    opacity: root.band.enabled ? 1.0 : 0.55;
+    animate background, border-color, opacity { duration: Theme.quick; easing: ease-out; }
 
     // Click anywhere that is not a control to select the band.
     TouchArea { clicked => { root.picked(); } }
@@ -867,12 +937,32 @@ component BandCard inherits Rectangle {
                 horizontal-stretch: 1;
                 overflow: elide;
             }
-            Text {
-                text: "\{root.band.index + 1}";
-                color: Theme.faint;
-                font-family: Theme.mono;
-                font-size: 8px;
-                vertical-alignment: center;
+            // The slot number doubles as the band's on/off switch. It is already
+            // the thing your eye goes to when you want "that one", and a card this
+            // dense has no room for a control that only does one thing.
+            Rectangle {
+                width: numt.has-hover ? 30px : 14px;
+                height: 12px;
+                border-radius: 6px;
+                background: numt.has-hover ? Theme.accent-soft : transparent;
+                animate width, background { duration: Theme.quick; easing: ease-out; }
+                Text {
+                    text: numt.has-hover
+                        ? (root.band.enabled ? "mute" : "on")
+                        : "\{root.band.index + 1}";
+                    color: numt.has-hover ? Theme.accent
+                        : (root.band.enabled ? Theme.faint : Theme.bad);
+                    font-family: Theme.mono;
+                    font-size: 8px;
+                    width: 100%;
+                    height: 100%;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+                numt := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.muted(); }
+                }
             }
         }
 
@@ -995,6 +1085,26 @@ component SheetHead inherits HorizontalLayout {
         overflow: elide;
     }
     IconBtn { icon: Icons.close; clicked => { root.closed(); } }
+}
+
+// One page of the tuning guide. The figures are SVG path commands drawn by the same
+// response engine the editor plots with — not illustrations of the maths, the maths.
+// A guide about the shape of a filter that contains no shapes was asking the reader to
+// picture what the program is already able to draw.
+struct GuidePage {
+    key: string,
+    head: string,
+    lede: string,
+    body: string,
+    // up to three traces on one set of axes, each with a label under it
+    fig-a: string,
+    fig-b: string,
+    fig-c: string,
+    key-a: string,
+    key-b: string,
+    key-c: string,
+    // drawn behind the traces when the page is about output level rather than shape
+    fig-zero: string,
 }
 
 component HelpPara inherits VerticalLayout {
@@ -1148,6 +1258,154 @@ component Splash inherits Rectangle {
     }
 }
 
+struct DeviceRow {
+    pid: string,
+    name: string,
+    bands: string,
+    slot: string,
+    pregain: bool,
+    tested: bool,
+    here: bool,
+}
+
+// The supported-device table. It has lived in the readme since 1.0.0 and never in the
+// app, which is exactly backwards: the person who needs it is holding a DAC that did
+// not come up, and they are looking at this window, not at GitHub.
+component DevicesSheet inherits Rectangle {
+    in property <[DeviceRow]> rows;
+    in property <string> note;
+    callback closed();
+
+    background: Theme.card;
+    border-radius: Theme.r-lg;
+    border-width: 1px;
+    border-color: Theme.line-2;
+    clip: true;
+
+    VerticalLayout {
+        padding: 16px;
+        spacing: 10px;
+        SheetHead {
+            title: "Supported devices";
+            note: "vendor 0x35D8";
+            closed => { root.closed(); }
+        }
+        Rectangle { height: 1px; background: Theme.line; }
+        Text {
+            text: root.note;
+            color: Theme.sub;
+            font-size: 12px;
+            wrap: word-wrap;
+        }
+
+        Rectangle {
+            vertical-stretch: 1;
+            clip: true;
+            Flickable {
+                viewport-width: self.width;
+                viewport-height: list.preferred-height;
+                list := VerticalLayout {
+                    width: parent.width;
+                    spacing: 4px;
+                    for d in root.rows: Rectangle {
+                        height: 46px;
+                        border-radius: Theme.r-sm;
+                        background: d.here ? Theme.accent-soft : Theme.card-2;
+                        border-width: 1px;
+                        border-color: d.here ? Theme.accent : Theme.line;
+                        HorizontalLayout {
+                            padding-left: 11px;
+                            padding-right: 11px;
+                            spacing: 10px;
+                            VerticalLayout {
+                                alignment: center;
+                                width: 56px;
+                                Text {
+                                    text: d.pid;
+                                    color: Theme.faint;
+                                    font-family: Theme.mono;
+                                    font-size: 11px;
+                                }
+                            }
+                            VerticalLayout {
+                                alignment: center;
+                                horizontal-stretch: 1;
+                                spacing: 1px;
+                                Text {
+                                    text: d.name;
+                                    color: Theme.text;
+                                    font-size: 13px;
+                                    font-weight: 600;
+                                    overflow: elide;
+                                }
+                                Text {
+                                    text: d.bands + " · " + d.slot
+                                        + (d.pregain ? " · pre-gain" : " · no pre-gain");
+                                    color: Theme.faint;
+                                    font-family: Theme.mono;
+                                    font-size: 9.5px;
+                                    overflow: elide;
+                                }
+                            }
+                            // Two different facts, and neither may be implied by the
+                            // other: "this is the one plugged in" and "this one has
+                            // ever been tried on real hardware".
+                            VerticalLayout {
+                                alignment: center;
+                                if d.here: Rectangle {
+                                    width: hchip.preferred-width + 16px;
+                                    height: 20px;
+                                    border-radius: 10px;
+                                    background: Theme.accent;
+                                    hchip := Text {
+                                        text: "connected";
+                                        color: Theme.accent-ink;
+                                        font-family: Theme.mono;
+                                        font-size: 9px;
+                                        font-weight: 700;
+                                        width: 100%;
+                                        height: 100%;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+                            VerticalLayout {
+                                alignment: center;
+                                Rectangle {
+                                    width: tchip.preferred-width + 16px;
+                                    height: 20px;
+                                    border-radius: 10px;
+                                    background: d.tested ? Theme.good-soft : Theme.card;
+                                    border-width: 1px;
+                                    border-color: d.tested ? Theme.good : Theme.line-2;
+                                    tchip := Text {
+                                        text: d.tested ? "verified" : "untested";
+                                        color: d.tested ? Theme.good : Theme.faint;
+                                        font-family: Theme.mono;
+                                        font-size: 9px;
+                                        font-weight: 700;
+                                        width: 100%;
+                                        height: 100%;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Text {
+            text: "Untested does not mean unsupported — it means nobody here owns one. If yours works, or does not, the About panel writes the report for you.";
+            color: Theme.faint;
+            font-size: 11px;
+            wrap: word-wrap;
+        }
+    }
+}
+
 component WelcomeCard inherits Rectangle {
     in property <string> icon;
     in property <string> head;
@@ -1192,6 +1450,8 @@ component Welcome inherits Rectangle {
     in property <string> device-name;
     callback started();
     callback guide();
+    callback devices();
+    callback tour();
 
     background: Theme.bg;
     property <bool> shown: false;
@@ -1257,7 +1517,7 @@ component Welcome inherits Rectangle {
                     }
                     Text {
                         text: root.connected ? "\{root.device-name} connected"
-                                             : "No DAC found — opening a demo you can play with";
+                                             : "No DAC found — this is a demo curve you can play with";
                         color: root.connected ? Theme.good : Theme.sub;
                         font-size: 12px;
                         font-weight: 600;
@@ -1269,41 +1529,52 @@ component Welcome inherits Rectangle {
 
         Rectangle { height: 22px; }
 
+        // A centred block of *definite* width, with the cards splitting that — not
+        // four stretching cards with a max-width, which is what this was and which
+        // came out with the row centred somewhere other than the rest of the screen.
+        // Giving the container a real number first means the four shares are a
+        // division rather than a negotiation, and 1040px is the width four cards
+        // wanted anyway.
         HorizontalLayout {
             alignment: center;
-            spacing: 12px;
             height: 116px;
-            WelcomeCard {
-                width: 236px;
-                shown: root.shown;
-                rank: 0;
-                icon: Icons.show-chart;
-                head: "Drag the graph";
-                body: "Grab a numbered point to move that band. Scroll anywhere on the plot to widen or narrow the one you picked.";
-            }
-            WelcomeCard {
-                width: 236px;
-                shown: root.shown;
-                rank: 1;
-                icon: Icons.tune;
-                head: "Or use the faders";
-                body: "Every band has a card underneath: filter type, a gain fader, and steppers for frequency and Q.";
-            }
-            WelcomeCard {
-                width: 236px;
-                shown: root.shown;
-                rank: 2;
-                icon: Icons.graphic-eq;
-                head: "Watch the dashed line";
-                body: "That is what leaves the DAC once headroom is paid. If the curve would clip, the pre-gain card offers a one-tap match.";
-            }
-            WelcomeCard {
-                width: 236px;
-                shown: root.shown;
-                rank: 3;
-                icon: Icons.save;
-                head: "Nothing is permanent";
-                body: "Edits go straight to the DSP so you hear them as you move. Only save to flash keeps them after you unplug.";
+            cards := Rectangle {
+                width: min(1040px, root.width - 32px);
+                HorizontalLayout {
+                    spacing: 12px;
+                    WelcomeCard {
+                        horizontal-stretch: 1;
+                        shown: root.shown;
+                        rank: 0;
+                        icon: Icons.show-chart;
+                        head: "Drag the graph";
+                        body: "Grab a numbered point to move that band. Scroll anywhere on the plot to widen or narrow the one you picked.";
+                    }
+                    WelcomeCard {
+                        horizontal-stretch: 1;
+                        shown: root.shown;
+                        rank: 1;
+                        icon: Icons.tune;
+                        head: "Or use the faders";
+                        body: "Every band has a card underneath: filter type, a gain fader, and steppers for frequency and Q.";
+                    }
+                    WelcomeCard {
+                        horizontal-stretch: 1;
+                        shown: root.shown;
+                        rank: 2;
+                        icon: Icons.graphic-eq;
+                        head: "Watch the dashed line";
+                        body: "That is what leaves the DAC once headroom is paid. If the curve would clip, the pre-gain card offers a one-tap match.";
+                    }
+                    WelcomeCard {
+                        horizontal-stretch: 1;
+                        shown: root.shown;
+                        rank: 3;
+                        icon: Icons.save;
+                        head: "Nothing is permanent";
+                        body: "Edits go straight to the DSP so you hear them as you move. Only save to flash keeps them after you unplug.";
+                    }
+                }
             }
         }
 
@@ -1315,13 +1586,25 @@ component Welcome inherits Rectangle {
             height: 38px;
             opacity: root.shown ? 1.0 : 0.0;
             animate opacity { duration: 460ms; delay: 1080ms; }
+            // Shown first when nothing is connected, because "is mine one of the
+            // ones this works with" is the only question that matters at that point.
+            if !root.connected: TextBtn {
+                label: "Supported devices";
+                icon: Icons.usb-off;
+                clicked => { root.devices(); }
+            }
+            TextBtn {
+                label: "Show me around";
+                icon: Icons.show-chart;
+                clicked => { root.tour(); }
+            }
             TextBtn {
                 label: "Read the tuning guide";
                 icon: Icons.help;
                 clicked => { root.guide(); }
             }
             TextBtn {
-                label: "Start tuning";
+                label: root.connected ? "Start tuning" : "Try the demo";
                 icon: Icons.graphic-eq;
                 primary: true;
                 clicked => { root.started(); }
@@ -1418,12 +1701,20 @@ component SettingRow inherits Rectangle {
     in property <length> control-width: 190px;
 
     property <length> gap: 20px;
-    height: max(66px, col.preferred-height + 20px);
+    // Both sides, not just the text. The row used to be sized by its description
+    // alone, on the assumption that a control is one switch tall — which held until
+    // the palette picker arrived as a column of four, and promptly overflowed into
+    // the row below it. A row is as tall as the taller of the two things in it.
+    height: max(66px, col.preferred-height + 20px, ctrl.preferred-height + 20px);
 
     col := VerticalLayout {
         x: 0px;
         y: (root.height - self.preferred-height) / 2;
         width: root.width - root.control-width - root.gap;
+        // Explicit, or it defaults to the full row height and spreads the label and
+        // the note to opposite ends of it — invisible while every row was one control
+        // tall, obvious the moment the palette picker made one 130px tall.
+        height: self.preferred-height;
         spacing: 3px;
         Text {
             text: root.label;
@@ -1446,7 +1737,9 @@ component SettingRow inherits Rectangle {
         // panel edge instead of floating in the middle of its own reservation. That
         // is what lines a 190px switch up with the buttons underneath it, which are
         // right-aligned against the same edge.
-        HorizontalLayout {
+        //
+        // Named, because the row above reads its preferred height to size itself.
+        ctrl := HorizontalLayout {
             alignment: end;
             @children
         }
@@ -1513,6 +1806,7 @@ component SettingsSheet inherits Rectangle {
     in property <bool> dark;
     in property <bool> readout;
     in property <int> accent-index;
+    in property <int> skin-index;
     in property <string> settings-path;
     in property <string> app-version;
     in property <string> about-text;
@@ -1534,6 +1828,7 @@ component SettingsSheet inherits Rectangle {
     callback dark-picked(bool);
     callback readout-picked(bool);
     callback accent-picked(int);
+    callback skin-picked(int);
     callback welcome-again();
     callback check-clicked();
     callback install-clicked();
@@ -1568,8 +1863,17 @@ component SettingsSheet inherits Rectangle {
     // is a constant (16px padding twice, a 30px head, a rule, two 10px gaps) and the
     // banner an allowance. Being a little out either way costs a little slack or a
     // little scrolling, and the Flickable already handles the second.
-    out property <length> wanted: pane.preferred-height + 83px
-        + (root.has-banner ? 112px : 0px);
+    //
+    // The floor is not decoration. `pane.preferred-height` is honest for tabs made of
+    // rows with fixed heights, and *under-reports* for one made mostly of wrapping
+    // prose: a `Text` with `wrap: word-wrap` reports the height it would take at its
+    // natural width — one line — so About measured about a third of what it draws and
+    // the sheet closed over its own last paragraph. Fixing the measurement properly
+    // means giving every paragraph an explicit width first, which is what SettingRow
+    // had to do; About is a column of eight of them, and a floor is the honest cheap
+    // answer. It scrolls if it is still short.
+    out property <length> wanted: max(pane.preferred-height, root.tab == 2 ? 620px : 0px)
+        + 83px + (root.has-banner ? 112px : 0px);
 
     background: Theme.card;
     border-radius: Theme.r-lg;
@@ -1708,6 +2012,72 @@ component SettingsSheet inherits Rectangle {
                                                 right: "Dark";
                                                 on-right: root.dark;
                                                 picked(v) => { root.dark-picked(v); }
+                                            }
+                                        }
+                                    }
+                                    Rectangle { height: 1px; background: Theme.line; }
+
+                                    SettingRow {
+                                        label: "Palette";
+                                        // Four named grounds need names — a row of
+                                        // grey swatches is unreadable in a way a row
+                                        // of hues is not, because the thing that
+                                        // distinguishes them is the thing a 30px
+                                        // circle is worst at showing.
+                                        control-width: 220px;
+                                        note: "The surfaces and the ink, which is nearly the whole screen. Independent of the accent — any hue sits on any of these.";
+                                        VerticalLayout {
+                                            alignment: center;
+                                            spacing: 5px;
+                                            for pal[i] in Skins.all: Rectangle {
+                                                height: 26px;
+                                                border-radius: Theme.r-sm;
+                                                background: i == root.skin-index
+                                                    ? Theme.accent-soft
+                                                    : (skt.has-hover ? Theme.card-2 : transparent);
+                                                border-width: 1px;
+                                                border-color: i == root.skin-index
+                                                    ? Theme.accent : transparent;
+                                                animate background { duration: Theme.quick; easing: ease-out; }
+                                                HorizontalLayout {
+                                                    padding-left: 7px;
+                                                    padding-right: 9px;
+                                                    spacing: 7px;
+                                                    // A two-tone chip: the ground and
+                                                    // a card on it, which is the
+                                                    // difference you actually see.
+                                                    VerticalLayout {
+                                                        alignment: center;
+                                                        Rectangle {
+                                                            width: 26px;
+                                                            height: 14px;
+                                                            border-radius: 4px;
+                                                            background: Theme.dark ? pal.bg-d : pal.bg;
+                                                            border-width: 1px;
+                                                            border-color: Theme.dark ? pal.line-2-d : pal.line-2;
+                                                            Rectangle {
+                                                                x: 12px;
+                                                                y: 3px;
+                                                                width: 11px;
+                                                                height: 8px;
+                                                                border-radius: 2px;
+                                                                background: Theme.dark ? pal.card-d : pal.card;
+                                                            }
+                                                        }
+                                                    }
+                                                    Text {
+                                                        text: pal.name;
+                                                        color: i == root.skin-index ? Theme.accent : Theme.text;
+                                                        font-size: 11.5px;
+                                                        font-weight: i == root.skin-index ? 700 : 500;
+                                                        vertical-alignment: center;
+                                                        horizontal-stretch: 1;
+                                                    }
+                                                }
+                                                skt := TouchArea {
+                                                    mouse-cursor: pointer;
+                                                    clicked => { root.skin-picked(i); }
+                                                }
                                             }
                                         }
                                     }
@@ -2052,54 +2422,193 @@ component SettingsSheet inherits Rectangle {
         }
     }
 }
+// The figure: three traces on shared axes, with a zero line and a small legend.
+// Sized by the caller, because the sheet knows how much room it has and this does not.
+component GuideFig inherits Rectangle {
+    in property <GuidePage> page;
+    in property <length> fig-h: 118px;
+
+    height: root.fig-h + (legend.preferred-height + 8px);
+    VerticalLayout {
+        spacing: 8px;
+        Rectangle {
+            height: root.fig-h;
+            border-radius: Theme.r-sm;
+            background: Theme.card-2;
+            border-width: 1px;
+            border-color: Theme.line;
+            clip: true;
+
+            // 0 dB. Drawn first so every trace reads as a departure from it.
+            Path {
+                commands: root.page.fig-zero;
+                stroke: Theme.line-2;
+                stroke-width: 1px;
+                // FIG_W / FIG_H in gui/guide.py. Not the element size: the paths are
+                // sampled once at a fixed box, and a viewbox of the element's pixels
+                // draws them 1:1 so they stop short of its right edge. Stretching the
+                // x axis is harmless here — it is log frequency either way.
+                viewbox-width: 360;
+                viewbox-height: 118;
+            }
+            // Third and second traces sit under the first: the first is the point
+            // being made and the others are what it is being compared against.
+            Path {
+                commands: root.page.fig-c;
+                stroke: Theme.faint;
+                stroke-width: 1.5px;
+                // FIG_W / FIG_H in gui/guide.py. Not the element size: the paths are
+                // sampled once at a fixed box, and a viewbox of the element's pixels
+                // draws them 1:1 so they stop short of its right edge. Stretching the
+                // x axis is harmless here — it is log frequency either way.
+                viewbox-width: 360;
+                viewbox-height: 118;
+            }
+            Path {
+                commands: root.page.fig-b;
+                stroke: Theme.sub;
+                stroke-width: 1.5px;
+                // FIG_W / FIG_H in gui/guide.py. Not the element size: the paths are
+                // sampled once at a fixed box, and a viewbox of the element's pixels
+                // draws them 1:1 so they stop short of its right edge. Stretching the
+                // x axis is harmless here — it is log frequency either way.
+                viewbox-width: 360;
+                viewbox-height: 118;
+            }
+            Path {
+                commands: root.page.fig-a;
+                stroke: Theme.accent;
+                stroke-width: 2px;
+                // FIG_W / FIG_H in gui/guide.py. Not the element size: the paths are
+                // sampled once at a fixed box, and a viewbox of the element's pixels
+                // draws them 1:1 so they stop short of its right edge. Stretching the
+                // x axis is harmless here — it is log frequency either way.
+                viewbox-width: 360;
+                viewbox-height: 118;
+            }
+        }
+        legend := HorizontalLayout {
+            spacing: 14px;
+            alignment: start;
+            if root.page.key-a != "": HorizontalLayout {
+                spacing: 6px;
+                Rectangle { width: 14px; height: 2px; y: 6px; background: Theme.accent; }
+                Text {
+                    text: root.page.key-a;
+                    color: Theme.sub;
+                    font-family: Theme.mono;
+                    font-size: 10px;
+                }
+            }
+            if root.page.key-b != "": HorizontalLayout {
+                spacing: 6px;
+                Rectangle { width: 14px; height: 2px; y: 6px; background: Theme.sub; }
+                Text {
+                    text: root.page.key-b;
+                    color: Theme.sub;
+                    font-family: Theme.mono;
+                    font-size: 10px;
+                }
+            }
+            if root.page.key-c != "": HorizontalLayout {
+                spacing: 6px;
+                Rectangle { width: 14px; height: 2px; y: 6px; background: Theme.faint; }
+                Text {
+                    text: root.page.key-c;
+                    color: Theme.sub;
+                    font-family: Theme.mono;
+                    font-size: 10px;
+                }
+            }
+        }
+    }
+}
+
 component HelpSheet inherits Rectangle {
+    in property <[GuidePage]> pages;
     callback closed();
+
+    // Same treatment as Settings: the pages are very different lengths — one is a
+    // paragraph, one is three figures — and a height that fits the longest leaves the
+    // shortest sitting in a column of nothing.
+    out property <length> wanted: page.preferred-height + 78px;
     background: Theme.card;
     border-radius: Theme.r-lg;
     border-width: 1px;
     border-color: Theme.line-2;
     clip: true;
 
+    // A rail and a page, not one long scroll. Seven topics of prose in a column is a
+    // thing you skim once and never come back to; a rail is a thing you return to for
+    // the one you half-remember.
+    property <int> at: 0;
+
     VerticalLayout {
         padding: 16px;
-        spacing: 12px;
+        spacing: 10px;
         SheetHead {
             title: "How to tune";
             note: "nothing here is permanent until you save to flash";
             closed => { root.closed(); }
         }
-        Flickable {
-            viewport-height: guide.preferred-height;
-            guide := VerticalLayout {
-                width: parent.width;
-                spacing: 13px;
-                HelpPara {
-                    head: "CUT FIRST";
-                    body: "Boosting adds gain the DAC has to find somewhere, and it comes out of headroom. If a range is too loud, pull down the ranges around it instead of pushing that one up. A curve made of cuts needs no pre-gain at all.";
+        Rectangle { height: 1px; background: Theme.line; }
+
+        HorizontalLayout {
+            spacing: 14px;
+            vertical-stretch: 1;
+
+            VerticalLayout {
+                width: 176px;
+                spacing: 3px;
+                for p[i] in root.pages: NavItem {
+                    label: p.head;
+                    icon: Icons.note;
+                    active: root.at == i;
+                    picked => { root.at = i; }
                 }
-                HelpPara {
-                    head: "WIDE, THEN NARROW";
-                    body: "Q is the width of what a band touches. Low Q (0.5–1) shapes a whole region and sounds like tone. High Q (4+) is a scalpel for one resonance — a ring on a cymbal, a boom in a room. Start wide; go narrow only when you are chasing something specific.";
-                }
-                HelpPara {
-                    head: "SHELVES AT THE EDGES";
-                    body: "Low and high shelves lift or drop everything past a corner frequency, which is what you want at the ends of the spectrum. A peak at 20 Hz only moves 20 Hz; a low shelf at 100 Hz moves the whole bottom.";
-                }
-                HelpPara {
-                    head: "WATCH THE DASHED LINE";
-                    body: "The solid curve is what the EQ does. The dashed one is what actually leaves the DAC once pre-gain is paid. If the dashed line sits above 0 dB, loud passages clip — tap “match” on the pre-gain card and it drops to exactly the headroom your curve needs.";
-                }
-                HelpPara {
-                    head: "SMALL MOVES";
-                    body: "±3 dB is a lot. If a change is not obvious at 3 dB, it is not the band you wanted. Move one band, listen to something familiar, then move the next.";
-                }
-                HelpPara {
-                    head: "WHY A SLIDER SOMETIMES STOPS";
-                    body: "The firmware stores its filter coefficients in a fixed-point format that only spans a certain range, and some perfectly ordinary-looking filters need more than that — a high shelf below about 200 Hz overflows at any gain at all. The band tags itself “limit” when it is pinned against that wall. Move the frequency or lower Q and it will go further.";
-                }
-                HelpPara {
-                    head: "THE DEVICE SLOT";
-                    body: "That is the DAC's own EQ profile number, not a preset. The bands here are written to the custom slot; moving the device off it means what you are editing is no longer what you hear. On a DAWN PRO2 the number reads the same whether the EQ is switched on or off, so it cannot tell you which mode the hardware is in — the button on the device does that.";
+                Rectangle { vertical-stretch: 1; }
+            }
+            Rectangle { width: 1px; background: Theme.line; }
+
+            Rectangle {
+                horizontal-stretch: 1;
+                clip: true;
+                Flickable {
+                    viewport-width: self.width;
+                    viewport-height: page.preferred-height;
+                    page := VerticalLayout {
+                        width: parent.width;
+                        spacing: 12px;
+                        pg := VerticalLayout {
+                            spacing: 12px;
+                            property <GuidePage> p: root.pages[root.at];
+                            VerticalLayout {
+                                spacing: 4px;
+                                Text {
+                                    text: pg.p.head;
+                                    color: Theme.accent;
+                                    font-family: Theme.mono;
+                                    font-size: 10.5px;
+                                    font-weight: 700;
+                                    letter-spacing: 1.4px;
+                                }
+                                Text {
+                                    text: pg.p.lede;
+                                    color: Theme.text;
+                                    font-size: 15px;
+                                    font-weight: 600;
+                                    wrap: word-wrap;
+                                }
+                            }
+                            if pg.p.fig-a != "": GuideFig { page: pg.p; }
+                            Text {
+                                text: pg.p.body;
+                                color: Theme.sub;
+                                font-size: 12.5px;
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -2588,7 +3097,11 @@ component WhatsNew inherits Rectangle {
                     HorizontalLayout {
                         alignment: start;
                         spacing: 7px;
-                        Rectangle {
+                        // Not drawn at all when there is nothing to say. Opening
+                        // What's New from Settings has no "from" — you are already
+                        // running it — and an empty chip reading "from " is worse
+                        // than no chip.
+                        if root.from-version != "": Rectangle {
                             width: chip.preferred-width + 18px;
                             height: 21px;
                             border-radius: 11px;
@@ -2608,7 +3121,8 @@ component WhatsNew inherits Rectangle {
                         }
                         Text {
                             text: root.preview ? "not installed yet — this is what changes"
-                                : "already installed and running";
+                                : root.from-version != "" ? "already installed and running"
+                                : "what is in the version you are running";
                             color: Theme.sub;
                             font-size: 11.5px;
                             vertical-alignment: center;
@@ -3053,6 +3567,7 @@ export component MainWindow inherits Window {
     in property <bool> readout;
     in property <bool> dark;
     in property <int> accent-index;
+    in property <int> skin-index;
     in property <bool> welcome-open;
     in property <string> toast-text;
     in property <bool> toast-error;
@@ -3098,6 +3613,17 @@ export component MainWindow inherits Window {
     in property <bool> update-auto;
     in property <string> install-note;
     in property <string> about-text;
+    in property <[GuidePage]> guide-pages;
+    in property <bool> comparing;
+    in property <int> soloed;
+    in property <bool> can-undo;
+    // -1 when the walkthrough is not running; 0-4 while it is.
+    in property <int> tour-step: -1;
+    in property <string> tour-head;
+    in property <string> tour-body;
+    in property <bool> dev-open;
+    in property <[DeviceRow]> device-rows;
+    in property <string> device-note;
     in property <bool> whatsnew-open;
     in property <string> whatsnew-from;
     in property <string> whatsnew-version;
@@ -3131,6 +3657,7 @@ export component MainWindow inherits Window {
     callback set-dark(bool);
     callback set-readout(bool);
     callback set-accent(int);
+    callback set-skin(int);
     callback dismiss-welcome();
     callback show-welcome();
     callback toggle-community();
@@ -3158,12 +3685,22 @@ export component MainWindow inherits Window {
     callback open-notes();
     callback copy-diagnostics();
     callback copy-update-command();
+    callback toggle-band(int);
+    callback compare-hold(bool);
+    callback step-gain(int, int, bool);
+    callback reset-band(int);
+    callback solo-band(int);
+    callback undo();
+    callback toggle-devices();
+    callback start-tour();
+    callback tour-next();
+    callback tour-end();
     callback dismiss-whatsnew();
     callback show-whatsnew();
     callback preview-whatsnew();
     callback restart-app();
 
-    property <bool> sheet-open: root.help-open || root.hub-open || root.settings-open || root.aeq-open || root.prof-open || root.whatsnew-open;
+    property <bool> sheet-open: root.help-open || root.hub-open || root.settings-open || root.aeq-open || root.prof-open || root.whatsnew-open || root.dev-open;
 
     // Theme is a global, and a global cannot bind to a property on a component — so the
     // flow runs the other way: the bridge pushes `dark` here and this forwards it once.
@@ -3171,6 +3708,7 @@ export component MainWindow inherits Window {
     init => {
         Theme.dark = root.dark;
         Theme.accent-index = root.accent-index;
+        Theme.skin-index = root.skin-index;
         keys.focus();
     }
 
@@ -3187,6 +3725,7 @@ export component MainWindow inherits Window {
             // where you are, not something on top of you.
             if (e.text == Key.Escape) {
                 if (root.whatsnew-open) { root.dismiss-whatsnew(); }
+                else if (root.dev-open) { root.toggle-devices(); }
                 else if (root.preview-open) { root.preview-close(); }
                 else if (root.prof-open) { root.toggle-profiles(); }
                 else if (root.aeq-open) { root.toggle-autoeq(); }
@@ -3204,11 +3743,69 @@ export component MainWindow inherits Window {
                 root.refresh();
                 return EventResult.accept;
             }
+            if (e.modifiers.control && e.text == "z") {
+                root.undo();
+                return EventResult.accept;
+            }
+
+            // Everything past here edits the curve, so it is off while any sheet is
+            // open: those contain search fields, and a tool that answers "m" by
+            // muting a band while you are typing "moondrop" into a search box is a
+            // tool people turn the keyboard off in.
+            if (root.sheet-open || root.welcome-open) { return EventResult.reject; }
+
+            // Hold to compare. Released below — both edges matter, because the
+            // release is what puts your curve back.
+            if (e.text == " ") {
+                root.compare-hold(true);
+                return EventResult.accept;
+            }
+
+            // The band under the caret. Nothing selected means the first one, so the
+            // keyboard is usable without reaching for the mouse to start.
+            if (root.selected < 0 && root.bands.length > 0) { root.select-band(0); }
+
+            if (e.text == Key.UpArrow) {
+                root.step-gain(root.selected, 1, e.modifiers.shift);
+                return EventResult.accept;
+            }
+            if (e.text == Key.DownArrow) {
+                root.step-gain(root.selected, -1, e.modifiers.shift);
+                return EventResult.accept;
+            }
+            if (e.text == Key.RightArrow) {
+                root.step-freq(root.selected, 1);
+                return EventResult.accept;
+            }
+            if (e.text == Key.LeftArrow) {
+                root.step-freq(root.selected, -1);
+                return EventResult.accept;
+            }
+            if (e.text == "[") { root.step-q(root.selected, -1); return EventResult.accept; }
+            if (e.text == "]") { root.step-q(root.selected, 1); return EventResult.accept; }
+            if (e.text == "m") { root.toggle-band(root.selected); return EventResult.accept; }
+            if (e.text == "s") { root.solo-band(root.selected); return EventResult.accept; }
+            if (e.text == "0") { root.reset-band(root.selected); return EventResult.accept; }
+
+            // 1-8 pick a band, matching the number printed on its card and on the
+            // graph handle — the same number the write actually targets.
+            if (e.text >= "1" && e.text <= "8") {
+                root.select-band(e.text.to-float() - 1);
+                return EventResult.accept;
+            }
+            return EventResult.reject;
+        }
+        key-released(e) => {
+            if (e.text == " ") {
+                root.compare-hold(false);
+                return EventResult.accept;
+            }
             return EventResult.reject;
         }
     }
     changed dark => { Theme.dark = root.dark; }
     changed accent-index => { Theme.accent-index = root.accent-index; }
+    changed skin-index => { Theme.skin-index = root.skin-index; }
 
     VerticalLayout {
         spacing: 0;
@@ -3221,7 +3818,7 @@ export component MainWindow inherits Window {
 
             HorizontalLayout {
                 padding-left: 16px;
-                padding-right: 12px;
+                padding-right: 10px;
                 spacing: 12px;
 
                 VerticalLayout {
@@ -3304,6 +3901,10 @@ export component MainWindow inherits Window {
                     }
                 }
 
+                // One spacer, so the whole right-hand group — pills and icons — sits
+                // together at the right edge. Splitting it in two centred the pills
+                // and stranded the icons on their own, and it was never the fix: the
+                // gap that looked wrong was *inside* the buttons, not between them.
                 Rectangle { horizontal-stretch: 1; }
 
                 if root.dirty: Rectangle {
@@ -3327,52 +3928,51 @@ export component MainWindow inherits Window {
                     }
                 }
 
+                // Two groups, not six children. The header's own 12px spacing is the
+                // gap between *groups*; inside a group the buttons belong together
+                // and were being pushed apart by a number meant for something else —
+                // three icons with 12px between each read as three unrelated things
+                // parked near the corner.
                 VerticalLayout {
                     alignment: center;
-                    TextBtn {
-                        label: "headphones";
-                        icon: Icons.headphones;
-                        clicked => { root.toggle-autoeq(); }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        TextBtn {
+                            label: "headphones";
+                            icon: Icons.headphones;
+                            clicked => { root.toggle-autoeq(); }
+                        }
+                        TextBtn {
+                            label: "community";
+                            icon: Icons.groups;
+                            clicked => { root.toggle-community(); }
+                        }
+                        TextBtn {
+                            label: "how to tune";
+                            icon: Icons.help;
+                            clicked => { root.toggle-help(); }
+                        }
                     }
                 }
                 VerticalLayout {
                     alignment: center;
-                    TextBtn {
-                        label: "community";
-                        icon: Icons.groups;
-                        clicked => { root.toggle-community(); }
-                    }
-                }
-                VerticalLayout {
-                    alignment: center;
-                    TextBtn {
-                        label: "how to tune";
-                        icon: Icons.help;
-                        clicked => { root.toggle-help(); }
-                    }
-                }
-                VerticalLayout {
-                    alignment: center;
-                    IconBtn {
-                        icon: Icons.home;
-                        active: root.welcome-open;
-                        clicked => { root.show-welcome(); }
-                    }
-                }
-                VerticalLayout {
-                    alignment: center;
-                    IconBtn {
-                        icon: Icons.tune;
-                        active: root.settings-open;
-                        clicked => { root.toggle-settings(); }
-                    }
-                }
-                VerticalLayout {
-                    alignment: center;
-                    IconBtn {
-                        icon: Icons.refresh;
-                        tint: Theme.sub;
-                        clicked => { root.refresh(); }
+                    HorizontalLayout {
+                        spacing: 2px;
+                        IconBtn {
+                            icon: Icons.home;
+                            active: root.welcome-open;
+                            clicked => { root.show-welcome(); }
+                        }
+                        IconBtn {
+                            icon: Icons.tune;
+                            active: root.settings-open;
+                            clicked => { root.toggle-settings(); }
+                        }
+                        IconBtn {
+                            icon: Icons.refresh;
+                            tint: Theme.sub;
+                            clicked => { root.refresh(); }
+                        }
                     }
                 }
             }
@@ -3384,7 +3984,7 @@ export component MainWindow inherits Window {
             spacing: 10px;
 
             // control row
-            HorizontalLayout {
+            ctl-row := HorizontalLayout {
                 spacing: 10px;
                 height: 62px;
                 SlotCard {
@@ -3421,7 +4021,7 @@ export component MainWindow inherits Window {
             }
 
             // presets
-            HorizontalLayout {
+            preset-row := HorizontalLayout {
                 spacing: 6px;
                 height: 30px;
                 Text {
@@ -3487,7 +4087,7 @@ export component MainWindow inherits Window {
             }
 
             // band strip
-            HorizontalLayout {
+            band-row := HorizontalLayout {
                 spacing: 8px;
                 height: 250px;
                 for band in root.bands: BandCard {
@@ -3495,6 +4095,7 @@ export component MainWindow inherits Window {
                     band: band;
                     selected: root.selected == band.index;
                     picked => { root.select-band(band.index); }
+                    muted => { root.toggle-band(band.index); }
                     gain-moved(f) => { root.set-band-gain(band.index, -12 + f * 24); }
                     gain-released => { root.commit-band-edit(band.index); }
                     type-cycled(d) => { root.cycle-type(band.index, d); }
@@ -3504,7 +4105,7 @@ export component MainWindow inherits Window {
             }
 
             // footer
-            HorizontalLayout {
+            act-bar := HorizontalLayout {
                 spacing: 8px;
                 height: 30px;
                 Text {
@@ -3519,8 +4120,23 @@ export component MainWindow inherits Window {
                 TextBtn { label: "profiles"; icon: Icons.favorite; clicked => { root.toggle-profiles(); } }
                 TextBtn { label: "import"; icon: Icons.upload-file; clicked => { root.import-file(); } }
                 TextBtn { label: "export"; icon: Icons.download; clicked => { root.export-file(); } }
-                TextBtn { label: "revert"; icon: Icons.undo; clicked => { root.revert(); } }
-                TextBtn { label: "reload"; icon: Icons.restart-alt; clicked => { root.refresh(); } }
+                // Hold, do not click. A/B is a comparison you make with your ears
+                // over a few seconds of music, and a toggle makes you look at the
+                // screen to find out which side you are on.
+                HoldBtn {
+                    label: root.comparing ? "bypassed" : "compare";
+                    icon: Icons.tune;
+                    held: root.comparing;
+                    changed(v) => { root.compare-hold(v); }
+                }
+                TextBtn {
+                    label: "undo";
+                    icon: Icons.undo;
+                    enabled: root.can-undo;
+                    clicked => { root.undo(); }
+                }
+                TextBtn { label: "revert"; icon: Icons.restart-alt; clicked => { root.revert(); } }
+                TextBtn { label: "reload"; icon: Icons.refresh; clicked => { root.refresh(); } }
                 TextBtn {
                     label: "save to flash";
                     icon: Icons.save;
@@ -3604,6 +4220,7 @@ export component MainWindow inherits Window {
         dark: root.dark;
         readout: root.readout;
         accent-index: root.accent-index;
+        skin-index: root.skin-index;
         settings-path: root.settings-path;
         app-version: root.app-version;
         update-state: root.update-state;
@@ -3625,6 +4242,7 @@ export component MainWindow inherits Window {
         dark-picked(v) => { root.set-dark(v); }
         readout-picked(v) => { root.set-readout(v); }
         accent-picked(i) => { root.set-accent(i); }
+        skin-picked(i) => { root.set-skin(i); }
         welcome-again => { root.show-welcome(); }
         check-clicked => { root.check-update(); }
         install-clicked => { root.install-update(); }
@@ -3638,6 +4256,15 @@ export component MainWindow inherits Window {
         whatsnew-clicked => { root.show-whatsnew(); }
         preview-notes => { root.preview-whatsnew(); }
         restart-clicked => { root.restart-app(); }
+    }
+    if root.dev-open: DevicesSheet {
+        x: (root.width - self.width) / 2;
+        y: max(24px, (root.height - self.height) / 2);
+        width: min(660px, root.width - 56px);
+        height: min(660px, root.height - 60px);
+        rows: root.device-rows;
+        note: root.device-note;
+        closed => { root.toggle-devices(); }
     }
     if root.whatsnew-open: WhatsNew {
         x: (root.width - self.width) / 2;
@@ -3682,10 +4309,11 @@ export component MainWindow inherits Window {
         picked(m, s, f) => { root.autoeq-pick(m, s, f); }
     }
     if root.help-open: HelpSheet {
+        pages: root.guide-pages;
         x: (root.width - self.width) / 2;
-        y: 60px;
-        width: min(700px, root.width - 80px);
-        height: root.height - 130px;
+        y: max(24px, (root.height - self.height) / 2);
+        width: min(760px, root.width - 56px);
+        height: clamp(self.wanted, 380px, min(760px, root.height - 60px));
         closed => { root.toggle-help(); }
     }
     if root.hub-open: CommunitySheet {
@@ -3705,6 +4333,126 @@ export component MainWindow inherits Window {
 
     // Last child, so it covers everything — including a settings sheet that may have
     // been what summoned it back.
+    // ── the walkthrough ──
+    //
+    // A spotlight over the real controls, not a slideshow of screenshots. The target
+    // rectangle is read from the element itself with `absolute-position`, so the tour
+    // cannot drift out of step with the layout the way a list of hardcoded
+    // coordinates would the first time a row changed height.
+    //
+    // The dimming is four rectangles around the hole rather than one with a hole cut
+    // in it, because there is no "cut a hole" in a renderer that composites rectangles
+    // — and four is cheap, exact, and needs no mask.
+    if root.tour-step >= 0: spot := Rectangle {
+        x: 0px;
+        y: 0px;
+        width: root.width;
+        height: root.height;
+
+        property <length> tx: root.tour-step == 0 ? ctl-row.absolute-position.x
+            : root.tour-step == 1 ? preset-row.absolute-position.x
+            : root.tour-step == 2 ? graph.absolute-position.x
+            : root.tour-step == 3 ? band-row.absolute-position.x
+            : act-bar.absolute-position.x;
+        property <length> ty: root.tour-step == 0 ? ctl-row.absolute-position.y
+            : root.tour-step == 1 ? preset-row.absolute-position.y
+            : root.tour-step == 2 ? graph.absolute-position.y
+            : root.tour-step == 3 ? band-row.absolute-position.y
+            : act-bar.absolute-position.y;
+        property <length> tw: root.tour-step == 0 ? ctl-row.width
+            : root.tour-step == 1 ? preset-row.width
+            : root.tour-step == 2 ? graph.width
+            : root.tour-step == 3 ? band-row.width
+            : act-bar.width;
+        property <length> th: root.tour-step == 0 ? ctl-row.height
+            : root.tour-step == 1 ? preset-row.height
+            : root.tour-step == 2 ? graph.height
+            : root.tour-step == 3 ? band-row.height
+            : act-bar.height;
+
+        property <length> pad: 8px;
+        property <length> hx: self.tx - self.pad;
+        property <length> hy: self.ty - self.pad;
+        property <length> hw: self.tw + self.pad * 2;
+        property <length> hh: self.th + self.pad * 2;
+
+        // Four panes around the hole. A single click anywhere on them advances, so
+        // the tour never traps somebody who has stopped reading.
+        Rectangle { x: 0px; y: 0px; width: spot.width; height: max(0px, spot.hy); background: #0a0709cc; }
+        Rectangle { x: 0px; y: spot.hy + spot.hh; width: spot.width; height: max(0px, spot.height - (spot.hy + spot.hh)); background: #0a0709cc; }
+        Rectangle { x: 0px; y: spot.hy; width: max(0px, spot.hx); height: spot.hh; background: #0a0709cc; }
+        Rectangle { x: spot.hx + spot.hw; y: spot.hy; width: max(0px, spot.width - (spot.hx + spot.hw)); height: spot.hh; background: #0a0709cc; }
+
+        // The ring around what is being talked about.
+        Rectangle {
+            x: spot.hx;
+            y: spot.hy;
+            width: spot.hw;
+            height: spot.hh;
+            border-radius: Theme.r-md;
+            border-width: 2px;
+            border-color: Theme.accent;
+            animate x, y, width, height { duration: Theme.settle; easing: cubic-bezier(0.2, 0, 0, 1); }
+        }
+
+        TouchArea { clicked => { root.tour-next(); } }
+
+        // The caption, placed under the target unless that would run off the bottom.
+        Rectangle {
+            property <bool> below: spot.hy + spot.hh + 132px < spot.height;
+            x: min(max(14px, spot.hx), spot.width - self.width - 14px);
+            y: self.below ? spot.hy + spot.hh + 12px : max(14px, spot.hy - self.height - 12px);
+            width: 420px;
+            height: cap.preferred-height + 26px;
+            border-radius: Theme.r-md;
+            background: Theme.card;
+            border-width: 1px;
+            border-color: Theme.accent;
+            animate x, y { duration: Theme.settle; easing: cubic-bezier(0.2, 0, 0, 1); }
+            cap := VerticalLayout {
+                padding: 13px;
+                spacing: 5px;
+                Text {
+                    text: "STEP \{root.tour-step + 1} OF 5";
+                    color: Theme.accent;
+                    font-family: Theme.mono;
+                    font-size: 9.5px;
+                    font-weight: 700;
+                    letter-spacing: 1.3px;
+                }
+                Text {
+                    text: root.tour-head;
+                    color: Theme.text;
+                    font-size: 14px;
+                    font-weight: 700;
+                    wrap: word-wrap;
+                }
+                Text {
+                    text: root.tour-body;
+                    color: Theme.sub;
+                    font-size: 12px;
+                    wrap: word-wrap;
+                }
+                Rectangle { height: 4px; }
+                HorizontalLayout {
+                    spacing: 8px;
+                    TextBtn {
+                        label: "Skip";
+                        icon: Icons.close;
+                        clicked => { root.tour-end(); }
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                    TextBtn {
+                        label: root.tour-step == 4 ? "Done" : "Next";
+                        icon: root.tour-step == 4 ? Icons.check : Icons.show-chart;
+                        primary: true;
+                        clicked => { root.tour-next(); }
+                    }
+                }
+            }
+        }
+    }
+
     if root.welcome-open: Welcome {
         x: 0px;
         y: 0px;
@@ -3714,6 +4462,8 @@ export component MainWindow inherits Window {
         device-name: root.device-name;
         started => { root.dismiss-welcome(); }
         guide => { root.dismiss-welcome(); root.toggle-help(); }
+        devices => { root.toggle-devices(); }
+        tour => { root.dismiss-welcome(); root.start-tour(); }
     }
 
     if root.preview-open: Rectangle {
