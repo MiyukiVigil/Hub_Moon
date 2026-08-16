@@ -5,6 +5,55 @@ All notable changes to **moondrop_control.py** are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0b2] - 2026-08-16
+
+The second beta. All of it is 1.2.0b1 read back off the screen — a settings panel that
+did not fit its own text, and a What's New that had nothing to say on the one channel
+it was built for.
+
+### Fixed
+
+- **What's New was empty on the beta channel.** Its notes came only from the update
+  manifest, and a beta is very often a build with no published release behind it — a
+  `makepkg -si` from the repo, a tag whose workflows have not finished, a wheel from a
+  git URL. Every one of those announced a new version and then showed an empty panel.
+  The notes for whatever is running are now compiled into the build itself, generated
+  from this file by `tools/build-release-notes.py`, and the manifest is preferred only
+  when it actually carries some.
+- **The update heading contradicted the banner above it.** Offered a return to stable,
+  the pinned banner said "Return to stable — Hub Moon 1.1.0" while the heading three
+  rows below said "Hub Moon 1.1.0 is available". Two answers to one question, and the
+  wrong one was the one next to the buttons.
+- **Settings rows wasted a column of width and then wrapped around it.** Every control
+  sat in a 200px reservation and was 190px wide, so each row had ten dead pixels down
+  its right edge — enough to knock the switches out of line with the buttons below
+  them, and taken out of the description, which wrapped to three lines to pay for it.
+  Controls are now flush with the panel edge and the column is the width of the widest
+  one.
+- `pytest` could not collect anything after a `makepkg` build. The copy of the repo it
+  leaves under `packaging/src/` has a second `tests/test_updater.py` in it, and two
+  files with one module name is a collection error rather than a skipped duplicate.
+
+### Added
+
+- **What's new, before installing.** A check you clicked now opens the release's notes
+  rather than only reporting that there is one, with an **Install it** button on the
+  panel itself. There is also a button for it in Settings ▸ Updates, next to the one
+  that skips. Nothing extra is fetched — the notes travel in the manifest the check
+  just read.
+- `tools/build-release-notes.py`, which turns this changelog into the short list the
+  panel shows. Run it after editing this file and commit `gui/notes.py`; a test fails
+  if the running version has no notes compiled in.
+
+### Changed
+
+- **Settings is bigger** — 760px wide against 620px, and taller. It is the only sheet
+  whose rows are description-plus-control rather than a list, so width here goes
+  straight into how many lines each description takes.
+- The **Release notes** button on an available update was a link to the website; it is
+  now **What's new**, which opens the notes in the app and works offline. The website
+  is still one click away, from the panel's own **Full changelog**.
+
 ## [1.2.0b1] - 2026-08-16
 
 The first build on the **beta** channel. Settings has a channel switch; anything on

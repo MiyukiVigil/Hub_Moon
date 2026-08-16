@@ -28,7 +28,7 @@ import argparse
 # bundle, the GUI shows it, and the updater compares against it. Everything that
 # used to carry its own copy — and had already drifted, the .app was still
 # announcing 0.2.0 at 1.0.0 — now asks this.
-__version__ = "1.2.0b1"
+__version__ = "1.2.0b2"
 
 try:
     import hid

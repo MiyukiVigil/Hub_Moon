@@ -80,7 +80,23 @@ def test_asset_names_map_to_the_keys_the_app_asks_for(tool):
         assert got in known, "%s is a key the app never looks for" % got
 
 
-def test_checksum_files_and_packages_are_not_treated_as_downloads(tool):
-    for name in ("SHA256SUMS-linux.txt", "hub-moon_1.2.0-1_amd64.deb",
-                 "hub-moon-1.2.0-1.x86_64.rpm"):
-        assert tool.classify(name) is None, name
+def test_checksum_files_are_not_downloads(tool):
+    assert tool.classify("SHA256SUMS-linux.txt") is None
+
+
+@pytest.mark.parametrize("name,expect", [
+    ("hub-moon_1.2.0b1-1_amd64.deb", "deb-package"),
+    ("hub-moon-1.2.0b1-1.x86_64.rpm", "rpm-package"),
+    ("hub-moon-1.2.0b1-1-x86_64.pkg.tar.zst", "arch-package"),
+])
+def test_system_packages_are_offered_as_downloads_only(tool, name, expect):
+    """These are in the manifest so the app can fetch and verify one, and hand over
+    the command that installs it. They must never become something it installs
+    itself — that is the difference between helping and corrupting a package
+    database, so the invariant is asserted rather than assumed."""
+    from gui import updater as U
+    assert tool.classify(name) == expect
+    kind = next(k for k, v in U.ASSET_FOR.items() if v == expect)
+    assert kind in U.FETCHABLE
+    assert kind not in U.SELF_UPDATABLE
+    assert kind not in U.APPLIERS

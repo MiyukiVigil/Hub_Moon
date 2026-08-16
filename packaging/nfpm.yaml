@@ -3,14 +3,20 @@
 #
 #   1. build the bundle first (on Linux):  pyinstaller packaging/hub-moon.spec
 #   2. from the repo root:
-#        nfpm pkg --packager deb -f packaging/nfpm.yaml   # → hub-moon_1.1.0_amd64.deb
-#        nfpm pkg --packager rpm -f packaging/nfpm.yaml   # → hub-moon-1.1.0.x86_64.rpm
+#        nfpm pkg --packager deb       -f packaging/nfpm.yaml
+#        nfpm pkg --packager rpm       -f packaging/nfpm.yaml
+#        nfpm pkg --packager archlinux -f packaging/nfpm.yaml
+#
+# The Arch package exists so that Arch users have something to install without the
+# AUR and without running makepkg: `sudo pacman -U ./hub-moon-<version>-1-x86_64.pkg.tar.zst`.
+# packaging/PKGBUILD is still the recipe for building from source; this is the
+# prebuilt equivalent of the .deb and .rpm.
 #
 # nfpm: https://nfpm.goreleaser.com  (a single Go binary, no toolchain)
 name: hub-moon
 arch: amd64            # nfpm maps this to x86_64 for rpm
 platform: linux
-version: 1.2.0b1
+version: 1.2.0b2
 release: 1
 section: sound
 priority: optional
@@ -40,3 +46,8 @@ contents:
 
 scripts:
   postinstall: ./packaging/postinstall.sh
+
+# nfpm stamps "Unknown Packager" into .PKGINFO without this, which is what pacman
+# shows in `pacman -Qi`.
+archlinux:
+  packager: MiyukiVigil <philoentree.dev01@gmail.com>
