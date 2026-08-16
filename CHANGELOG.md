@@ -5,6 +5,41 @@ All notable changes to **moondrop_control.py** are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0b5] - 2026-08-16
+
+One bug, and it had been breaking most of what a binary release does since the first
+one. Everything b3 and b4 claimed to fix about packaged installs was true of the
+source tree and false of the thing people actually download.
+
+### Fixed
+
+- **A frozen build could not run any system program.** PyInstaller points
+  `LD_LIBRARY_PATH` at the bundle's own `_internal` directory so the frozen
+  interpreter finds its libraries. Every process the app spawns inherits that, and a
+  system binary linked against the distribution's libraries loads the bundle's
+  instead:
+
+      pacman: /opt/hub-moon/_internal/libssl.so.3: version `OPENSSL_3.2.0' not found
+
+  So on every `.deb`, `.rpm`, Arch package, AppImage and tarball this project has
+  published: `pacman`/`dpkg`/`rpm` failed, which is why b3 and b4 still reported
+  themselves as a loose tarball and still tried to overwrite `/opt` — the fix was
+  there and could not run. `pkexec` failed, so the elevated install could not have
+  worked either. `zenity` and `kdialog` failed, so Import and Export did nothing.
+  `xdg-open` failed, so **Open log folder** did nothing. On macOS `hdiutil`, `ditto`,
+  `xattr` and `codesign` all failed, so the `.dmg` updater could not have applied
+  anything.
+
+  PyInstaller saves the pre-launch value in `LD_LIBRARY_PATH_ORIG`, so the fix is to
+  put it back — restore it where it was set, remove the variable where it was not —
+  and hand that environment to all fifteen places this app starts a system program. A
+  test walks the AST of every file that spawns one and fails on any that forgets,
+  because a missing `env=` works perfectly from source and fails only in the build
+  nobody runs tests against.
+- The `import hid` failure handler called `system_env()` before it was defined — it
+  runs at import time, above where the helper first landed. Caught by ruff rather
+  than by anybody, since it only fires on a build with no hidapi.
+
 ## [1.2.0b4] - 2026-08-16
 
 Everything b3 turned out to be missing once it was installed rather than built. Three

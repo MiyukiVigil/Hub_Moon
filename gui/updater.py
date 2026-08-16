@@ -160,7 +160,8 @@ def _package_owner(path):
                        ("rpm", ["rpm", "-qf", path]),
                        ("pacman", ["pacman", "-Qo", path])):
         try:
-            if subprocess.run(argv, capture_output=True, timeout=5).returncode == 0:
+            if subprocess.run(argv, capture_output=True, timeout=5,
+                              env=mc.system_env()).returncode == 0:
                 return kind
         except (OSError, subprocess.SubprocessError):
             continue
@@ -601,6 +602,7 @@ def _detach(argv, cwd=None):
                                | getattr(subprocess, "DETACHED_PROCESS", 0))
     else:
         kw["start_new_session"] = True
+    kw.setdefault("env", mc.system_env())
     subprocess.Popen(argv, **kw)
 
 
@@ -679,7 +681,7 @@ def apply_macos_app(path):
     try:
         subprocess.run(["hdiutil", "attach", "-nobrowse", "-readonly",
                         "-mountpoint", mount, path], check=True,
-                       capture_output=True, timeout=180)
+                       capture_output=True, timeout=180, env=mc.system_env())
     except (OSError, subprocess.SubprocessError) as exc:
         raise UpdateError("could not open the disk image: %s" % exc) from exc
 
@@ -693,15 +695,16 @@ def apply_macos_app(path):
         target = exe.split(".app/Contents/")[0] + ".app"
         staging = tempfile.mkdtemp(prefix="hubmoon-new-")
         new = os.path.join(staging, os.path.basename(target))
-        subprocess.run(["ditto", src, new], check=True, capture_output=True, timeout=300)
+        subprocess.run(["ditto", src, new], check=True, capture_output=True,
+                   timeout=300, env=mc.system_env())
     finally:
         subprocess.run(["hdiutil", "detach", mount, "-force"],
-                       capture_output=True, check=False)
+                       capture_output=True, check=False, env=mc.system_env())
 
     subprocess.run(["xattr", "-dr", "com.apple.quarantine", new],
-                   capture_output=True, check=False)
+                   capture_output=True, check=False, env=mc.system_env())
     subprocess.run(["codesign", "--force", "--deep", "--sign", "-", new],
-                   capture_output=True, check=False)
+                   capture_output=True, check=False, env=mc.system_env())
 
     swap = ('rm -rf "%s.old" && mv "%s" "%s.old" || exit 1\n' % (target, target, target) +
             'ditto "%s" "%s" || { mv "%s.old" "%s"; exit 1; }\n'
@@ -852,7 +855,8 @@ def install_elevated(kind, path, timeout=1800):
                        "has to be run in a terminal.")
     full = ["pkexec"] + argv + [path]
     try:
-        done = subprocess.run(full, capture_output=True, text=True, timeout=timeout)
+        done = subprocess.run(full, capture_output=True, text=True, timeout=timeout,
+                          env=mc.system_env())
     except subprocess.TimeoutExpired:
         return False, "The installer took too long and was stopped."
     except OSError as exc:

@@ -147,14 +147,15 @@ def message_box(title, text, critical=False):
                 ["osascript", "-e", "display alert %s message %s%s"
                  % (_json.dumps(title), _json.dumps(text),
                     " as critical" if critical else "")],
-                check=False, timeout=120, capture_output=True)
+                check=False, timeout=120, capture_output=True, env=mc.system_env())
             return True
         for argv in (["zenity", "--error" if critical else "--info",
                       "--title", title, "--text", text, "--width", "540"],
                      ["kdialog", "--error" if critical else "--msgbox", text,
                       "--title", title]):
             try:
-                subprocess.run(argv, check=False, timeout=120, capture_output=True)
+                subprocess.run(argv, check=False, timeout=120,
+                               capture_output=True, env=mc.system_env())
                 return True
             except (OSError, subprocess.SubprocessError):
                 continue
@@ -192,9 +193,9 @@ def reveal_logs():
         if sys.platform == "win32":
             os.startfile(path)                                   # noqa: S606
         elif sys.platform == "darwin":
-            subprocess.Popen(["open", path], **_no_window())
+            subprocess.Popen(["open", path], env=mc.system_env(), **_no_window())
         else:
-            subprocess.Popen(["xdg-open", path], **_no_window())
+            subprocess.Popen(["xdg-open", path], env=mc.system_env(), **_no_window())
         return True
     except (OSError, AttributeError) as exc:
         log.warning("could not open %s: %s", path, exc)

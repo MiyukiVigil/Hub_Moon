@@ -28,7 +28,39 @@ import argparse
 # bundle, the GUI shows it, and the updater compares against it. Everything that
 # used to carry its own copy — and had already drifted, the .app was still
 # announcing 0.2.0 at 1.0.0 — now asks this.
-__version__ = "1.2.0b4"
+__version__ = "1.2.0b5"
+
+def system_env():
+    """The environment to spawn a *system* program with.
+
+    PyInstaller points ``LD_LIBRARY_PATH`` (``DYLD_LIBRARY_PATH`` on macOS) at the
+    bundle's own ``_internal`` directory so the frozen interpreter finds its libraries.
+    Every process the app then spawns inherits that, and system binaries linked against
+    the distribution's libraries pick up the bundle's instead:
+
+        pacman: /opt/hub-moon/_internal/libssl.so.3: version `OPENSSL_3.2.0' not found
+
+    That is not a corner case here. Frozen builds shell out to ``pacman``/``dpkg``/
+    ``rpm`` to work out how they were installed, to ``pkexec`` to install an update, to
+    ``zenity`` or ``kdialog`` for import and export, to ``xdg-open`` for the log folder,
+    and on macOS to ``hdiutil``, ``ditto``, ``codesign`` and ``xattr`` to apply a
+    ``.dmg``. Every one of those was failing on every binary release, silently — the
+    install detection fell back to "loose tarball", which is what made a packaged
+    install try to overwrite ``/opt`` and stop with a permission error.
+
+    PyInstaller saves the pre-launch value in ``*_ORIG``, so the fix is to put it back:
+    restore it when it was set, remove the variable entirely when it was not.
+    """
+    env = dict(os.environ)
+    if getattr(sys, "frozen", False):
+        for var in ("LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH"):
+            original = env.pop(var + "_ORIG", None)
+            if original is not None:
+                env[var] = original
+            else:
+                env.pop(var, None)
+    return env
+
 
 try:
     import hid
@@ -50,7 +82,7 @@ except ImportError:
                 import subprocess
                 subprocess.run(["osascript", "-e",
                                 'display alert "Hub Moon" message %s as critical'
-                                % json.dumps(_msg)], check=False)
+                                % json.dumps(_msg)], check=False, env=system_env())
         except Exception:
             pass
     sys.exit(1)

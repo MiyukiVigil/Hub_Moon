@@ -76,3 +76,62 @@ def test_the_desktop_entry_launches_something_that_exists():
     with open(os.path.join(ROOT, "packaging", "nfpm.yaml"), encoding="utf-8") as fh:
         nfpm = fh.read()
     assert "dst: /usr/bin/%s\n" % entry["Exec"] in nfpm
+
+
+# ── spawning system programs from a frozen build ─────────────────────────────
+
+def test_the_bundled_library_path_is_not_inherited(monkeypatch):
+    """PyInstaller points LD_LIBRARY_PATH at the bundle, and every process the app
+    spawns inherits it — so system binaries load the bundle's libraries and die:
+
+        pacman: /opt/hub-moon/_internal/libssl.so.3: version `OPENSSL_3.2.0' not found
+
+    Which is exactly what made a packaged install report itself as a loose tarball:
+    `pacman -Qo` failed, the owner came back None, and install_kind fell through.
+    """
+    import moondrop_control as mc
+
+    monkeypatch.setattr(mc.sys, "frozen", True, raising=False)
+    monkeypatch.setenv("LD_LIBRARY_PATH", "/opt/hub-moon/_internal")
+    monkeypatch.setenv("LD_LIBRARY_PATH_ORIG", "/usr/lib")
+    assert mc.system_env()["LD_LIBRARY_PATH"] == "/usr/lib"
+
+    # Nothing was set before launch, so nothing should be set for the child either —
+    # leaving the bundle's value in place is the whole bug.
+    monkeypatch.delenv("LD_LIBRARY_PATH_ORIG")
+    assert "LD_LIBRARY_PATH" not in mc.system_env()
+
+
+def test_an_unfrozen_run_is_left_alone(monkeypatch):
+    """From source there is no bundle, so the environment is the right one already."""
+    import os
+    import moondrop_control as mc
+    monkeypatch.delattr(mc.sys, "frozen", raising=False)
+    monkeypatch.setenv("LD_LIBRARY_PATH", "/somewhere/the/user/chose")
+    assert mc.system_env() == dict(os.environ)
+
+
+def test_every_spawn_of_a_system_program_passes_that_environment():
+    """A new `subprocess.run` that forgets `env=` is a feature that works from source
+    and fails on every binary release — which is how this went unnoticed through four
+    betas, across the updater, the file dialogs, the log folder and the .dmg applier.
+    """
+    import ast
+    files = ["gui/updater.py", "gui/diagnostics.py", "gui/bridge.py",
+             "moondrop_control.py"]
+    missing = []
+    for rel in files:
+        with open(os.path.join(ROOT, rel), encoding="utf-8") as fh:
+            tree = ast.parse(fh.read())
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            f = node.func
+            if not (isinstance(f, ast.Attribute)
+                    and f.attr in ("run", "Popen", "call")
+                    and isinstance(f.value, ast.Name) and f.value.id == "subprocess"):
+                continue
+            names = {k.arg for k in node.keywords}
+            if "env" not in names and None not in names:   # None is **kwargs
+                missing.append("%s:%d" % (rel, node.lineno))
+    assert not missing, "spawns without env=system_env(): %s" % missing

@@ -8,7 +8,7 @@
 # PKGBUILD (the usual AUR layout), so they don't depend on being inside the
 # GitHub source tarball. Keep them alongside the PKGBUILD in the AUR repo.
 pkgname=hub-moon
-pkgver=1.2.0b4
+pkgver=1.2.0b5
 pkgrel=1
 pkgdesc="Parametric EQ control for Moondrop USB DACs — CLI + native desktop GUI"
 arch=('any')

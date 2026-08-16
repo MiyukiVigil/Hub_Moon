@@ -662,7 +662,7 @@ class IoWorker(_Worker):
         if sys.platform == "win32":
             kw["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         try:
-            done = subprocess.run(argv, capture_output=True, text=True,
+            done = subprocess.run(argv, capture_output=True, text=True, env=mc.system_env(),
                                   timeout=600, **kw)
         except (OSError, subprocess.SubprocessError):
             return None
@@ -1406,7 +1406,7 @@ class Bridge:
             try:
                 kw = {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)} \
                     if sys.platform == "win32" else {}
-                subprocess.run(argv, input=text, text=True, timeout=10,
+                subprocess.run(argv, input=text, text=True, timeout=10, env=mc.system_env(),
                                check=True, **kw)
                 self.toast(ok_message, False)
                 self.push()
