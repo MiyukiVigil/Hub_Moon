@@ -18,14 +18,120 @@ import sys
 import os
 import json
 import math
+import platform
 import time
 import struct
 import argparse
+
+# The one version string in the project. pyproject reads it from here (statically,
+# without importing this file), packaging/hub-moon.spec stamps it into the macOS
+# bundle, the GUI shows it, and the updater compares against it. Everything that
+# used to carry its own copy — and had already drifted, the .app was still
+# announcing 0.2.0 at 1.0.0 — now asks this.
+__version__ = "1.1.0"
+
 try:
     import hid
 except ImportError:
-    print("Error: The 'hidapi' package is required. Install it using: pip install hidapi")
+    # In a windowed build (Windows .exe, macOS .app) there is no stdout to print to,
+    # so this used to be an invisible death: double-click, nothing happens, no clue.
+    # Say it where the platform can actually show it before giving up.
+    _msg = ("Hub Moon needs the 'hidapi' package (and its native library).\n\n"
+            "Installed from source?  pip install hidapi\n"
+            "Using a packaged build?  this is a packaging bug — please report it at\n"
+            "https://github.com/MiyukiVigil/Hub_Moon/issues")
+    print("Error: " + _msg)
+    if getattr(sys, "frozen", False):
+        try:
+            if sys.platform == "win32":
+                import ctypes
+                ctypes.windll.user32.MessageBoxW(None, _msg, "Hub Moon", 0x10)
+            elif sys.platform == "darwin":
+                import subprocess
+                subprocess.run(["osascript", "-e",
+                                'display alert "Hub Moon" message %s as critical'
+                                % json.dumps(_msg)], check=False)
+        except Exception:
+            pass
     sys.exit(1)
+
+# ── where our files live ─────────────────────────────────────────────────────
+#
+# Through 1.0.0 every platform got the XDG layout, which is right on exactly one of
+# them. A Windows install wrote its settings to C:\Users\you\.config\hub-moon — a
+# dotted directory Windows has no concept of, outside the roaming profile, and
+# skipped by every backup that follows the platform's own rules. macOS had the same
+# problem more quietly. Linux paths are unchanged, deliberately: nobody's existing
+# config or 4 MB preset cache moves under them. The other two now use their own
+# conventions, and migrate_legacy_config() carries a 1.0.0 config across on first run.
+
+APP_DIR = "HubMoon"        # Windows / macOS, where directory names are read by people
+APP_DIR_XDG = "hub-moon"   # XDG, where they are typed
+
+
+def _local_appdata(var, fallback):
+    return os.environ.get(var) or os.path.expanduser(fallback)
+
+
+def config_dir():
+    """Settings. Small, hand-editable, worth carrying to a new machine."""
+    if sys.platform == "win32":
+        return os.path.join(_local_appdata("APPDATA", r"~\AppData\Roaming"), APP_DIR)
+    if sys.platform == "darwin":
+        return os.path.expanduser("~/Library/Application Support/" + APP_DIR)
+    return os.path.join(os.environ.get("XDG_CONFIG_HOME")
+                        or os.path.expanduser("~/.config"), APP_DIR_XDG)
+
+
+def cache_dir():
+    """Refetchable. Deleting this costs a download and never data."""
+    if sys.platform == "win32":
+        return os.path.join(_local_appdata("LOCALAPPDATA", r"~\AppData\Local"),
+                            APP_DIR, "Cache")
+    if sys.platform == "darwin":
+        return os.path.expanduser("~/Library/Caches/" + APP_DIR)
+    return os.path.join(os.environ.get("XDG_CACHE_HOME")
+                        or os.path.expanduser("~/.cache"), "hub_moon")
+
+
+def log_dir():
+    """Where the GUI writes its log. A windowed build has no stderr, so without a
+    file on disk an exception is a screenshot of a dialog and a guess."""
+    if sys.platform == "win32":
+        return os.path.join(_local_appdata("LOCALAPPDATA", r"~\AppData\Local"),
+                            APP_DIR, "Logs")
+    if sys.platform == "darwin":
+        return os.path.expanduser("~/Library/Logs/" + APP_DIR)
+    return os.path.join(os.environ.get("XDG_STATE_HOME")
+                        or os.path.expanduser("~/.local/state"), APP_DIR_XDG)
+
+
+def migrate_legacy_config():
+    """Copy a 1.0.0 settings file into the platform directory, once.
+
+    Copies rather than moves: a user who goes back to 1.0.0 still finds their
+    settings where that version looks. The stale copy is a few hundred bytes and the
+    duplication ends the first time 1.1.0 saves. No-op on Linux, where the old path
+    and the new one are the same path.
+    """
+    new = os.path.join(config_dir(), "settings.json")
+    old = os.path.join(os.environ.get("XDG_CONFIG_HOME")
+                       or os.path.expanduser("~/.config"), APP_DIR_XDG, "settings.json")
+    if os.path.abspath(old) == os.path.abspath(new) or os.path.exists(new):
+        return False
+    try:
+        with open(old, encoding="utf-8") as fh:
+            data = fh.read()
+        os.makedirs(os.path.dirname(new), exist_ok=True)
+        with open(new, "w", encoding="utf-8") as fh:
+            fh.write(data)
+        return True
+    except OSError:
+        return False
+
+
+HUB_CACHE = cache_dir()
+
 
 # Default vendor ID for Moondrop
 MOONDROP_VID = 0x35D8
@@ -95,10 +201,8 @@ REV_FILTER_TYPES = {v: k for k, v in FILTER_TYPES.items()}
 # ---------------------------------------------------------------------------
 HUB_API = "https://cdn-service.moondroplab.tech/api/v1"
 HUB_CDN = "https://cdn.moondroplab.tech"
-HUB_CACHE = os.path.join(
-    os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"), "hub_moon")
 HUB_CACHE_TTL = 24 * 3600
-HUB_UA = "hub_moon/1.0 (+https://hubmoon.miyukivigil.tech)"
+HUB_UA = "hub_moon/%s (+https://hubmoon.miyukivigil.tech)" % __version__
 
 # product_id -> the Hub's productUUID for that device.
 #
@@ -928,6 +1032,14 @@ def check_stream_status():
 
 def main():
     parser = argparse.ArgumentParser(description="Moondrop DAC HID Control Tool")
+    parser.add_argument("--version", action="version", version="hub-moon %s" % __version__)
+    parser.add_argument("--check-update", action="store_true",
+                        help="Ask whether a newer Hub Moon has been released and print "
+                             "what it is, plus how THIS install updates. Touches no "
+                             "hardware and installs nothing")
+    parser.add_argument("--channel", default="stable", choices=("stable", "beta"),
+                        help="With --check-update: which release channel to ask about "
+                             "(default stable)")
     parser.add_argument("--list", action="store_true", help="List connected Moondrop devices")
     parser.add_argument("--info", action="store_true", help="Print information about connected device")
     parser.add_argument("-i", "--interactive", action="store_true", help="Start the interactive terminal dashboard tuning panel")
@@ -981,6 +1093,38 @@ def main():
             print("The GUI needs slint:  pip install -r gui/requirements.txt\n(%s)" % e, file=sys.stderr)
             sys.exit(1)
         sys.exit(gui_main())
+
+    # Update check. Hardware-free and side-effect-free: it reports, and it is the GUI
+    # that installs. Useful on its own for anyone driving Hub Moon from a script, and
+    # the fastest way to find out what a given install would be told to do.
+    if args.check_update:
+        _here = os.path.dirname(os.path.abspath(__file__))
+        if _here not in sys.path:
+            sys.path.insert(0, _here)
+        from gui import updater
+
+        print("running:  hub-moon %s  (%s)"
+              % (__version__, updater.describe_install()))
+        try:
+            found = updater.check(args.channel, force=True)
+        except Exception as exc:
+            print("could not check: %s" % exc, file=sys.stderr)
+            sys.exit(1)
+        if not found:
+            print("up to date on the %s channel." % args.channel)
+            sys.exit(0)
+        print("\n%s %s is available (%s)" % ("Hub Moon", found["version"],
+                                             found["date"] or "date unknown"))
+        if found["summary"]:
+            print("  %s" % found["summary"])
+        print("  notes:  %s" % found["notes_url"])
+        if found["can_install"]:
+            print("  install it from the desktop app's Settings panel, or download:")
+            print("          %s" % found["asset"]["url"])
+        else:
+            print("  %s" % found["reason"])
+            print("          %s" % found["hint"])
+        sys.exit(0)
 
     # Registry dump. Deliberately the FIRST thing handled and deliberately
     # hardware-free: this exists so a front-end can recognise a DAC from the USB

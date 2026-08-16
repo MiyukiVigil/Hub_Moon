@@ -32,10 +32,52 @@ tag `vX.Y.Z`** and all of them attach their artifacts to that GitHub Release;
 |---|---|---|
 | `build-windows.yml` | windows-latest | `HubMoon-Setup-<v>.exe` (Inno Setup) + portable zip |
 | `build-linux.yml` | ubuntu-22.04 | portable `.tar.gz`, `.AppImage`, `.deb`, `.rpm` |
-| `build-macos.yml` | macos-14 + macos-13 | `.dmg` for Apple Silicon **and** Intel |
+| `build-macos.yml` | macos-14 | `.dmg` for Apple Silicon |
 
-Each needs `permissions: contents: write` (set in the workflow) so the release
-step can upload — the default `GITHUB_TOKEN` is read-only.
+Each also attaches a `SHA256SUMS-*.txt` for its own assets, hashed on the runner that
+built them. Each needs `permissions: contents: write` (set in the workflow) so the
+release step can upload — the default `GITHUB_TOKEN` is read-only.
+
+---
+
+## Cutting a release
+
+The version lives in **one** place: `__version__` in `moondrop_control.py`.
+`pyproject.toml` reads it with `attr:`, `hub-moon.spec` reads it for the macOS bundle,
+the GUI shows it, and the updater compares against it. `nfpm.yaml` and `hub-moon.iss`
+are given it on the command line by the workflows. Nothing else may carry a copy —
+that is how the `.app` ended up announcing `0.2.0` throughout 1.0.0.
+
+```bash
+# 1. bump the one constant, and write the changelog entry
+$EDITOR moondrop_control.py CHANGELOG.md
+
+# 2. tag it — the three workflows fire on the tag and build the release
+git commit -am "v1.1.0" && git tag v1.1.0 && git push origin main --tags
+
+# 3. once all three workflows are green, build the update manifest from the release
+python3 tools/build-update-manifest.py v1.1.0
+
+# 4. put it where the app looks: packaging/update.json on main (stable),
+#    packaging/update-beta.json on test (beta)
+git add packaging/update.json && git commit -m "manifest: 1.1.0" && git push
+```
+
+For a **beta**, tag it `v1.2.0-beta.1`, mark the GitHub release as a *pre-release*, and
+push the generated `update-beta.json` to the `test` branch. `build-update-manifest.py`
+decides which file it writes from the release's pre-release flag, not from a switch, so
+a beta cannot be published to the stable channel by mistake.
+
+The app tries the website first and the git branch second, so copying the manifest into
+the site (`hubmoon/update.json`) makes the check faster but is not required:
+
+```bash
+python3 tools/build-update-manifest.py v1.1.0 --site ../self-website/hubmoon
+```
+
+`packaging/update.example.json` documents the format. An asset with no SHA-256 is
+**refused** by the app rather than installed, so a manifest whose checksums are missing
+is worse than no manifest at all — the generator warns and leaves such assets out.
 
 ---
 

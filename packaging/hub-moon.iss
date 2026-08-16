@@ -2,14 +2,14 @@
 ;
 ; Build it in two steps, ON WINDOWS:
 ;   pyinstaller packaging\hub-moon.spec           ->  dist\hub-moon\hub-moon.exe
-;   iscc /DAppVersion=1.0.0 packaging\hub-moon.iss ->  dist\HubMoon-Setup-1.0.0.exe
+;   iscc /DAppVersion=1.1.0 packaging\hub-moon.iss ->  dist\HubMoon-Setup-1.1.0.exe
 ;
 ; (The GitHub Actions workflow does both on a windows-latest runner.)
 ;
 ; Defines can be overridden on the iscc command line with /D<name>=<value>.
 
 #ifndef AppVersion
-  #define AppVersion "1.0.0"
+  #define AppVersion "1.1.0"
 #endif
 #ifndef SourceDir
   #define SourceDir "..\dist\hub-moon"

@@ -76,15 +76,28 @@ jobs:
             "dist/HubMoon-$v-macOS-$arch.dmg"
           rm -rf "$staging"
 
+      # Hashed on the runner that built it — see the note in build-linux.yml. Named per
+      # architecture so that adding an Intel job later cannot have two runners writing
+      # SHA256SUMS-macos.txt over each other on the same release.
+      - name: Checksums
+        run: |
+          cd dist
+          shasum -a 256 HubMoon-*-macOS-*.dmg > "SHA256SUMS-macos-$ARCH.txt"
+          cat "SHA256SUMS-macos-$ARCH.txt"
+
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: hub-moon-macos-arm64
-          path: dist/HubMoon-*-macOS-*.dmg
+          path: |
+            dist/HubMoon-*-macOS-*.dmg
+            dist/SHA256SUMS-macos-*.txt
           if-no-files-found: error
 
       - name: Attach to release (tagged builds only)
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/HubMoon-*-macOS-*.dmg
+          files: |
+            dist/HubMoon-*-macOS-*.dmg
+            dist/SHA256SUMS-macos-*.txt

@@ -5,6 +5,111 @@ All notable changes to **moondrop_control.py** are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-08-16
+
+A release about the things around the app rather than the EQ itself: it can now tell
+you when there is a newer one, it writes down what went wrong, and it no longer ends
+every session with a crash dialog on Windows.
+
+### Fixed
+
+- **Quitting crashed the app.** Closing the window ended with *"Failed to execute
+  script 'pyinstaller_entry' — 'object' object is not callable"* and a non-zero exit.
+
+  The worker threads used `self._stop` as their queue sentinel, and `_stop` is a real
+  method on `threading.Thread` that CPython calls from inside `join()`
+  (`join` → `_wait_for_tstate_lock` → `self._stop()`). Assigning an `object()` over it
+  meant every join raised, out of `Bridge.stop()` and through the `finally` in
+  `app.main()`. The sentinel is a module-level `_QUIT` now.
+
+  Worth spelling out, because it explains why this shipped at all: **it is invisible on
+  a modern Python.** CPython 3.13 removed `_wait_for_tstate_lock`, so a 3.13+
+  interpreter never calls `_stop` and the bug does not exist. The release builds are
+  made with 3.12, where it always fires. It also was not Windows-specific — the Linux
+  and macOS bundles raised identically, with nobody watching a windowed app's stderr.
+  Windows was simply the only platform that *showed* it, via PyInstaller's own dialog.
+
+  `Bridge.stop()` also guards each join separately now: one worker failing to be waited
+  on used to skip the other two entirely.
+- **The window had no icon on Windows.** The `.ico` was only ever given to
+  PyInstaller, which stamps the *executable* — what Explorer and the shortcut show.
+  The window itself never had one, so the titlebar and taskbar drew the shell's generic
+  placeholder. `MainWindow` now sets `icon:`, from a PNG shipped in `gui/ui/`. (X11 and
+  macOS get it too. Wayland has no protocol for window icons and ignores it.)
+- **Import and Export did nothing on Windows and macOS.** The file chooser shelled out
+  to `zenity` unconditionally — a program neither platform has. The chooser never
+  appeared, and the app then reported that you had cancelled a dialog it never opened.
+  Each platform now gets its own: PowerShell driving the WinForms dialog on Windows,
+  `osascript`/`choose file` on macOS, zenity or kdialog on Linux (picked by which is
+  actually installed, so cancelling one no longer opens the other).
+- **Settings were written to the wrong place on Windows and macOS.** Every platform got
+  the XDG layout, which put a Windows config in `C:\Users\you\.config\hub-moon` —
+  outside the roaming profile and skipped by any backup that follows the platform's
+  rules. Now `%APPDATA%\HubMoon` and `~/Library/Application Support/HubMoon`
+  respectively, with an existing 1.0.0 file copied across on first run. **Linux paths
+  are unchanged**; nothing moves for anyone already running it there.
+- **The macOS bundle reported the wrong version.** `Info.plist` carried a hardcoded
+  `0.2.0` for the whole of 1.0.0. It now comes from the same constant as everything
+  else, so it cannot drift again.
+- **`import hid` failing killed the app silently.** In a windowed build there is no
+  stdout, so a missing hidapi meant double-clicking the icon did nothing at all, with
+  no message anywhere. It now says so in a native message box before exiting.
+
+### Added
+
+- **Update checking, with a stable and a beta channel.** One small manifest fetched
+  over HTTPS, cached for a day, compared against the running version. `stable` is
+  published from the `main` branch, `beta` from `test`; the channel is a toggle in
+  Settings, and a version you skip is never offered again until something newer than it
+  appears.
+
+  Every asset is checked against a SHA-256 from the manifest, and one with **no**
+  checksum is refused rather than trusted. Checking defaults to on where Hub Moon ships
+  the build itself and **off** where a package manager owns it; `HUB_MOON_NO_UPDATE_CHECK=1`
+  turns it off everywhere without opening the app.
+
+  What this is not: there is no code signature on any platform, so this protects
+  against a corrupted download, not against someone who can serve you a manifest.
+- **A log file, and somewhere for a crash to go.** Every session writes to the
+  platform's log directory, `sys.excepthook` and `threading.excepthook` are installed
+  so a fault on a worker thread is recorded instead of vanishing, and a fatal error
+  gets a native message box naming the log — deliberately not a Slint window, since the
+  failure it has to survive is the toolkit not coming up. Settings has an **Open log
+  folder** button. Diagnosing the quit crash above cost a screenshot of a truncated
+  dialog; that is what this is for.
+- **`--version` and `--check-update`** on the CLI, the latter with `--channel`. It
+  reports and installs nothing, and prints how *this* install is meant to be updated.
+- **SHA256SUMS on every release.** Each workflow hashes its own assets on the runner
+  that built them and attaches the list. `tools/build-update-manifest.py` reads those
+  to build the manifest, and anyone can check a download by hand against the same file.
+
+**It installs itself only where that is safe to do.** Hub Moon ships ten ways, and five
+of them are owned by a package manager — an app that overwrites files `dpkg` believes it
+owns has broken the system it meant to update. So the updater works out how *this* copy
+got here (Inno's uninstall key, `APPIMAGE`, a `.app` bundle, `dpkg -S` / `rpm -qf` /
+`pacman -Qo`, a pipx venv, a git checkout) and behaves accordingly:
+
+| Install | What the update button does |
+|---|---|
+| Windows installer | downloads and runs it — Inno upgrades in place under the same AppId |
+| Windows portable | swaps the extracted folder from a batch file that outlives the process |
+| macOS `.app` | mounts the `.dmg`, de-quarantines and re-signs the bundle, swaps it |
+| AppImage | replaces the one file with an atomic `mv` |
+| Linux tarball | swaps the unpacked directory |
+| deb / rpm / pacman / Nix / pip / pipx | *nothing* — it shows the command that will |
+
+### Changed
+
+- **One version string.** `moondrop_control.__version__` is now the only place it is
+  written. `pyproject.toml` reads it with `attr:` (statically, so building a wheel does
+  not need hidapi), `hub-moon.spec` reads it for the macOS bundle, the GUI shows it, and
+  the updater compares against it.
+- The Settings sheet is taller and scrolls, and is titled **Settings** rather than
+  **Appearance**. A waiting update appears as a banner pinned above the scroll area, so
+  it cannot be something you have to scroll to find.
+- The sheet's footnote prints the real settings path instead of a hardcoded
+  `~/.config/hub-moon/settings.json`, which had stopped being true on two platforms.
+
 ## [1.0.0] - 2026-08-15
 
 First tagged release, so everything below is the starting feature set rather than a

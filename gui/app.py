@@ -10,6 +10,7 @@ import gc
 import os
 import signal
 import sys
+import traceback
 from datetime import timedelta
 
 # How often the collector runs, once it has been taken off automatic. Nothing here
@@ -60,6 +61,20 @@ def _pin_gc_to_ui_thread():
 
 
 def main(argv=None):
+    # First, before anything can fail: somewhere for a failure to go. A windowed build
+    # has no stderr, so until this is installed an exception is a silent exit.
+    from . import diagnostics
+    from .diagnostics import log
+
+    diagnostics.install()
+
+    try:
+        import moondrop_control as mc
+        if mc.migrate_legacy_config():
+            log.info("carried the 1.0.0 settings over to %s", mc.config_dir())
+    except Exception:
+        log.warning("could not check for a 1.0.0 config", exc_info=True)
+
     # No font plumbing here on purpose. The icons used to be a bundled Material Symbols
     # subset drawn as ligature text, which only ever worked on machines that already had
     # the font installed — Slint's Python API has no way to register one, and
@@ -70,7 +85,14 @@ def main(argv=None):
     from .bridge import Bridge
 
     ui_file = os.path.join(_res_dir("ui"), "app.slint")
-    window = slint.load_file(ui_file).MainWindow()
+    try:
+        window = slint.load_file(ui_file).MainWindow()
+    except Exception:
+        # A .slint that will not compile means no window will ever appear, and the
+        # user is owed a reason rather than a process that exits with nothing.
+        log.critical("could not build the window from %s", ui_file, exc_info=True)
+        diagnostics.fatal("Hub Moon could not start", traceback.format_exc())
+        return 1
 
     gc_timer = _pin_gc_to_ui_thread()   # noqa: F841 — held so the timer keeps firing
     bridge = Bridge(window)
@@ -87,7 +109,19 @@ def main(argv=None):
         # returns instantly with exit code 0 and no window ever appears.
         window.run()
     finally:
-        bridge.stop()
+        # Shutting down must not be able to fail the process. Whatever happens here,
+        # the window is already gone and the user has already quit — turning that into
+        # a crash dialog, which is exactly what 1.0.0 did, helps nobody.
+        try:
+            bridge.stop()
+        except Exception:
+            log.error("error while shutting down", exc_info=True)
+        log.info("Hub Moon exited")
+
+    # The updater arms a helper that waits for this process to be gone before it
+    # replaces any files, so handing over is simply a matter of leaving promptly.
+    if bridge.handing_over:
+        log.info("handing over to the updater")
     return 0
 
 

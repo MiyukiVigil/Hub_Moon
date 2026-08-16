@@ -68,6 +68,18 @@ jobs:
           $v = "${{ steps.ver.outputs.version }}"
           Compress-Archive -Path dist\hub-moon\* -DestinationPath "dist\HubMoon-$v-windows-portable.zip"
 
+      # Hashed on the runner that built them — see the note in build-linux.yml. Written
+      # as "<hash>  <name>" so the file reads the same as sha256sum's on every platform.
+      - name: Checksums
+        shell: pwsh
+        run: |
+          Set-Location dist
+          Get-ChildItem HubMoon-Setup-*.exe, HubMoon-*-windows-portable.zip |
+            ForEach-Object {
+              "{0}  {1}" -f (Get-FileHash $_ -Algorithm SHA256).Hash.ToLower(), $_.Name
+            } | Set-Content -Encoding ascii SHA256SUMS-windows.txt
+          Get-Content SHA256SUMS-windows.txt
+
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -75,6 +87,7 @@ jobs:
           path: |
             dist/HubMoon-Setup-*.exe
             dist/HubMoon-*-windows-portable.zip
+            dist/SHA256SUMS-windows.txt
           if-no-files-found: error
 
       - name: Attach to release (tagged builds only)
@@ -84,3 +97,4 @@ jobs:
           files: |
             dist/HubMoon-Setup-*.exe
             dist/HubMoon-*-windows-portable.zip
+            dist/SHA256SUMS-windows.txt

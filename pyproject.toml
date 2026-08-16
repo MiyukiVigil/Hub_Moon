@@ -4,7 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hub-moon"
-version = "1.0.0"
+# Read from moondrop_control.__version__ — the one place the version is written.
+# setuptools resolves `attr:` by parsing the module's AST, so this does NOT import
+# moondrop_control and therefore does not need hidapi present to build a wheel.
+dynamic = ["version"]
 description = "Control the parametric EQ on Moondrop USB DACs over USB HID — CLI + desktop GUI."
 readme = "readme.md"
 requires-python = ">=3.9"
@@ -37,6 +40,9 @@ hub-moon-gui = "gui.app:main"
 # keep the CLI a single top-level module, exactly as it ships today
 py-modules = ["moondrop_control"]
 
+[tool.setuptools.dynamic]
+version = { attr = "moondrop_control.__version__" }
+
 [tool.setuptools.packages.find]
 include = ["gui*"]
 
@@ -46,4 +52,7 @@ include = ["gui*"]
 [tool.setuptools.package-data]
 gui = [
   "ui/*.slint",
+  # the window icon, loaded by @image-url from app.slint at startup — data, not an
+  # asset the build consumes, so it has to be in the installed package
+  "ui/*.png",
 ]

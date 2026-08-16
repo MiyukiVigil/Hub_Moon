@@ -78,6 +78,17 @@ jobs:
           ./nfpm pkg --packager deb -f packaging/nfpm.yaml -t dist/
           ./nfpm pkg --packager rpm -f packaging/nfpm.yaml -t dist/
 
+      # Hashed here, on the runner that built them, which is the only place the bytes
+      # are known to be the ones that came out of the build. tools/build-update-manifest.py
+      # reads these instead of re-downloading 200 MB of installers to hash them again,
+      # and anyone can check a download against the same file by hand.
+      - name: Checksums
+        run: |
+          cd dist
+          sha256sum HubMoon-*-linux-x86_64.tar.gz HubMoon-*-x86_64.AppImage \
+                    *.deb *.rpm > SHA256SUMS-linux.txt
+          cat SHA256SUMS-linux.txt
+
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -87,6 +98,7 @@ jobs:
             dist/HubMoon-*-x86_64.AppImage
             dist/*.deb
             dist/*.rpm
+            dist/SHA256SUMS-linux.txt
           if-no-files-found: error
 
       - name: Attach to release (tagged builds only)
@@ -98,3 +110,4 @@ jobs:
             dist/HubMoon-*-x86_64.AppImage
             dist/*.deb
             dist/*.rpm
+            dist/SHA256SUMS-linux.txt

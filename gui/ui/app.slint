@@ -1410,15 +1410,54 @@ component SettingRow inherits HorizontalLayout {
     @children
 }
 
+// A flat progress bar. Not a component library's — this needs exactly one thing, and
+// the width of a filled rectangle is exactly that one thing.
+component Meter inherits Rectangle {
+    in property <float> value;      // 0..1
+    height: 5px;
+    border-radius: 3px;
+    background: Theme.card-2;
+    Rectangle {
+        x: 0px;
+        width: parent.width * clamp(root.value, 0.0, 1.0);
+        height: parent.height;
+        border-radius: 3px;
+        background: Theme.accent;
+        animate width { duration: Theme.settle; easing: ease-out; }
+    }
+}
+
 component SettingsSheet inherits Rectangle {
     in property <bool> dark;
     in property <bool> readout;
     in property <int> accent-index;
+    in property <string> settings-path;
+    in property <string> app-version;
+    in property <string> update-state;
+    in property <string> update-note;
+    in property <string> update-version;
+    in property <string> update-hint;
+    in property <string> update-reason;
+    in property <float> update-progress;
+    in property <bool> update-can-install;
+    in property <int> update-channel;
+    in property <bool> update-auto;
+    in property <string> install-note;
     callback closed();
     callback dark-picked(bool);
     callback readout-picked(bool);
     callback accent-picked(int);
     callback welcome-again();
+    callback check-clicked();
+    callback install-clicked();
+    callback skip-clicked();
+    callback channel-picked(int);
+    callback auto-picked(bool);
+    callback logs-clicked();
+    callback notes-clicked();
+
+    property <bool> busy: root.update-state == "checking"
+        || root.update-state == "downloading" || root.update-state == "staged";
 
     background: Theme.card;
     border-radius: Theme.r-lg;
@@ -1431,11 +1470,64 @@ component SettingsSheet inherits Rectangle {
         spacing: 8px;
 
         SheetHead {
-            title: "Appearance";
-            note: "saved to ~/.config/hub-moon/settings.json";
+            title: "Settings";
+            note: root.settings-path;
             closed => { root.closed(); }
         }
         Rectangle { height: 1px; background: Theme.line; }
+
+        // Pinned above the scroll area, and only while there is something to act on.
+        // The Updates section further down is where the channel and the toggle live,
+        // but a waiting update must not be something you have to scroll to find —
+        // most people open this sheet to change the theme and would never see it.
+        if root.busy || root.update-state == "available": Rectangle {
+            height: banner.preferred-height + 20px;
+            border-radius: Theme.r-sm;
+            background: Theme.accent-soft;
+            banner := HorizontalLayout {
+                padding: 10px;
+                spacing: 10px;
+                VerticalLayout {
+                    alignment: center;
+                    horizontal-stretch: 1;
+                    spacing: 2px;
+                    Text {
+                        text: root.update-state == "available"
+                            ? "Hub Moon " + root.update-version + " is available"
+                            : root.update-state == "staged" ? "Update ready"
+                            : root.update-state == "downloading" ? "Downloading update"
+                            : "Checking for updates";
+                        color: Theme.text;
+                        font-size: 13px;
+                        font-weight: 700;
+                    }
+                    Text {
+                        text: root.update-note;
+                        color: Theme.sub;
+                        font-size: 11px;
+                        wrap: word-wrap;
+                    }
+                    if root.update-state == "downloading" || root.update-state == "staged":
+                        Meter { value: root.update-progress; }
+                }
+                if root.update-state == "available" && root.update-can-install:
+                    VerticalLayout {
+                        alignment: center;
+                        TextBtn {
+                            label: "Install";
+                            icon: Icons.download;
+                            primary: true;
+                            clicked => { root.install-clicked(); }
+                        }
+                    }
+            }
+        }
+
+        Flickable {
+        viewport-height: sheet.preferred-height;
+        sheet := VerticalLayout {
+        spacing: 8px;
+        padding-right: 2px;
 
         SettingRow {
             label: "Theme";
@@ -1521,7 +1613,158 @@ component SettingsSheet inherits Rectangle {
             font-size: 11px;
             wrap: word-wrap;
         }
+
+        // ── updates ──
+        Rectangle { height: 8px; }
+        Text {
+            text: "UPDATES";
+            color: Theme.faint;
+            font-size: 10px;
+            font-weight: 700;
+            letter-spacing: 1.1px;
+        }
+        Rectangle { height: 1px; background: Theme.line; }
+
+        SettingRow {
+            label: "Check for updates";
+            note: root.install-note;
+            VerticalLayout {
+                alignment: center;
+                Segmented {
+                    left: "Off";
+                    right: "On";
+                    on-right: root.update-auto;
+                    picked(v) => { root.auto-picked(v); }
+                }
+            }
+        }
+        Rectangle { height: 1px; background: Theme.line; }
+
+        SettingRow {
+            label: "Channel";
+            note: "Stable is the tagged release. Beta is what is being tested next — newer, and the reason the changelog has an \"unreleased\" section.";
+            VerticalLayout {
+                alignment: center;
+                Segmented {
+                    left: "Stable";
+                    right: "Beta";
+                    on-right: root.update-channel == 1;
+                    picked(v) => { root.channel-picked(v ? 1 : 0); }
+                }
+            }
+        }
+        Rectangle { height: 1px; background: Theme.line; }
+
+        // The status block. One row, and what it offers depends entirely on where the
+        // check got to — there is no state in which every button is meaningful, so
+        // none of them are shown greyed out waiting to become so.
+        VerticalLayout {
+            padding-top: 10px;
+            padding-bottom: 10px;
+            spacing: 8px;
+
+            HorizontalLayout {
+                spacing: 10px;
+                VerticalLayout {
+                    alignment: center;
+                    horizontal-stretch: 1;
+                    spacing: 3px;
+                    Text {
+                        text: root.update-state == "available"
+                            ? "Hub Moon " + root.update-version + " is available"
+                            : "You are running Hub Moon " + root.app-version;
+                        color: root.update-state == "available" ? Theme.accent : Theme.text;
+                        font-size: 13px;
+                        font-weight: 600;
+                    }
+                    Text {
+                        text: root.update-note == ""
+                            ? "Nothing has been checked yet this session."
+                            : root.update-note;
+                        color: Theme.faint;
+                        font-size: 11px;
+                        wrap: word-wrap;
+                    }
+                }
+                VerticalLayout {
+                    alignment: center;
+                    TextBtn {
+                        label: root.update-state == "checking" ? "Checking…" : "Check now";
+                        icon: Icons.refresh;
+                        enabled: !root.busy;
+                        clicked => { root.check-clicked(); }
+                    }
+                }
+            }
+
+            if root.update-state == "downloading" || root.update-state == "staged":
+                Meter { value: root.update-progress; }
+
+            if root.update-state == "available": HorizontalLayout {
+                spacing: 8px;
+                // An install this app must not perform says so, and shows the command
+                // that will, rather than offering a button that cannot keep its word.
+                if root.update-can-install: TextBtn {
+                    label: "Download and install";
+                    icon: Icons.download;
+                    primary: true;
+                    clicked => { root.install-clicked(); }
+                }
+                TextBtn {
+                    label: "Release notes";
+                    icon: Icons.note;
+                    clicked => { root.notes-clicked(); }
+                }
+                TextBtn {
+                    label: "Skip this one";
+                    icon: Icons.close;
+                    clicked => { root.skip-clicked(); }
+                }
+                Rectangle { horizontal-stretch: 1; }
+            }
+
+            if root.update-state == "available" && !root.update-can-install: Rectangle {
+                height: cmd.preferred-height + 18px;
+                border-radius: Theme.r-sm;
+                background: Theme.card-2;
+                border-width: 1px;
+                border-color: Theme.line-2;
+                cmd := VerticalLayout {
+                    padding: 9px;
+                    spacing: 3px;
+                    Text {
+                        text: root.update-reason;
+                        color: Theme.faint;
+                        font-size: 11px;
+                        wrap: word-wrap;
+                    }
+                    Text {
+                        text: root.update-hint;
+                        color: Theme.text;
+                        font-size: 12px;
+                        font-family: "monospace";
+                        wrap: word-wrap;
+                    }
+                }
+            }
+        }
+        Rectangle { height: 1px; background: Theme.line; }
+
+        SettingRow {
+            label: "Diagnostics";
+            note: "Every session writes a log. If something goes wrong, that file is what a bug report needs.";
+            VerticalLayout {
+                alignment: center;
+                TextBtn {
+                    label: "Open log folder";
+                    icon: Icons.info;
+                    clicked => { root.logs-clicked(); }
+                }
+            }
+        }
         Rectangle { vertical-stretch: 1; }
+        }
+        }
     }
 }
 
@@ -1933,6 +2176,14 @@ component CommunitySheet inherits Rectangle {
 // ── window ──────────────────────────────────────────────────────────────────────
 export component MainWindow inherits Window {
     title: "Hub Moon";
+    // The window icon — the titlebar and the taskbar button. Not the same thing as the
+    // icon PyInstaller stamps into the .exe, which is what Explorer and the shortcut
+    // show; through 1.0.0 only that one was set, so Windows drew the shell's generic
+    // placeholder on the window itself. Rendered from packaging/hub-moon.svg, and it
+    // has to be a real file next to this one because .slint sources are compiled at
+    // startup. Wayland has no protocol for window icons and ignores it; X11, Windows
+    // and macOS all use it.
+    icon: @image-url("hub-moon.png");
     background: Theme.bg;
     preferred-width: 1240px;
     preferred-height: 820px;
@@ -1982,6 +2233,19 @@ export component MainWindow inherits Window {
     in property <string> preview-note;
     in property <string> preview-curve-path;
     in property <string> preview-flat-path;
+    in property <string> app-version;
+    in property <string> settings-path;
+    // "idle" | "checking" | "current" | "available" | "downloading" | "staged"
+    in property <string> update-state: "idle";
+    in property <string> update-note;
+    in property <string> update-version;
+    in property <string> update-hint;
+    in property <string> update-reason;
+    in property <float> update-progress;
+    in property <bool> update-can-install;
+    in property <int> update-channel;
+    in property <bool> update-auto;
+    in property <string> install-note;
 
     // ── everything the view can ask for ──
     callback refresh();
@@ -2019,6 +2283,13 @@ export component MainWindow inherits Window {
     callback preview-apply();
     callback preview-close();
     callback dismiss-toast();
+    callback check-update();
+    callback install-update();
+    callback skip-update();
+    callback set-channel(int);
+    callback set-auto-update(bool);
+    callback open-logs();
+    callback open-notes();
 
     property <bool> sheet-open: root.help-open || root.hub-open || root.settings-open;
 
@@ -2439,15 +2710,37 @@ export component MainWindow inherits Window {
         x: (root.width - self.width) / 2;
         y: 60px;
         width: min(620px, root.width - 80px);
-        height: 306px;
+        // Taller than the 306px it was, and scrolling inside: the sheet grew an update
+        // section, and a fixed height that no longer fits its content is a panel with
+        // controls silently clipped off the bottom of it.
+        height: min(700px, root.height - 130px);
         dark: root.dark;
         readout: root.readout;
         accent-index: root.accent-index;
+        settings-path: root.settings-path;
+        app-version: root.app-version;
+        update-state: root.update-state;
+        update-note: root.update-note;
+        update-version: root.update-version;
+        update-hint: root.update-hint;
+        update-reason: root.update-reason;
+        update-progress: root.update-progress;
+        update-can-install: root.update-can-install;
+        update-channel: root.update-channel;
+        update-auto: root.update-auto;
+        install-note: root.install-note;
         closed => { root.toggle-settings(); }
         dark-picked(v) => { root.set-dark(v); }
         readout-picked(v) => { root.set-readout(v); }
         accent-picked(i) => { root.set-accent(i); }
         welcome-again => { root.show-welcome(); }
+        check-clicked => { root.check-update(); }
+        install-clicked => { root.install-update(); }
+        skip-clicked => { root.skip-update(); }
+        channel-picked(i) => { root.set-channel(i); }
+        auto-picked(v) => { root.set-auto-update(v); }
+        logs-clicked => { root.open-logs(); }
+        notes-clicked => { root.open-notes(); }
     }
     if root.help-open: HelpSheet {
         x: (root.width - self.width) / 2;

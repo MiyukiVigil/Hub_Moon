@@ -164,7 +164,60 @@ python3 moondrop_control.py --preset <uuid>                # one curve, as bands
 # Diagnostics and scripting
 python3 moondrop_control.py --stream-status   # ALSA sample rate/format (Linux only)
 python3 moondrop_control.py --json            # full device state as JSON on stdout
+
+# Version and updates (open no device, install nothing)
+python3 moondrop_control.py --version
+python3 moondrop_control.py --check-update                 # the stable channel
+python3 moondrop_control.py --check-update --channel beta
 ```
+
+## Updates
+
+The desktop app can check whether a newer Hub Moon has been released: one small
+manifest over HTTPS, cached for a day, compared against the running version. There are
+two channels — **stable**, published from the `main` branch, and **beta**, published
+from `test` — and Settings has a toggle for each.
+
+**It only installs itself where doing so is safe.** Hub Moon ships ten ways, and half
+of them are owned by a package manager; an app that overwrites files `dpkg` believes it
+owns has broken the system it was trying to update. So it works out how this particular
+copy got here and acts accordingly:
+
+| How you installed it | What the update button does |
+| --- | --- |
+| Windows installer | downloads and runs the new one — it upgrades in place |
+| Windows portable zip | swaps the extracted folder and restarts |
+| macOS `.app` | mounts the `.dmg`, de-quarantines and re-signs the bundle, swaps it |
+| AppImage | replaces the single file and restarts |
+| Linux tarball | swaps the unpacked directory and restarts |
+| `.deb` / `.rpm` / AUR / Nix | **nothing** — it shows you the right command |
+| `pip` / `pipx` | **nothing** — it shows you `pipx upgrade hub-moon` |
+
+Every download is checked against a SHA-256 taken from the manifest, and an asset with
+no checksum is refused rather than trusted. That is the whole security model: the
+manifest is served over TLS from a domain this project controls, so if the manifest is
+authentic the download is. **There is no code signature on any platform** — the Windows
+installer is unsigned and the macOS bundle is only ad-hoc signed — so this protects you
+against a corrupted download, not against somebody who can serve you a manifest.
+
+Checking defaults to **on** where Hub Moon ships the build itself and **off** where a
+package manager owns it, because there is nothing an update check can tell a `pacman`
+user that `-Syu` will not. `HUB_MOON_NO_UPDATE_CHECK=1` disables it everywhere without
+opening the app.
+
+### Where Hub Moon keeps its files
+
+| | Linux | macOS | Windows |
+| --- | --- | --- | --- |
+| settings | `~/.config/hub-moon` | `~/Library/Application Support/HubMoon` | `%APPDATA%\HubMoon` |
+| preset cache | `~/.cache/hub_moon` | `~/Library/Caches/HubMoon` | `%LOCALAPPDATA%\HubMoon\Cache` |
+| log | `~/.local/state/hub-moon` | `~/Library/Logs/HubMoon` | `%LOCALAPPDATA%\HubMoon\Logs` |
+
+Every session writes to that log, and an unhandled error — on the UI thread or on any
+worker — is recorded there with its traceback. **If you are reporting a bug, that file
+is what to attach**; Settings has an *Open log folder* button. Before 1.1.0 every
+platform used the Linux paths; an existing config is copied to the new location on
+first run, and the Linux paths have not changed.
 
 ## Community presets
 
@@ -228,10 +281,19 @@ The official web app allows up to +12 dB and does **not** clamp. Its JS packs co
 
 ## Thanks
 
-- **[AndrewYii](https://github.com/AndrewYii)** — tested Hub Moon on **Windows 11**,
-  which is the only reason the Windows build is known to work at all. Everything else
-  here was developed and verified on Linux against a single DAWN PRO2, so a second pair
-  of hands on a second platform is worth more than it sounds.
+Hub Moon was written on one Linux machine against one DAWN PRO2. Everything it can claim
+beyond that setup, it can claim because someone else ran it and said what happened.
+
+- **[AndrewYii](https://github.com/AndrewYii)** — ran the packaged build on
+  **Windows 11**: it installs, launches, the interface renders, and the community library
+  loads and searches. No DAC was attached.
+- **[NyChieng](https://github.com/NyChieng)** — ran the same build on a second **Windows**
+  machine, again through the interface and the community browser. One report is an
+  anecdote; two on different machines is the difference between "it worked once" and
+  something a stranger can be told to download.
+
+A second pair of hands on a second platform is worth more than it sounds — if you run it
+on a device or an OS listed as untested below, please open an issue and say so.
 
 ## Disclaimer
 
@@ -251,8 +313,29 @@ Flash persistence was confirmed across a physical unplug/replug: the flashed con
 
 The desktop GUI was exercised on the same DAWN PRO2: device reads, live band writes through the GUI's own code path with a verified read-back, drag-to-edit on the graph, presets, JSON import/export, the community library, and both graph views. It was also run under a fontconfig sandbox with Material Symbols removed, to confirm the icons render without any font installed.
 
-On **Windows 11**, the packaged build was tested by [AndrewYii](https://github.com/AndrewYii) — see [Thanks](#thanks).
+On **Windows**, the packaged build was exercised by [AndrewYii](https://github.com/AndrewYii)
+(Windows 11) and [NyChieng](https://github.com/NyChieng) on a second machine: installation,
+launch, the interface, and the community library. **Neither had a DAC attached**, so USB HID
+reads and writes on Windows are still untested — see [Thanks](#thanks).
 
-Not yet exercised on hardware: the interactive panel (`-i`), macOS, and **every device other than the DAWN PRO2**.
+On **macOS**, the packaged `.dmg` was installed and run on an **M4 MacBook Air** (Apple
+Silicon). It is ad-hoc signed rather than notarized, so the first launch needs a
+right-click → Open.
+
+The 1.1.0 work was verified on Linux: the quit crash was reproduced against CPython
+3.12 — the version the release builds are made with — and the fix confirmed on 3.11,
+3.12 and 3.14; the update check, channel switching, download, checksum verification and
+refusal-on-mismatch were all exercised against a local manifest; and the frozen
+PyInstaller bundle was built and run, quitting cleanly with exit code 0.
+
+**The Windows and macOS fixes in 1.1.0 have not been run on Windows or macOS.** The quit
+crash is platform-independent and its fix is proven; the file-chooser, config-path and
+window-icon changes are not — they were written against each platform's documented
+behaviour and compile, but nobody has yet double-clicked the 1.1.0 `.exe`. The
+self-update paths for the Windows installer, the portable zip and the `.app` are
+likewise unrun outside review; the AppImage and tarball paths were exercised on Linux.
+
+Not yet exercised on hardware: the interactive panel (`-i`), **USB HID on Windows**, and
+**every device other than the DAWN PRO2**.
 
 It writes to your DAC's flash. Export a backup with `--export-json` before experimenting.

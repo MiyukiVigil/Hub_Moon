@@ -11,6 +11,7 @@
 # smaller than the Qt runtime this replaced, and there are no plugins to chase — the
 # .slint sources above are compiled at startup and the icons are vectors in them.
 import os
+import re
 import sys
 from PyInstaller.utils.hooks import collect_all
 
@@ -18,11 +19,38 @@ from PyInstaller.utils.hooks import collect_all
 here = os.path.abspath(SPECPATH)
 repo = os.path.dirname(here)
 
+
+def _version():
+    """moondrop_control.__version__, read rather than imported.
+
+    Importing it here would need hidapi installed on the build machine, and the
+    alternative — a copy of the number in this file — is what let the macOS bundle
+    keep announcing 0.2.0 for the whole of 1.0.0.
+    """
+    src = open(os.path.join(repo, "moondrop_control.py"), encoding="utf-8").read()
+    m = re.search(r'^__version__\s*=\s*["\']([^"\']+)["\']', src, re.M)
+    if not m:
+        raise SystemExit("hub-moon.spec: no __version__ in moondrop_control.py")
+    return m.group(1)
+
+
+version = _version()
+
+# The whole gui/ui directory: the .slint sources, which are compiled at startup, and
+# hub-moon.png, which app.slint loads by @image-url as the window icon.
 datas = [
-    (os.path.join(repo, "gui", "ui"), "gui/ui"),   # .slint sources, compiled at startup
+    (os.path.join(repo, "gui", "ui"), "gui/ui"),
 ]
 binaries = []
-hiddenimports = ["hid"]                                     # hidapi's compiled module
+# hidapi ships `hid` as a compiled extension, so PyInstaller's binary analysis follows
+# it to the native library on its own (libhidapi-hidraw.so.0 / hidapi.dll). It is
+# named here anyway because nothing *imports* it by name until runtime.
+#
+# collect_dynamic_libs("hid") is deliberately NOT used: `hid` is a bare extension
+# module rather than a package, so that call collects nothing and only adds a warning
+# to the build log. What actually protects this path is moondrop_control refusing to
+# die silently when the import fails — see the ImportError handler there.
+hiddenimports = ["hid"]
 
 _d, _b, _h = collect_all("slint")
 datas += _d
@@ -68,8 +96,11 @@ if sys.platform == "darwin":
         info_plist={
             "CFBundleName": "Hub Moon",
             "CFBundleDisplayName": "Hub Moon",
-            "CFBundleShortVersionString": "0.2.0",
-            "CFBundleVersion": "0.2.0",
+            # Read from moondrop_control.__version__ above. Hardcoded through 1.0.0,
+            # where it had drifted to 0.2.0 — Get Info and the About panel both
+            # reported a version two releases old.
+            "CFBundleShortVersionString": version,
+            "CFBundleVersion": version,
             "NSHighResolutionCapable": True,
             "LSMinimumSystemVersion": "11.0",
             # a GUI-only agent still shows in the Dock; keep it a normal app

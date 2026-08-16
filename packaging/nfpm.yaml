@@ -3,14 +3,14 @@
 #
 #   1. build the bundle first (on Linux):  pyinstaller packaging/hub-moon.spec
 #   2. from the repo root:
-#        nfpm pkg --packager deb -f packaging/nfpm.yaml   # → hub-moon_1.0.0_amd64.deb
-#        nfpm pkg --packager rpm -f packaging/nfpm.yaml   # → hub-moon-1.0.0.x86_64.rpm
+#        nfpm pkg --packager deb -f packaging/nfpm.yaml   # → hub-moon_1.1.0_amd64.deb
+#        nfpm pkg --packager rpm -f packaging/nfpm.yaml   # → hub-moon-1.1.0.x86_64.rpm
 #
 # nfpm: https://nfpm.goreleaser.com  (a single Go binary, no toolchain)
 name: hub-moon
 arch: amd64            # nfpm maps this to x86_64 for rpm
 platform: linux
-version: 1.0.0
+version: 1.1.0
 release: 1
 section: sound
 priority: optional

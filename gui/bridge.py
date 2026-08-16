@@ -35,9 +35,12 @@ import json
 import math
 import os
 import queue
+import shutil
 import subprocess
 import sys
+import tempfile
 import threading
+from datetime import timedelta
 
 import slint
 from slint.slint import invoke_from_event_loop
@@ -49,6 +52,8 @@ except ImportError:
     import moondrop_control as mc  # noqa: E402
 
 from . import curve as curve_mod
+from . import updater
+from .diagnostics import log
 from .icons import PATHS as ICON_PATHS
 
 # A neutral 8-band example so the window is a usable playground with no DAC —
@@ -108,9 +113,10 @@ READOUT_COLS = [0.0, 0.13270, 0.23300, 0.33270, 0.46598,
 PREVIEW_W = 1000.0
 PREVIEW_H = 600.0
 
-SETTINGS_PATH = os.path.join(
-    os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"),
-    "hub-moon", "settings.json")
+# Platform-correct since 1.1.0 — %APPDATA% on Windows, ~/Library/Application Support
+# on macOS, unchanged XDG on Linux. mc.config_dir() is the single answer, and
+# mc.migrate_legacy_config() carries a 1.0.0 file across on the two that moved.
+SETTINGS_PATH = os.path.join(mc.config_dir(), "settings.json")
 
 # Q below ~0.1 is a filter so wide it is a tone control, above 10 so narrow it is a
 # ring. The device would take more; nothing musical lives out there.
@@ -257,10 +263,24 @@ def load_settings():
     except (OSError, json.JSONDecodeError):
         data = {}
     accent = data.get("accent", 0)
+    channel = data.get("channel")
+    # Update checking defaults on where we ship the build ourselves and OFF where a
+    # package manager owns the files. A distro package that phones home on launch is
+    # a thing packagers rightly patch out, and there is nothing this could offer a
+    # pacman or apt user that `-Syu` will not do better.
+    try:
+        auto_default = updater.can_self_update()
+    except Exception:
+        auto_default = False
     return {"dark": bool(data.get("dark", False)),
             "readout": bool(data.get("readout", False)),
             "accent": int(accent) if isinstance(accent, (int, float)) else 0,
-            "seen_welcome": bool(data.get("seen_welcome", False))}
+            "seen_welcome": bool(data.get("seen_welcome", False)),
+            "check_updates": bool(data.get("check_updates", auto_default)),
+            "channel": channel if channel in updater.CHANNELS else "stable",
+            # A version the user said no to. Offered once, then only again when
+            # something newer than it turns up.
+            "skipped_version": str(data.get("skipped_version", "") or "")}
 
 
 def save_settings(settings):
@@ -281,25 +301,57 @@ def suggest_pregain(bands):
     return round(_clamp(-curve_mod.peak_db(bands), PREGAIN_MIN, PREGAIN_MAX), 1)
 
 
+def _ps_quote(text):
+    """A PowerShell single-quoted literal. Inside one, the only metacharacter is the
+    quote itself, and it escapes by doubling — so a path can hold $, ` or & safely."""
+    return "'%s'" % str(text).replace("'", "''")
+
+
+def _as_quote(text):
+    """An AppleScript string literal: backslash and double quote escape, nothing else
+    is special."""
+    return '"%s"' % str(text).replace("\\", "\\\\").replace('"', '\\"')
+
+
 # ── workers ──────────────────────────────────────────────────────────────────
+
+# The sentinel that ends a worker's queue. It lives at module scope, and that is not
+# a style choice — it used to be `self._stop`, an instance attribute, which silently
+# shadowed `threading.Thread._stop`, a real method CPython calls from inside join():
+#
+#     join() -> _wait_for_tstate_lock() -> self._stop()
+#     TypeError: 'object' object is not callable
+#
+# So every quit raised, out of Bridge.stop(), through the `finally` in app.main(), and
+# the process exited non-zero. On Windows PyInstaller's windowed bootloader turns that
+# into an "Unhandled exception in script" dialog, which is where it was reported from;
+# the Linux and macOS bundles did exactly the same thing with nobody watching stderr.
+# It went unnoticed in development because CPython 3.13 deleted _wait_for_tstate_lock
+# and a 3.13+ interpreter never calls _stop at all — the bug is invisible on a modern
+# Python and fatal on the 3.12 the release builds are made with.
+#
+# Nothing on a Thread subclass may be named _stop, _start, _reset_internal_locks,
+# _bootstrap, _delete or _set_ident.
+_QUIT = object()
+
+
 class _Worker(threading.Thread):
     """One thread, one job queue, jobs run in the order they arrive."""
 
     def __init__(self, name):
         super().__init__(name=name, daemon=True)
         self._jobs: queue.Queue = queue.Queue()
-        self._stop = object()
 
     def submit(self, fn, *args):
         self._jobs.put((fn, args))
 
     def shutdown(self):
-        self._jobs.put((self._stop, ()))
+        self._jobs.put((_QUIT, ()))
 
     def run(self):
         while True:
             fn, args = self._jobs.get()
-            if fn is self._stop:
+            if fn is _QUIT:
                 return
             try:
                 fn(*args)
@@ -542,23 +594,99 @@ class IoWorker(_Worker):
         self._post("error", "File error: %s" % exc)
 
     @staticmethod
-    def _pick(save, suggestion):
-        """A native file chooser without a toolkit. Slint has no dialog of its own,
-        so this shells out to zenity, which every desktop that ships a portal also
-        ships. Returns None when it is missing or the user cancelled — the caller
-        falls back to a known path rather than failing."""
-        argv = ["zenity", "--file-selection", "--title",
-                "Export EQ profile" if save else "Import EQ profile",
-                "--file-filter=EQ profile (*.json) | *.json",
-                "--filename", suggestion]
-        if save:
-            argv += ["--save", "--confirm-overwrite"]
+    def _ask(argv, **kw):
+        """Run a chooser and return what it printed, or None if it did not run or the
+        user cancelled. Never lets a console window flash up behind a windowed build."""
+        if sys.platform == "win32":
+            kw["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         try:
-            done = subprocess.run(argv, capture_output=True, text=True, timeout=300)
-        except (OSError, subprocess.TimeoutExpired):
+            done = subprocess.run(argv, capture_output=True, text=True,
+                                  timeout=600, **kw)
+        except (OSError, subprocess.SubprocessError):
             return None
-        path = done.stdout.strip()
-        return path or None
+        if done.returncode != 0:
+            return None                    # cancelled, or the tool is not installed
+        return done.stdout.strip() or None
+
+    @staticmethod
+    def _pick(save, suggestion):
+        """A native file chooser without a toolkit.
+
+        Slint has no dialog of its own, so this asks the desktop for one. Through
+        1.0.0 that meant zenity and *only* zenity — a program that exists on neither
+        Windows nor macOS, which quietly made Import and Export dead controls on both:
+        the chooser never appeared, `_pick` returned None, and the app reported that
+        the user had cancelled something they were never offered. Each platform now
+        gets the chooser it actually has.
+
+        Returns None when the user cancelled or nothing could be found to ask with;
+        the caller falls back to a known path rather than failing.
+        """
+        title = "Export EQ profile" if save else "Import EQ profile"
+        folder, name = os.path.split(suggestion)
+
+        if sys.platform == "win32":
+            # PowerShell driving WinForms' own dialog: present on every supported
+            # Windows, no dependency to ship, and it is the dialog users know. Run
+            # from a file rather than -Command so quoting cannot be got wrong, and
+            # -STA because the common dialogs require a single-threaded apartment.
+            ps = (
+                "Add-Type -AssemblyName System.Windows.Forms\n"
+                "$d = New-Object System.Windows.Forms.%sFileDialog\n"
+                "$d.Title = %s\n"
+                "$d.Filter = 'EQ profile (*.json)|*.json|All files (*.*)|*.*'\n"
+                "$d.FileName = %s\n"
+                "$d.InitialDirectory = %s\n"
+                "%s"
+                "if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK)"
+                " { [Console]::Out.Write($d.FileName) } else { exit 1 }\n"
+            ) % ("Save" if save else "Open",
+                 _ps_quote(title), _ps_quote(name), _ps_quote(folder),
+                 "$d.OverwritePrompt = $true\n$d.DefaultExt = 'json'\n" if save
+                 else "$d.CheckFileExists = $true\n")
+            fd, script = tempfile.mkstemp(prefix="hubmoon-pick-", suffix=".ps1")
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8-sig") as fh:
+                    fh.write(ps)
+                return IoWorker._ask(["powershell", "-NoProfile", "-STA",
+                                      "-ExecutionPolicy", "Bypass", "-File", script])
+            finally:
+                try:
+                    os.remove(script)
+                except OSError:
+                    pass
+
+        if sys.platform == "darwin":
+            # `choose file` is the Finder's own panel. It exits non-zero when the user
+            # cancels, which _ask already reads as None.
+            if save:
+                body = ('choose file name with prompt %s default name %s'
+                        ' default location POSIX file %s'
+                        % (_as_quote(title), _as_quote(name), _as_quote(folder or "/")))
+            else:
+                body = ('choose file with prompt %s of type {"json", "public.json"}'
+                        ' default location POSIX file %s'
+                        % (_as_quote(title), _as_quote(folder or "/")))
+            script = ('tell application "System Events" to activate\n'
+                      'set theFile to %s\n'
+                      'return POSIX path of theFile' % body)
+            return IoWorker._ask(["osascript", "-e", script])
+
+        # Linux and the rest: zenity where there is a portal, kdialog on the Plasma
+        # desktops that ship that instead. Chosen by which one *exists*, not by trying
+        # one and falling through — a cancel and a missing binary both look like "no
+        # path", so falling through would answer a cancelled dialog with another one.
+        if shutil.which("zenity"):
+            return IoWorker._ask(
+                ["zenity", "--file-selection", "--title", title,
+                 "--file-filter=EQ profile (*.json) | *.json", "--filename", suggestion]
+                + (["--save", "--confirm-overwrite"] if save else []))
+        if shutil.which("kdialog"):
+            return IoWorker._ask(
+                ["kdialog", "--title", title,
+                 "--getsavefilename" if save else "--getopenfilename",
+                 suggestion, "application/json"])
+        return None
 
     def export(self, payload, suggestion):
         path = self._pick(True, suggestion)
@@ -595,6 +723,65 @@ class IoWorker(_Worker):
                 self._post("error", "Unknown filter type %r in that file." % f.get("type"))
                 return
         self._post("imported", (data, os.path.basename(path)))
+
+
+def _net_message(exc):
+    """Turn a urllib failure into a sentence about the world rather than about
+    Python. "urlopen error [Errno -3]" tells a user nothing they can act on."""
+    import urllib.error
+    if isinstance(exc, urllib.error.HTTPError):
+        if exc.code == 404:
+            return "There is no update manifest for that channel yet."
+        return "The update server answered %s." % exc.code
+    text = str(exc)
+    if isinstance(exc, urllib.error.URLError) or "timed out" in text.lower():
+        return "Couldn't reach the update server — check the network and try again."
+    if "CERTIFICATE" in text.upper():
+        return "The update server's certificate could not be verified."
+    return "Update check failed: %s" % text
+
+
+class UpdateWorker(_Worker):
+    """The update check and the download, on a thread of their own.
+
+    Not the hub thread: a community index is ~4 MB with no pagination, and an update
+    check queued behind one would sit on "Checking…" for as long as the library takes.
+    Not the io thread either — that one is blocked for exactly as long as a user
+    leaves a file chooser open, which is unbounded.
+    """
+
+    def __init__(self, post):
+        super().__init__("updateworker")
+        self._post = post
+
+    def on_crash(self, exc):
+        self._post("update_error", _net_message(exc))
+
+    def check(self, channel, current, force):
+        try:
+            found = updater.check(channel, current=current, force=force)
+        except Exception as exc:
+            log.info("update check on %s could not complete: %s", channel, exc)
+            # A check the user asked for owes them an answer either way. One that
+            # ran by itself on launch says nothing: the app is not broken because
+            # a laptop opened on a train could not reach the internet.
+            self._post("update_error" if force else "update_quiet", _net_message(exc))
+            return
+        log.info("update check on %s: %s", channel,
+                 found["version"] if found else "already current")
+        self._post("update_result", found)
+
+    def install(self, update):
+        self._post("update_progress", (0, 0))
+        try:
+            updater.install(update, on_progress=lambda d, t:
+                            self._post("update_progress", (d, t)))
+        except Exception as exc:
+            log.error("staging %s failed", update.get("version"), exc_info=True)
+            self._post("update_error", str(exc))
+            return
+        log.info("update to %s is staged", update.get("version"))
+        self._post("update_staged", update.get("version", ""))
 
 
 # ── the bridge ───────────────────────────────────────────────────────────────
@@ -653,10 +840,23 @@ class Bridge:
         self._hub_model = None
         self._hub_sig = None
 
+        # ── updates ──
+        # "idle" | "checking" | "current" | "available" | "downloading" | "staged"
+        self.update_state = "idle"
+        self.update_found = None      # the dict from updater.check(), when there is one
+        self.update_note = ""
+        self.update_progress = 0.0
+        self.install_kind = updater.install_kind()
+        self.install_note = updater.describe_install(self.install_kind)
+        # Set once an updater helper is armed and waiting for this process to exit.
+        # app.main() reads it after the loop returns; nothing else may write it.
+        self.handing_over = False
+
         self.dev = DeviceWorker(self._post)
         self.hub = HubWorker(self._post)
         self.io = IoWorker(self._post)
-        for w in (self.dev, self.hub, self.io):
+        self.upd = UpdateWorker(self._post)
+        for w in (self.dev, self.hub, self.io, self.upd):
             w.start()
 
         window.refresh = self.refresh
@@ -694,6 +894,17 @@ class Bridge:
         window.preview_apply = self.preview_apply
         window.preview_close = self.preview_close
         window.dismiss_toast = lambda: (self.toast(""), self.push())
+        window.check_update = lambda: self.check_update(True)
+        window.install_update = self.install_update
+        window.skip_update = self.skip_update
+        window.set_channel = self.set_channel
+        window.set_auto_update = self.set_auto_update
+        window.open_logs = self.open_logs
+        window.open_notes = self.open_notes
+        window.app_version = mc.__version__
+        # The sheet used to print "~/.config/hub-moon/settings.json" as a literal,
+        # which stopped being true on two of the three platforms.
+        window.settings_path = "saved to " + SETTINGS_PATH
 
         # The view is handed the finished outline rather than a name: it has no way to
         # look a name up, and giving it one would mean a second copy of the icon table.
@@ -770,6 +981,50 @@ class Bridge:
             self._filter_hub()
         elif kind == "hub_bands":
             self._adopt_hub_bands(*payload)
+        elif kind == "update_result":
+            self.update_found = payload
+            if payload is None:
+                self.update_state = "current"
+                self.update_note = "Hub Moon %s is the latest on %s." % (
+                    mc.__version__, self.settings["channel"])
+            elif payload["version"] == self.settings["skipped_version"]:
+                # Offered once and declined. Say nothing until something newer lands.
+                self.update_state = "idle"
+                self.update_note = ""
+                self.update_found = None
+            else:
+                self.update_state = "available"
+                self.update_note = payload.get("summary") or ""
+        elif kind == "update_error":
+            self.update_state = "idle"
+            self.update_note = str(payload)
+            self.update_progress = 0.0
+        elif kind == "update_quiet":
+            # A background check that got nowhere. It leaves no trace in the UI, so
+            # the panel still reads "nothing has been checked yet" — which is true.
+            self.update_state = "idle"
+            self.update_progress = 0.0
+        elif kind == "update_progress":
+            done, total = payload
+            self.update_state = "downloading"
+            self.update_progress = (done / total) if total else 0.0
+            self.update_note = ("Downloading… %.1f MB" % (done / 1048576.0)
+                                if not total else
+                                "Downloading… %.1f of %.1f MB"
+                                % (done / 1048576.0, total / 1048576.0))
+        elif kind == "update_staged":
+            # The helper is armed and waiting on this process. Everything from here is
+            # about leaving quickly and cleanly — the device handle still has to be
+            # closed, so this quits the loop rather than calling os._exit().
+            self.update_state = "staged"
+            self.update_progress = 1.0
+            self.update_note = ("Hub Moon %s is ready. Closing to finish the update…"
+                                % payload)
+            self.handing_over = True
+            self.push()
+            slint.Timer.single_shot(timedelta(milliseconds=900),
+                                    slint.quit_event_loop)
+            return
         self.push()
 
     def _snapshot(self):
@@ -782,6 +1037,88 @@ class Bridge:
     # ── UI → workers ──
     def start(self):
         self.dev.submit(self.dev.refresh)
+        # The opening update check is quiet and cached: it only reaches the network
+        # once a day, it never raises, and it says nothing at all unless there is
+        # something newer than what is running. A check that announces "you are up to
+        # date" on every launch is a notification nobody asked for.
+        if self.settings["check_updates"]:
+            self.upd.submit(self.upd.check, self.settings["channel"],
+                            mc.__version__, False)
+
+    # ── updates ──
+    def check_update(self, force=False):
+        """Ask now. `force` is what the button does: bypass the cache, and report a
+        failure instead of swallowing it."""
+        self.update_state = "checking"
+        self.update_note = "Checking for updates…"
+        self.update_progress = 0.0
+        self.upd.submit(self.upd.check, self.settings["channel"],
+                        mc.__version__, bool(force))
+        self.push()
+
+    def install_update(self):
+        """Download the staged build and hand over to the helper that installs it."""
+        found = self.update_found
+        if not found:
+            return
+        if not found.get("can_install"):
+            # Nothing to do here but tell the truth: this install belongs to a package
+            # manager, and the command that updates it is already on screen.
+            self.toast("This build updates with:  %s" % found.get("hint", ""), False)
+            self.push()
+            return
+        self.update_state = "downloading"
+        self.update_progress = 0.0
+        self.update_note = "Starting download…"
+        self.upd.submit(self.upd.install, found)
+        self.push()
+
+    def skip_update(self):
+        """Not this one. Asked again only when something newer than it appears."""
+        if self.update_found:
+            self.settings["skipped_version"] = self.update_found["version"]
+            save_settings(self.settings)
+        self.update_found = None
+        self.update_state = "idle"
+        self.update_note = ""
+        self.push()
+
+    def set_channel(self, index):
+        """0 stable, 1 beta. Changing channel clears the skip — a version declined on
+        one channel says nothing about what the other is offering."""
+        channel = updater.CHANNELS[int(_clamp(int(index), 0, len(updater.CHANNELS) - 1))]
+        if channel == self.settings["channel"]:
+            return
+        self.settings["channel"] = channel
+        self.settings["skipped_version"] = ""
+        save_settings(self.settings)
+        self.update_found = None
+        self.check_update(True)
+
+    def set_auto_update(self, on):
+        self.settings["check_updates"] = bool(on)
+        save_settings(self.settings)
+        if not on:
+            self.update_found = None
+            self.update_state = "idle"
+            self.update_note = ""
+        self.push()
+
+    def open_logs(self):
+        from . import diagnostics
+        if not diagnostics.reveal_logs():
+            self.toast("The log is at %s" % diagnostics.log_path(), False)
+        self.push()
+
+    def open_notes(self):
+        url = ((self.update_found or {}).get("notes_url")
+               or "https://hubmoon.miyukivigil.tech/changelog.html")
+        try:
+            import webbrowser
+            webbrowser.open(url)
+        except Exception:
+            self.toast("Release notes: %s" % url, False)
+        self.push()
 
     def refresh(self):
         self.dev.submit(self.dev.refresh)
@@ -1204,11 +1541,26 @@ class Bridge:
         self.push()
 
     def stop(self):
+        """Close the DAC and let the workers finish — but never at the cost of the
+        exit itself.
+
+        Each join is guarded separately, and that is the shape 1.0.0 got wrong twice
+        over: one join raised (see _QUIT), and because the joins shared a loop the
+        other two workers were then never waited on at all. A worker wedged in a
+        blocking read must not be able to hold up the two that are not.
+        """
+        workers = (self.dev, self.hub, self.io, self.upd)
         self.dev.submit(self.dev.shutdown_device)
-        for w in (self.dev, self.hub, self.io):
+        for w in workers:
             w.shutdown()
-        for w in (self.dev, self.hub, self.io):
-            w.join(timeout=2.0)
+        for w in workers:
+            try:
+                w.join(timeout=2.0)
+            except Exception:
+                log.error("joining %s failed", w.name, exc_info=True)
+            else:
+                if w.is_alive():
+                    log.warning("%s did not finish within 2s", w.name)
 
     # ── push state into the view ──
     def toast(self, text, is_error=False):
@@ -1239,6 +1591,17 @@ class Bridge:
         w.hub_busy = self.hub_busy
         w.hub_note = self.hub_note
         w.hub_count = len(self.hub_visible)
+
+        w.update_state = self.update_state
+        w.update_note = self.update_note
+        w.update_progress = float(self.update_progress)
+        w.update_version = (self.update_found or {}).get("version", "")
+        w.update_can_install = bool((self.update_found or {}).get("can_install"))
+        w.update_hint = (self.update_found or {}).get("hint", "")
+        w.update_reason = (self.update_found or {}).get("reason", "")
+        w.update_channel = updater.CHANNELS.index(self.settings["channel"])
+        w.update_auto = self.settings["check_updates"]
+        w.install_note = self.install_note
 
         pv = self.preview
         w.preview_open = pv is not None
