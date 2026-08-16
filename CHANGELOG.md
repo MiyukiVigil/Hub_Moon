@@ -5,6 +5,94 @@ All notable changes to **moondrop_control.py** are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0b4] - 2026-08-16
+
+Everything b3 turned out to be missing once it was installed rather than built. Three
+of the four were invisible to the test suite in the same way — a test that checked a
+constant, or a state, where the thing that was broken was the behaviour on the other
+side of it.
+
+> **Updating from 1.2.0b1, b2 or b3 on a `.deb`, `.rpm` or Arch install needs one manual
+> hop.** Those builds report themselves as a loose tarball, so their updater tries to
+> overwrite `/opt/hub-moon` and stops with `no permission to replace /opt/hub-moon`.
+> The fix landed in b3, but b3's own updater cannot be the thing that delivers it — so
+> install this one with your package manager once, and every update after it works
+> from the button.
+
+### Fixed
+
+- **The palette picker did nothing.** `set_skin` clamped the index with
+  `len(SKINS) - 1`, and `SKINS` is a *count*, not a list — so every click raised
+  `TypeError: object of type 'int' has no len()` and the palette never changed. The
+  test that was supposed to cover this asserted `SKINS == 4` and never called the
+  callback, which is the whole lesson: both pickers are now driven through the
+  callbacks the UI is actually wired to, for every value and past both ends. The
+  accent picker's bound was a hardcoded `5` for the same reason and is now counted
+  from the table too.
+- **The window had no Wayland app id.** `class` came back empty from the compositor,
+  and on Wayland that is the key to everything outside the window: a taskbar or
+  switcher looks up `hub-moon.desktop` by it to find the icon, session managers group
+  by it, and a compositor matches window rules against it. A Hyprland rule targeting
+  `class:hub-moon` matched nothing, which looks exactly like a rule that was typed
+  wrong. It is `hub-moon` now — the basename of the installed desktop entry, which is
+  what makes the icon resolve — and a test keeps the two equal. X11 uses
+  `StartupWMClass` instead and was never affected.
+- **A manifest with no notes.** Every manifest this project has published carried
+  `"notes": []`, so the What's New panel, asked to preview a version not yet
+  installed, correctly had nothing to show. The cause was upstream of the app: the
+  build workflows publish a GitHub release with an empty body, and
+  `build-update-manifest.py` read the notes only from there. It now falls back to
+  CHANGELOG.md — the same extractor that compiles `gui/notes.py`, so what you read
+  before updating and what you read after come from one text. An unknown version
+  still gets no notes rather than the nearest ones: showing one release's notes under
+  another's heading would be the app stating something false about what you are about
+  to install.
+- The version matrix went red on a test that imports `gui.bridge`, which imports
+  slint — and that matrix installs `hidapi` and `pytest` only, deliberately, because
+  the CLI standing alone is part of what it proves. The test moved to the file that is
+  gated on slint. That gate is now a plain `try/except` rather than
+  `pytest.importorskip`, which from pytest 9.1 treats an importable-but-raising module
+  as a hard error and needs an `exc_type=` argument the older pytests in the matrix do
+  not accept.
+- **No packaged install had a `hub-moon` command.** The `.deb`, `.rpm`, Arch package,
+  AppImage and tarball are all the same PyInstaller bundle, whose frozen entry point
+  called `gui.app.main()` and nothing else — so they shipped a window and no command
+  line, while the readme and the Linux guide both documented `hub-moon --list`. The
+  frozen entry now dispatches: no arguments opens the window, which is what a desktop
+  launcher and a double-click do; any arguments hand over to the CLI's own `main()`,
+  which already knows how to open the GUI for `--gui`. Both names go on `PATH`.
+
+  The Windows bundle is built windowed and has no console, so what the CLI prints
+  there still goes nowhere — that is not made worse, since there was no CLI to print
+  at all, but it does mean this is a Linux and macOS affordance in a frozen build.
+- **The `/usr/bin` launcher was a symlink into `/opt`, and that broke building from
+  source on the same machine.** `python -m installer --destdir=…` resolves the target
+  path against the *live* filesystem before writing it, sees the link escape
+  `/usr/bin`, and refuses — so `makepkg -p PKGBUILD.local` failed with `Attempting to
+  write hub-moon-gui outside of the target directory` on any machine with the binary
+  package installed, which is exactly the machine a maintainer uses. Both launchers
+  are ordinary wrapper scripts now.
+- **A nudged fader, stepper or arrow key could not be undone.** Only a graph drag and
+  a wholesale replacement ever took a snapshot, so the commonest thing anybody wants
+  back was the one edit undo could not reach. Each edit is now tagged with the band
+  and the knob it moved, and a snapshot is taken when that *changes* — a fader dragged
+  across thirty frames stays one step, five taps of the same stepper stay one step,
+  and moving to a different control starts a new one.
+
+### Changed
+
+- **The download tables on the website are generated from the update manifests.** They
+  carry the exact URL, size and checksum the app itself verifies, so the links cannot
+  drift from what is published — which is what hand-written version strings did, with
+  install.html advertising 1.1.0 filenames long after they stopped being newest. Both
+  channels are listed, with the beta section explaining that switching is a setting in
+  the app rather than a different download.
+- **The readme leads with the desktop app.** It opened as documentation for a
+  command-line tool, which is what it was in 1.0.0 and has not been since — the CLI is
+  now framed as the same engine for scripting and front-ends.
+- **The changelog marks every release with its channel**, derived from the version
+  string rather than a list anybody has to maintain.
+
 ## [1.2.0b3] - 2026-08-16
 
 Everything in b2 that turned out to be wrong once it was installed rather than tested.
@@ -54,13 +142,6 @@ was done on.
   "Hub Moon 1.2.0b2 · from 1.2.0b2 · already installed and running", because
   `last_run_version` is set to the running version the moment the panel is first
   shown. There is no "from" when you open it yourself, so the chip is no longer drawn.
-- The version matrix went red on a test that imports `gui.bridge`, which imports
-  slint — and that matrix installs `hidapi` and `pytest` only, deliberately, because
-  the CLI standing alone is part of what it proves. The test moved to the file that is
-  gated on slint. That gate is now a plain `try/except` rather than
-  `pytest.importorskip`, which from pytest 9.1 treats an importable-but-raising module
-  as a hard error and needs an `exc_type=` argument the older pytests in the matrix do
-  not accept.
 - The new bridge tests aborted the interpreter partway through, naming a worker
   thread rather than anything in the test. A Bridge starts five workers, every row
   handed to Slint is a `PyStruct` pyo3 marks unsendable, and the cyclic collector runs

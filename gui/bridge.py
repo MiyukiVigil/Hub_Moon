@@ -205,24 +205,28 @@ def fmt_hz(f):
     return "%d" % round(f)
 
 
-def _skin_count():
-    """How many palettes theme.slint defines.
+def _table_count(prop):
+    """How many entries theme.slint's `prop` table has.
 
     Counted from the source rather than written down here, because the clamp on the
-    saved setting has to move when the table does — and a hardcoded 4 that is wrong is
-    a settings file that silently loses the palette somebody picked.
+    saved setting has to move when the table does — and a hardcoded bound that is
+    wrong is a settings file that silently loses the choice somebody made.
     """
     path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui", "theme.slint")
     try:
         with open(path, encoding="utf-8") as fh:
             body = fh.read()
-        table = body.split("out property <[Skin]> all:", 1)[1].split("];", 1)[0]
+        table = body.split(prop, 1)[1].split("];", 1)[0]
         return max(1, len(re.findall(r"\{\s*name:", table)))
     except Exception:
         return 1
 
 
-SKINS = _skin_count()
+# Counts, not lists. `len()` on one of these raised TypeError inside `set_skin`, so
+# every click on a palette threw and the picker silently did nothing — which is what
+# happens when a test asserts the constant and never calls the callback that uses it.
+SKINS = _table_count("out property <[Skin]> all:")
+ACCENTS = _table_count("out property <[Accent]> all:")
 
 
 def clamp_band(ftype, freq, gain, q):
@@ -2423,7 +2427,9 @@ class Bridge:
         button and the palette is everything else, so somebody who finds the warm
         mauve too present had nothing to reach for while there was only one ground.
         """
-        self.settings["skin"] = int(_clamp(int(index), 0, len(SKINS) - 1))
+        # SKINS is a count, not a list — `len()` on it raised TypeError, so every
+        # click on a palette threw and the picker did nothing at all.
+        self.settings["skin"] = int(_clamp(int(index), 0, SKINS - 1))
         save_settings(self.settings)
         self.push()
 
@@ -2431,7 +2437,7 @@ class Bridge:
         """The one accent, out of the table in theme.slint. It drives the primary
         action, the active state and the equalised curve — the reference and output
         traces are deliberately left alone."""
-        self.settings["accent"] = int(_clamp(int(index), 0, 5))
+        self.settings["accent"] = int(_clamp(int(index), 0, ACCENTS - 1))
         save_settings(self.settings)
         self.push()
 

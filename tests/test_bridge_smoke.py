@@ -568,6 +568,46 @@ def test_a_stepper_can_be_undone(plotted):
     assert plotted._band(1)["frequency"] == was
 
 
+# ── the theme pickers ────────────────────────────────────────────────────────
+#
+# These drive the callbacks the UI is wired to, not the constants behind them.
+# Asserting `SKINS == 4` passed happily while `set_skin` raised TypeError on every
+# click, because it clamped with `len(SKINS)` and SKINS is a count.
+
+@pytest.mark.parametrize("setter,key,count", [
+    ("set_skin", "skin", "SKINS"),
+    ("set_accent", "accent", "ACCENTS"),
+])
+def test_every_choice_can_actually_be_picked(bridge, setter, key, count):
+    from gui import bridge as bridge_mod
+    n = getattr(bridge_mod, count)
+    assert n > 1
+    for i in range(n):
+        getattr(bridge, setter)(i)
+        assert bridge.settings[key] == i
+        assert getattr(bridge.win, key + "_index") == i
+
+
+@pytest.mark.parametrize("setter,key,count", [
+    ("set_skin", "skin", "SKINS"),
+    ("set_accent", "accent", "ACCENTS"),
+])
+def test_an_out_of_range_choice_is_clamped_not_raised(bridge, setter, key, count):
+    from gui import bridge as bridge_mod
+    n = getattr(bridge_mod, count)
+    getattr(bridge, setter)(999)
+    assert bridge.settings[key] == n - 1
+    getattr(bridge, setter)(-7)
+    assert bridge.settings[key] == 0
+
+
+def test_a_picked_palette_survives_a_restart(bridge):
+    """It is written to settings.json, so the app has to come back on it."""
+    from gui.bridge import load_settings
+    bridge.set_skin(2)
+    assert load_settings()["skin"] == 2
+
+
 def test_the_bridge_agrees_with_the_palette_table(bridge):
     """The clamp on the saved setting is counted from theme.slint, so adding a palette
     cannot silently leave it unreachable.
@@ -583,3 +623,7 @@ def test_the_bridge_agrees_with_the_palette_table(bridge):
     with open(path, encoding="utf-8") as fh:
         table = fh.read().split("out property <[Skin]> all:", 1)[1].split("];", 1)[0]
     assert bridge_mod.SKINS == len(re.findall(r"\{\s*name:", table))
+
+    with open(path, encoding="utf-8") as fh:
+        acc = fh.read().split("out property <[Accent]> all:", 1)[1].split("];", 1)[0]
+    assert bridge_mod.ACCENTS == len(re.findall(r"\{\s*name:", acc))

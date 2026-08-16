@@ -17,6 +17,12 @@ from datetime import timedelta
 # generates cycles at any rate, so this is a safety net rather than a workload.
 _GC_EVERY = timedelta(seconds=5)
 
+# The Wayland app id, which must stay equal to the basename of the installed desktop
+# entry (`hub-moon.desktop`) — that is how a compositor finds the icon for a window.
+# Tested against the real file, because the two drifting apart is invisible until
+# somebody notices the app has no icon in their taskbar.
+APP_ID = "hub-moon"
+
 
 def _res_dir(sub):
     """Locate a bundled resource dir (``ui``), whether the app runs from source, an
@@ -83,6 +89,20 @@ def main(argv=None):
     import slint
 
     from .bridge import Bridge
+
+    # The Wayland app id. Without it the surface has an empty app_id, and on Wayland
+    # that is the key to almost everything outside the window: the compositor cannot
+    # match a window rule against it, taskbars and switchers cannot find
+    # hub-moon.desktop to take an icon from, and session managers cannot group it. It
+    # is not cosmetic — a Hyprland `windowrule ... class:hub-moon` silently matches
+    # nothing, which looks exactly like a rule that was typed wrong.
+    #
+    # It has to be the desktop file's basename, `hub-moon.desktop`, or the icon lookup
+    # misses. X11 uses StartupWMClass from that file instead and is unaffected.
+    try:
+        slint.set_xdg_app_id(APP_ID)
+    except Exception:
+        log.debug("could not set the xdg app id", exc_info=True)
 
     ui_file = os.path.join(_res_dir("ui"), "app.slint")
     try:

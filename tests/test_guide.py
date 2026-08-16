@@ -94,3 +94,39 @@ def test_every_palette_defines_both_halves():
         assert not missing, "%s is missing %s" % (name, sorted(missing))
         assert re.search(r'note:\s*"[^"]+"', e), "%s has no note" % name
 
+
+
+# ── the Wayland app id ───────────────────────────────────────────────────────
+
+def test_the_app_id_matches_the_desktop_entry():
+    """On Wayland the app id is the key to everything outside the window: window
+    rules, the taskbar icon, session grouping. It has to equal the basename of the
+    installed .desktop file or the icon lookup misses — and a Hyprland rule matching
+    a class the window does not have silently does nothing, which looks exactly like
+    a rule that was typed wrong.
+    """
+    import os
+    import re
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    with open(os.path.join(root, "gui", "app.py"), encoding="utf-8") as fh:
+        app_id = re.search(r'^APP_ID = "([^"]+)"', fh.read(), re.M).group(1)
+
+    desktop = os.path.join(root, "packaging", "hub-moon.desktop")
+    assert app_id == os.path.basename(desktop)[: -len(".desktop")]
+
+    with open(desktop, encoding="utf-8") as fh:
+        entry = dict(
+            ln.split("=", 1) for ln in fh.read().splitlines() if "=" in ln and not ln.startswith("["))
+    # The icon name is looked up in hicolor by this exact string.
+    assert entry["Icon"] == app_id
+    assert os.path.exists(os.path.join(root, "packaging", "hub-moon.svg"))
+
+
+def test_the_app_actually_sets_it():
+    """A constant nothing calls is worth nothing."""
+    import os
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(root, "gui", "app.py"), encoding="utf-8") as fh:
+        src = fh.read()
+    assert "set_xdg_app_id(APP_ID)" in src

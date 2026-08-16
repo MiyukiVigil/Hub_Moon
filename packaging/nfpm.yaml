@@ -16,7 +16,7 @@
 name: hub-moon
 arch: amd64            # nfpm maps this to x86_64 for rpm
 platform: linux
-version: 1.2.0b3
+version: 1.2.0b4
 release: 1
 section: sound
 priority: optional
@@ -32,10 +32,26 @@ contents:
   # the whole self-contained bundle
   - src: ./dist/hub-moon
     dst: /opt/hub-moon
-  # launcher on PATH → the bundled binary
-  - src: /opt/hub-moon/hub-moon
+  # Both names on PATH, as wrapper scripts rather than symlinks.
+  #
+  # Two names because the frozen binary is both: with arguments it is the CLI, with
+  # none it opens the window. Shipping only `hub-moon-gui` meant every packaged
+  # install had no `hub-moon` command, while the readme documented one.
+  #
+  # Scripts rather than symlinks because a symlink from /usr/bin into /opt breaks
+  # `python -m installer --destdir=…` on the same machine: it resolves the target
+  # path against the *live* filesystem before writing, sees the link escape
+  # /usr/bin, and refuses. That makes building the source package impossible on any
+  # machine with the binary package installed — which is exactly the machine a
+  # maintainer uses.
+  - src: ./packaging/hub-moon-launcher.sh
+    dst: /usr/bin/hub-moon
+    file_info:
+      mode: 0755
+  - src: ./packaging/hub-moon-launcher.sh
     dst: /usr/bin/hub-moon-gui
-    type: symlink
+    file_info:
+      mode: 0755
   # hidraw access without root
   - src: ./packaging/70-moondrop.rules
     dst: /usr/lib/udev/rules.d/70-moondrop.rules
