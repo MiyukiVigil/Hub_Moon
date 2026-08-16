@@ -1,60 +1,60 @@
 {
   "schema": 1,
-  "version": "1.2.0b2",
+  "version": "1.2.0b3",
   "channel": "beta",
-  "tag": "v1.2.0b2",
+  "tag": "v1.2.0b3",
   "date": "2026-08-16",
-  "summary": "v1.2.0b2",
-  "notes_url": "https://hubmoon.miyukivigil.tech/changelog.html#v1-2-0b2",
+  "summary": "v1.2.0b3",
+  "notes_url": "https://hubmoon.miyukivigil.tech/changelog.html#v1-2-0b3",
   "notes": [],
   "assets": {
     "arch-package": {
-      "url": "https://github.com/MiyukiVigil/Hub_Moon/releases/download/v1.2.0b2/hub-moon-1.2.0b2-1-x86_64.pkg.tar.zst",
-      "sha256": "cf254a1893e211520437c0f5094f58b984492e8d45e047f7ffe25c4a748dc5d7",
-      "size": 40229887,
-      "name": "hub-moon-1.2.0b2-1-x86_64.pkg.tar.zst"
+      "url": "https://github.com/MiyukiVigil/Hub_Moon/releases/download/v1.2.0b3/hub-moon-1.2.0b3-1-x86_64.pkg.tar.zst",
+      "sha256": "d11b86ae5f20196d79999579b148d7d95864dc1575e49a32bf54a9776661b9ea",
+      "size": 40259382,
+      "name": "hub-moon-1.2.0b3-1-x86_64.pkg.tar.zst"
     },
     "rpm-package": {
-      "url": "https://github.com/MiyukiVigil/Hub_Moon/releases/download/v1.2.0b2/hub-moon-1.2.0b2-1.x86_64.rpm",
-      "sha256": "f1b6ecc80d5b382781c0bee12b6a9201e6c06f54fbe71b379ca485bad459fb6f",
-      "size": 41774957,
-      "name": "hub-moon-1.2.0b2-1.x86_64.rpm"
+      "url": "https://github.com/MiyukiVigil/Hub_Moon/releases/download/v1.2.0b3/hub-moon-1.2.0b3-1.x86_64.rpm",
+      "sha256": "291b040a84a7158a161ada2bcf1c5e76c0e60b81f01c8f6da48dbd9cc0da0fda",
+      "size": 41784314,
+      "name": "hub-moon-1.2.0b3-1.x86_64.rpm"
     },
     "deb-package": {
-      "url": "https://github.com/MiyukiVigil/Hub_Moon/releases/download/v1.2.0b2/hub-moon_1.2.0b2-1_amd64.deb",
-      "sha256": "3bd3d4307d279ae6799f0ca11710e9947da3ffe71b296fd662b503cb409d614c",
-      "size": 41725618,
-      "name": "hub-moon_1.2.0b2-1_amd64.deb"
+      "url": "https://github.com/MiyukiVigil/Hub_Moon/releases/download/v1.2.0b3/hub-moon_1.2.0b3-1_amd64.deb",
+      "sha256": "fbe5037eda60010dde2b72efc9b2565af68b8ea59dd861b17878565f6a24b24c",
+      "size": 41754098,
+      "name": "hub-moon_1.2.0b3-1_amd64.deb"
     },
     "linux-tarball": {
-      "url": "https://github.com/MiyukiVigil/Hub_Moon/releases/download/v1.2.0b2/HubMoon-1.2.0b2-linux-x86_64.tar.gz",
-      "sha256": "be721577748969dfebfc76766df200d44f78162917d73612ac0dad7b3f58dfaf",
-      "size": 40923887,
-      "name": "HubMoon-1.2.0b2-linux-x86_64.tar.gz"
+      "url": "https://github.com/MiyukiVigil/Hub_Moon/releases/download/v1.2.0b3/HubMoon-1.2.0b3-linux-x86_64.tar.gz",
+      "sha256": "c50a007a11e0636e0c643097c5c652a8d3b3c03e63f77f497d7d53b34bbca688",
+      "size": 40955692,
+      "name": "HubMoon-1.2.0b3-linux-x86_64.tar.gz"
     },
     "macos-dmg-arm64": {
-      "url": "https://github.com/MiyukiVigil/Hub_Moon/releases/download/v1.2.0b2/HubMoon-1.2.0b2-macOS-arm64.dmg",
-      "sha256": "56112220a847c75b11cacdb0a1a8dd1c290a7850d6b136e8be8141a7b4f0be60",
-      "size": 22107250,
-      "name": "HubMoon-1.2.0b2-macOS-arm64.dmg"
+      "url": "https://github.com/MiyukiVigil/Hub_Moon/releases/download/v1.2.0b3/HubMoon-1.2.0b3-macOS-arm64.dmg",
+      "sha256": "f83d31afe6e8e632c02b2ae866df3e680b0401666b08e784f8063a60f1b5cbd4",
+      "size": 22134650,
+      "name": "HubMoon-1.2.0b3-macOS-arm64.dmg"
     },
     "windows-portable": {
-      "url": "https://github.com/MiyukiVigil/Hub_Moon/releases/download/v1.2.0b2/HubMoon-1.2.0b2-windows-portable.zip",
-      "sha256": "d8c6a28a4b33ede84c0e320f253f804d9bcfd38a6fbf6e7fa7432bef1d35eddf",
-      "size": 22535172,
-      "name": "HubMoon-1.2.0b2-windows-portable.zip"
+      "url": "https://github.com/MiyukiVigil/Hub_Moon/releases/download/v1.2.0b3/HubMoon-1.2.0b3-windows-portable.zip",
+      "sha256": "e49e370508e1e97f66536eddf45c3bdb619b5d33a6cd2c8a28d0999ac7b401bb",
+      "size": 22554654,
+      "name": "HubMoon-1.2.0b3-windows-portable.zip"
     },
     "appimage": {
-      "url": "https://github.com/MiyukiVigil/Hub_Moon/releases/download/v1.2.0b2/HubMoon-1.2.0b2-x86_64.AppImage",
-      "sha256": "0c429daf3a3db076d98b8584d05768e12114e060a9dc7c25dc907ae0dd6be348",
-      "size": 38271480,
-      "name": "HubMoon-1.2.0b2-x86_64.AppImage"
+      "url": "https://github.com/MiyukiVigil/Hub_Moon/releases/download/v1.2.0b3/HubMoon-1.2.0b3-x86_64.AppImage",
+      "sha256": "3141d802f3fbf3c387ea44fb2d0fd2392b78b7f53ce963bc01571cc0026236e0",
+      "size": 38291960,
+      "name": "HubMoon-1.2.0b3-x86_64.AppImage"
     },
     "windows-installer": {
-      "url": "https://github.com/MiyukiVigil/Hub_Moon/releases/download/v1.2.0b2/HubMoon-Setup-1.2.0b2.exe",
-      "sha256": "b5b272450dad78211e7c28473866df44b7605b9d60ee0ae42cf912ffea72717c",
-      "size": 18171553,
-      "name": "HubMoon-Setup-1.2.0b2.exe"
+      "url": "https://github.com/MiyukiVigil/Hub_Moon/releases/download/v1.2.0b3/HubMoon-Setup-1.2.0b3.exe",
+      "sha256": "e38c6be6524b1402d11f4aca13544aeaca9cb6353068c4cc278b1180a91f1437",
+      "size": 18191893,
+      "name": "HubMoon-Setup-1.2.0b3.exe"
     }
   }
 }
