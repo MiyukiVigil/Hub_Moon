@@ -1,0 +1,42 @@
+{
+  "schema": 1,
+  "version": "1.2.0b1",
+  "channel": "beta",
+  "tag": "v1.2.0b1",
+  "date": "2026-08-16",
+  "summary": "AutoEQ import, saved profiles, and a settings rework.",
+  "notes_url": "https://hubmoon.miyukivigil.tech/changelog.html#v1-2-0b1",
+  "notes": [],
+  "assets": {
+    "linux-tarball": {
+      "url": "https://github.com/MiyukiVigil/Hub_Moon/releases/download/v1.2.0b1/HubMoon-1.2.0b1-linux-x86_64.tar.gz",
+      "sha256": "80c4d37ba139195064a0a2012b0bd3bc14d6670f25a546bb3493de5dbc633a94",
+      "size": 40914888,
+      "name": "HubMoon-1.2.0b1-linux-x86_64.tar.gz"
+    },
+    "macos-dmg-arm64": {
+      "url": "https://github.com/MiyukiVigil/Hub_Moon/releases/download/v1.2.0b1/HubMoon-1.2.0b1-macOS-arm64.dmg",
+      "sha256": "ed56309b3549ea3b7d8dcbfd86cb0289fdf8de18831c5472fb7484b254bdc8e6",
+      "size": 22096539,
+      "name": "HubMoon-1.2.0b1-macOS-arm64.dmg"
+    },
+    "windows-portable": {
+      "url": "https://github.com/MiyukiVigil/Hub_Moon/releases/download/v1.2.0b1/HubMoon-1.2.0b1-windows-portable.zip",
+      "sha256": "8e0d71cb88664c7794dabeca359c216b83166e56b17c601ce7a9411bfee37899",
+      "size": 22523316,
+      "name": "HubMoon-1.2.0b1-windows-portable.zip"
+    },
+    "appimage": {
+      "url": "https://github.com/MiyukiVigil/Hub_Moon/releases/download/v1.2.0b1/HubMoon-1.2.0b1-x86_64.AppImage",
+      "sha256": "1ff3a7e04dbf7409668f45eacf01e17760e63c7dbd2e63448c7ed165f3f9afad",
+      "size": 38255096,
+      "name": "HubMoon-1.2.0b1-x86_64.AppImage"
+    },
+    "windows-installer": {
+      "url": "https://github.com/MiyukiVigil/Hub_Moon/releases/download/v1.2.0b1/HubMoon-Setup-1.2.0b1.exe",
+      "sha256": "6f1dbd9a496d5409f80562cf32e0d8a9225e856e8dcad685638c7841c55fcba9",
+      "size": 18159255,
+      "name": "HubMoon-Setup-1.2.0b1.exe"
+    }
+  }
+}
