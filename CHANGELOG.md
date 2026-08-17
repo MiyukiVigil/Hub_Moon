@@ -5,7 +5,38 @@ All notable changes to **moondrop_control.py** are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.2.0] - 2026-08-17
+
+**Stable.** Five betas, and the one that mattered was invisible to every test in the suite:
+a frozen build could not start a single system program, so most of what a packaged release
+does had been broken since the first one. That is fixed, CI now runs the binary it is about
+to ship, and the interface stopped pretending 1.6 seconds of entrance animation was polish.
+
+> **Updating from 1.1.0 or any 1.2.0 beta on a `.deb`, `.rpm` or Arch install needs one
+> manual hop.** Those builds report themselves as a loose tarball, so their updater tries to
+> overwrite `/opt/hub-moon` and stops. Install this one with your package manager once, and
+> every update after it works from the button.
+
+### Changed
+
+- **Every animation now runs on the theme's own timing.** Testers reported the interface
+  lagging — scrolling, the logo, the What's New panel — on machines with nothing else wrong
+  with them, and the cause was not performance. `theme.slint` defines `quick: 110ms` and
+  `settle: 220ms`, and seventeen animations bypassed both with hand-written values from 280ms
+  to **1150ms**, layered on top of entrance delays of up to **1200ms**.
+
+  The worst element on a freshly opened page did not finish appearing until roughly **1.66
+  seconds** after it opened. That is not a frame-rate problem and no hardware fixes it — which
+  is exactly why it reproduced on every tester's machine. It reads as lag because functionally
+  it *is* lag: the interface is not ready when you are.
+
+  Timing now comes from the tokens in every case, the twelve flat entrance delays are gone,
+  and the three cascading list staggers run on a new `Theme.stagger` of 14ms a row rather than
+  70–110ms. Worst case goes from ~1660ms to ~220ms.
+
+  The staggered reveal was deliberate, and losing it is the cost. A page that assembles itself
+  over a second and a half looks considered exactly once — the first time — and looks broken
+  every time after that, which is the view a tester has and a designer does not.
 
 ### Added
 

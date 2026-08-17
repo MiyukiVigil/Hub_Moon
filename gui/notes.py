@@ -9,6 +9,10 @@ installed from a release.
 
 
 NOTES = {
+    '1.2.0': [
+        'The bundle smoke test now runs on macOS and Windows too.',
+        "Every animation now runs on the theme's own timing.",
+    ],
     '1.2.0b5': [
         'A frozen build could not run any system program.',
         '--selftest, and CI now runs the binary it is about to ship.',

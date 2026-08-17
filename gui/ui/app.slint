@@ -1154,7 +1154,7 @@ component MoonMark inherits Rectangle {
         border-width: 2px;
         border-color: Theme.accent;
         opacity: root.shown ? 1.0 : 0.0;
-        animate width, opacity { duration: 620ms; easing: cubic-bezier(0.2, 0, 0, 1); }
+        animate width, opacity { duration: Theme.settle; easing: cubic-bezier(0.2, 0, 0, 1); }
     }
     // the crescent: a second disc in the page colour, offset, biting into the first
     Rectangle {
@@ -1165,7 +1165,7 @@ component MoonMark inherits Rectangle {
         border-radius: 54px;
         background: Theme.bg;
         opacity: root.shown ? 1.0 : 0.0;
-        animate x, opacity { duration: 760ms; delay: 120ms; easing: cubic-bezier(0.2, 0, 0, 1); }
+        animate x, opacity { duration: Theme.settle; easing: cubic-bezier(0.2, 0, 0, 1); }
     }
     // the reading
     for f[i] in root.a: Rectangle {
@@ -1178,7 +1178,14 @@ component MoonMark inherits Rectangle {
         background: Theme.accent;
         // The stagger is the whole trick: seven bars arriving together is a block,
         // arriving 70 ms apart is a sweep.
-        animate height, y { duration: 520ms; delay: 260ms + i * 70ms; easing: cubic-bezier(0.2, 0, 0, 1); }
+        //
+        // EXEMPT from the theme's entrance timing on purpose. This is not a reveal — it is a
+        // continuous visualiser re-driven by the 760ms timer below, and the numbers are chosen
+        // AGAINST that tick: the last bar starts at 6*70=420ms and runs 520ms, finishing past
+        // the next update, so the motion never lands. Retimed to the token pair it finished in
+        // ~320ms and then held still for the remaining 440ms of the tick, which reads as a pump
+        // rather than a sweep. Continuous motion has to outrun its own driver.
+        animate height, y { duration: 520ms; delay: i * 70ms; easing: cubic-bezier(0.2, 0, 0, 1); }
     }
     Timer {
         interval: 760ms;
@@ -1202,7 +1209,7 @@ component Splash inherits Rectangle {
     property <bool> leaving: root.stage >= 2;
 
     opacity: root.leaving ? 0.0 : 1.0;
-    animate opacity { duration: 280ms; easing: ease-out; }
+    animate opacity { duration: Theme.settle; easing: ease-out; }
 
     Timer {
         // stage 0 → 1: one tick after the first paint, so the animations have a state
@@ -1230,7 +1237,7 @@ component Splash inherits Rectangle {
             font-weight: 700;
             horizontal-alignment: center;
             opacity: root.shown ? 1.0 : 0.0;
-            animate opacity { duration: 460ms; delay: 340ms; }
+            animate opacity { duration: Theme.settle; }
         }
         Rectangle { height: 16px; }
         // A line that draws itself. Not a progress bar — it is not measuring anything —
@@ -1244,14 +1251,14 @@ component Splash inherits Rectangle {
                 border-radius: 2px;
                 background: Theme.well;
                 opacity: root.shown ? 1.0 : 0.0;
-                animate opacity { duration: 300ms; delay: 420ms; }
+                animate opacity { duration: Theme.settle; }
                 Rectangle {
                     x: 0px;
                     width: root.shown ? parent.width : 0px;
                     height: parent.height;
                     border-radius: 2px;
                     background: Theme.accent;
-                    animate width { duration: 1150ms; delay: 420ms; easing: cubic-bezier(0.3, 0, 0.2, 1); }
+                    animate width { duration: Theme.settle; easing: cubic-bezier(0.3, 0, 0.2, 1); }
                 }
             }
         }
@@ -1419,7 +1426,7 @@ component WelcomeCard inherits Rectangle {
     border-color: Theme.line;
     opacity: root.shown ? 1.0 : 0.0;
     y: root.shown ? 0px : 18px;
-    animate opacity, y { duration: 420ms; delay: 620ms + root.rank * 110ms; easing: cubic-bezier(0.2, 0, 0, 1); }
+    animate opacity, y { duration: Theme.settle; delay: root.rank * Theme.stagger; easing: cubic-bezier(0.2, 0, 0, 1); }
 
     VerticalLayout {
         padding: 14px;
@@ -1479,7 +1486,7 @@ component Welcome inherits Rectangle {
             font-weight: 700;
             horizontal-alignment: center;
             opacity: root.shown ? 1.0 : 0.0;
-            animate opacity { duration: 520ms; delay: 380ms; }
+            animate opacity { duration: Theme.settle; }
         }
         Text {
             text: "Parametric EQ for your Moondrop DAC — running on the device's own DSP.";
@@ -1487,7 +1494,7 @@ component Welcome inherits Rectangle {
             font-size: 13px;
             horizontal-alignment: center;
             opacity: root.shown ? 1.0 : 0.0;
-            animate opacity { duration: 520ms; delay: 480ms; }
+            animate opacity { duration: Theme.settle; }
         }
 
         Rectangle { height: 10px; }
@@ -1504,7 +1511,7 @@ component Welcome inherits Rectangle {
                 border-width: 1px;
                 border-color: root.connected ? Theme.good : Theme.line-2;
                 opacity: root.shown ? 1.0 : 0.0;
-                animate opacity { duration: 520ms; delay: 560ms; }
+                animate opacity { duration: Theme.settle; }
                 found := HorizontalLayout {
                     padding-left: 13px;
                     padding-right: 13px;
@@ -1585,7 +1592,7 @@ component Welcome inherits Rectangle {
             spacing: 10px;
             height: 38px;
             opacity: root.shown ? 1.0 : 0.0;
-            animate opacity { duration: 460ms; delay: 1080ms; }
+            animate opacity { duration: Theme.settle; }
             // Shown first when nothing is connected, because "is mine one of the
             // ones this works with" is the only question that matters at that point.
             if !root.connected: TextBtn {
@@ -1619,7 +1626,7 @@ component Welcome inherits Rectangle {
             font-size: 10px;
             horizontal-alignment: center;
             opacity: root.shown ? 1.0 : 0.0;
-            animate opacity { duration: 460ms; delay: 1200ms; }
+            animate opacity { duration: Theme.settle; }
         }
     }
 }
@@ -2979,7 +2986,7 @@ component NoteLine inherits Rectangle {
     animate background { duration: Theme.quick; easing: ease-out; }
     opacity: root.shown ? 1.0 : 0.0;
     x: root.shown ? 0px : 14px;
-    animate opacity, x { duration: 420ms; delay: 320ms + root.rank * 80ms; easing: cubic-bezier(0.2, 0, 0, 1); }
+    animate opacity, x { duration: Theme.settle; delay: root.rank * Theme.stagger; easing: cubic-bezier(0.2, 0, 0, 1); }
 
     hover := TouchArea { }
     line := HorizontalLayout {
@@ -3092,7 +3099,7 @@ component WhatsNew inherits Rectangle {
                         font-size: 25px;
                         font-weight: 700;
                         opacity: root.shown ? 1.0 : 0.0;
-                        animate opacity { duration: 460ms; delay: 200ms; easing: cubic-bezier(0.2, 0, 0, 1); }
+                        animate opacity { duration: Theme.settle; easing: cubic-bezier(0.2, 0, 0, 1); }
                     }
                     HorizontalLayout {
                         alignment: start;
@@ -3107,7 +3114,7 @@ component WhatsNew inherits Rectangle {
                             border-radius: 11px;
                             background: Theme.card;
                             opacity: root.shown ? 1.0 : 0.0;
-                            animate opacity { duration: 460ms; delay: 300ms; }
+                            animate opacity { duration: Theme.settle; }
                             chip := Text {
                                 text: (root.preview ? "you have " : "from ") + root.from-version;
                                 color: Theme.sub;
@@ -3127,7 +3134,7 @@ component WhatsNew inherits Rectangle {
                             font-size: 11.5px;
                             vertical-alignment: center;
                             opacity: root.shown ? 1.0 : 0.0;
-                            animate opacity { duration: 460ms; delay: 360ms; }
+                            animate opacity { duration: Theme.settle; }
                         }
                     }
                 }

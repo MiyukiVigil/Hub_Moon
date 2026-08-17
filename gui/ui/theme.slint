@@ -181,6 +181,12 @@ export global Theme {
     // whole app feels like one object rather than a dozen separately tuned widgets.
     out property <duration> quick: 110ms;
     out property <duration> settle: 220ms;
+    // Per-item offset for a list that reveals in order. Small enough that the last row of a
+    // long list is still on screen inside a blink — the entrance animations used to stagger at
+    // 70-110ms a row on top of delays of up to 1200ms, so the final element of a freshly opened
+    // page did not settle until ~1.6s in. Testers read that as the app lagging, which is the
+    // correct reading: the interface genuinely was not ready yet.
+    out property <duration> stagger: 14ms;
 }
 
 // The spectrum regions drawn behind the curve. Names and boundaries are the ones the
