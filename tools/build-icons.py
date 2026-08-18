@@ -82,8 +82,14 @@ def scan_ui(ligs, gname):
     checked, so a typo is a build error rather than a blank icon), while the preset
     table in bridge.py still names icons as plain strings. Both are collected and
     intersected with the real ligature table, which cannot miss one whatever syntax
-    carries it. The few false positives — a string that happens to share a name with an
-    icon, like "title" or "score" — cost a few hundred bytes each.
+    carries it.
+
+    The Python side is read as the table it is, not as loose string literals. Taking
+    every snake_case string in bridge.py used to be near enough — but the file has
+    grown strings like "settings", "source", "clear" and "verified" that mean nothing
+    of the kind, and each one silently baked a kilobyte of unused path data into the
+    build. Matching the table's own shape — name, then icon — cannot drift with the
+    prose around it.
     """
     def seq(t):
         """A name as the glyph sequence it shapes from, which is the key the ligature
@@ -99,8 +105,9 @@ def scan_ui(ligs, gname):
             # the font's ligature names use underscores, so they are mapped back.
             tokens |= {m.replace("-", "_")
                        for m in re.findall(r"\bIcons\.([a-z][a-z0-9-]{2,30})", text)}
-            # bare string literals, which is how the preset table in bridge.py names them
-            tokens |= set(re.findall(r'"([a-z][a-z0-9_]{2,30})"', text))
+            # the preset table's second column: ("Bass", "graphic_eq", …)
+            tokens |= set(re.findall(
+                r'^\s*\("[^"]+",\s*"([a-z][a-z0-9_]{2,30})"', text, re.M))
     return sorted(t for t in tokens if seq(t) in ligs), seq
 
 

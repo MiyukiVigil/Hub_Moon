@@ -12,7 +12,7 @@
       packages = forAll (pkgs: {
         default = pkgs.python3Packages.buildPythonApplication {
           pname = "hub-moon";
-          version = "1.2.0";
+          version = "2.0.0b1";
           src = ./.;
           pyproject = true;
 

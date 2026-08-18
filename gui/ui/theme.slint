@@ -179,14 +179,42 @@ export global Theme {
 
     // Motion. One duration and one curve for everything that is a state change, so the
     // whole app feels like one object rather than a dozen separately tuned widgets.
-    out property <duration> quick: 110ms;
-    out property <duration> settle: 220ms;
+    // Everything below is multiplied by this. 1.0 is the design, 0.5 halves it, 0 turns
+    // motion off outright — a duration of zero animates nothing, so one number reaches
+    // every animation in the app without any of them having to know it exists. Set from
+    // the bridge on launch and whenever the setting changes; Slint globals are writable
+    // from Python, which is what makes a single knob possible at all.
+    //
+    // It has to be a setting rather than a system preference: Slint cannot read the
+    // desktop's reduced-motion flag, and animation somebody cannot switch off is an
+    // accessibility problem, not a matter of taste.
+    in-out property <float> motion: 1.0;
+
+    out property <duration> quick: 110ms * Theme.motion;
+    out property <duration> settle: 220ms * Theme.motion;
+    // Opening or closing a whole surface — a sheet, a screen. Longer than `settle`
+    // because more of the window changes at once, and a panel that snaps in at 220ms
+    // reads as a jump cut rather than as something arriving.
+    out property <duration> screen: 260ms * Theme.motion;
+    // The mark's equaliser bars: an idle loop rather than a state change, and slower on
+    // purpose — this one is meant to be watched rather than noticed.
+    out property <duration> pulse: 520ms * Theme.motion;
+    out property <duration> pulse-step: 70ms * Theme.motion;
+
+    // Two curves, and which is which is not a matter of taste either. `ease-state` is
+    // for something changing where it already is — a hover, a colour, a toggle.
+    // `ease-enter` is for something arriving: it leaves quickly and settles slowly,
+    // which is what makes an entrance read as an entrance.
+    out property <easing> ease-state: ease-out;
+    out property <easing> ease-enter: cubic-bezier(0.2, 0, 0, 1);
+    // A bar filling, which is neither: it should start and stop as gently as it runs.
+    out property <easing> ease-bar: cubic-bezier(0.3, 0, 0.2, 1);
     // Per-item offset for a list that reveals in order. Small enough that the last row of a
     // long list is still on screen inside a blink — the entrance animations used to stagger at
     // 70-110ms a row on top of delays of up to 1200ms, so the final element of a freshly opened
     // page did not settle until ~1.6s in. Testers read that as the app lagging, which is the
     // correct reading: the interface genuinely was not ready yet.
-    out property <duration> stagger: 14ms;
+    out property <duration> stagger: 14ms * Theme.motion;
 }
 
 // The spectrum regions drawn behind the curve. Names and boundaries are the ones the

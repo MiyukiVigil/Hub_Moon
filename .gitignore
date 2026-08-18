@@ -39,3 +39,5 @@ site
 
 # icon-build tool cache (the 10 MB upstream Material Symbols font)
 /tools/.cache/
+
+docs

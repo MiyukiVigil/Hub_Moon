@@ -3,10 +3,14 @@
 Parametric EQ for Moondrop USB DACs, written to the device's own DSP over USB HID — without the
 official web app. The protocol was reverse engineered from https://hub.moondroplab.tech/.
 
-There are two ways in, and **for almost everybody it is the desktop app**:
+There are two ways in, and **for almost everybody it is the desktop app**. Install a
+package for your system and open **Hub Moon** from your launcher — that is all it takes,
+and there is no terminal in it.
 
 ```bash
-hub-moon --gui        # or the launcher the packages install
+hub-moon              # a packaged install: no arguments opens the window
+hub-moon --list       # any argument is the command line
+hub-moon-gui          # from pip, where bare `hub-moon` prints help instead
 ```
 
 The window shows the whole device on one screen: the response graph with a draggable handle per
@@ -128,7 +132,7 @@ anything it writes went through the same validation the CLI uses.
 
 ```bash
 pip install -r gui/requirements.txt     # adds slint; the CLI itself still needs only hidapi
-python3 moondrop_control.py --gui
+python3 moondrop_control.py --gui       # from a checkout, the flag is how you get the window
 ```
 
 - **Drag** a numbered handle on the graph to move that band, and **scroll** over the
@@ -156,7 +160,8 @@ python3 moondrop_control.py --gui
 
 Cross-platform via [Slint](https://slint.dev) (Linux/macOS/Windows), compiled to native
 widgets — no browser, no web view. It's an optional extra: the plain CLI keeps its
-two-dependencies-one-file footprint and only pulls in the toolkit when you pass `--gui`.
+two-dependencies-one-file footprint and only pulls in the toolkit when you actually open
+the window.
 
 ## Usage
 
@@ -169,7 +174,7 @@ python3 moondrop_control.py --info            # firmware, active profile, gains
 python3 moondrop_control.py --get-peq         # dump all PEQ slots
 python3 moondrop_control.py --registry        # device registry as JSON; opens no device
 
-# Desktop EQ GUI (needs slint)
+# Desktop EQ GUI (needs slint). A packaged install opens this from your launcher instead.
 python3 moondrop_control.py --gui
 
 # Interactive terminal tuning panel

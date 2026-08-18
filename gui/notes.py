@@ -9,6 +9,20 @@ installed from a release.
 
 
 NOTES = {
+    '2.0.0b1': [
+        'The window opened floating, and only on some machines.',
+        'Running the test suite rewrote your own settings.',
+        'An empty list collapsed the sheet it was in.',
+        'Notices stayed on screen forever. toast() set the text and nothing ever cleared it, so "Written to flash." sat over the interface until it was clicked or something else replaced it.',
+        "The DAC's own EQ profiles were being shown as your curve.",
+        'The profile stepper reported positions the DAC had refused.',
+        'A button could be wired to nothing and nobody would know.',
+        'The community library was slow to scroll, and slow just to sit there.',
+        'Thumbnails were drawn on the main thread.',
+        'A resize could have crashed the window.',
+        'The build baked in icons nothing draws.',
+        'One library instead of three panels that were the same panel.',
+    ],
     '1.2.0': [
         'The bundle smoke test now runs on macOS and Windows too.',
         "Every animation now runs on the theme's own timing.",

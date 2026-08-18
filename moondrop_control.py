@@ -28,7 +28,7 @@ import argparse
 # bundle, the GUI shows it, and the updater compares against it. Everything that
 # used to carry its own copy — and had already drifted, the .app was still
 # announcing 0.2.0 at 1.0.0 — now asks this.
-__version__ = "1.2.0"
+__version__ = "2.0.0b1"
 
 def system_env():
     """The environment to spawn a *system* program with.
@@ -547,6 +547,41 @@ def hub_resolve_file(preset):
         return None
 
 
+def hub_curve_cache_dir():
+    return os.path.join(HUB_CACHE, "curves")
+
+
+def hub_preset_raw(file_ref, timeout=20):
+    """The published curve file for `file_ref`, cached on disk forever.
+
+    Forever is not a shortcut. Unlike `presets-*.json`, which is a live index and
+    carries a day-long TTL, a file ref is content-addressed — `peq-config-file/
+    Gc3r9ri2Ub6xhaFMDOOez.txt` is the identity of *that curve*, not of the preset that
+    points at it. Editing a preset publishes a new file and the index starts pointing
+    somewhere else, so a cached file can never go stale; it can only become unused.
+
+    The whole of a DAWN PRO2's own uploads is around 750 KB at these sizes, which is
+    what makes classifying a library by what its curves do affordable at all.
+    """
+    name = re.sub(r"[^A-Za-z0-9_.-]", "_", file_ref.rsplit("/", 1)[-1])
+    path = os.path.join(hub_curve_cache_dir(), name)
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        pass                        # absent or corrupt: fetch it again
+    raw = json.loads(_hub_get(f"{HUB_CDN}/{file_ref}", timeout))
+    try:
+        os.makedirs(hub_curve_cache_dir(), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(raw, f)
+        os.replace(tmp, path)
+    except OSError:
+        pass                        # an uncacheable curve is still a usable one
+    return raw
+
+
 def hub_preset_bands(file_ref, band_count=None, timeout=20):
     """Fetch one preset's curve and map it onto our band model.
 
@@ -555,7 +590,7 @@ def hub_preset_bands(file_ref, band_count=None, timeout=20):
     Every field is a *string*, and filterType is optional.
     """
     band_count = band_count or DEFAULT_BANDS    # defined below this block
-    raw = json.loads(_hub_get(f"{HUB_CDN}/{file_ref}", timeout))
+    raw = hub_preset_raw(file_ref, timeout)
     bands, dropped = [], 0
     for i, b in enumerate(raw):
         if i >= band_count:

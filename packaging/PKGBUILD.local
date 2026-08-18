@@ -5,7 +5,7 @@
 # a pushed v$pkgver tag on GitHub.
 # Maintainer: MiyukiVigil
 pkgname=hub-moon
-pkgver=1.2.0
+pkgver=2.0.0b1
 pkgrel=1
 pkgdesc="Parametric EQ control for Moondrop USB DACs — CLI + native desktop GUI (local build)"
 arch=('any')

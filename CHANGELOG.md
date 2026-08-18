@@ -5,6 +5,367 @@ All notable changes to **moondrop_control.py** are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0b1] - 2026-08-18
+
+The first build on the **2.0** line, and on the **beta** channel — stable stays on
+1.2.0.
+
+2.0 is about discovery and distribution: finding a curve worth having, and knowing
+what you are listening to once you have it. The community library can now be filtered
+by what a curve *does* rather than by what somebody called it, every card draws its own
+shape, and a curve applied from anywhere carries its name with it afterwards.
+
+Underneath that, the app's ten overlapping panels became five screens on a stack, and
+three of them that were secretly the same screen became one. Six things the app was
+getting wrong are fixed along the way, all of them the kind no amount of new features
+would have covered up — and two of them were caught by looking at the window rather than
+by anything the test suite could see.
+
+### Fixed
+
+- **The window opened floating, and only on some machines.** On a tiling compositor
+  Hub Moon opened as a floating window rather than taking its place in the layout —
+  reliably from a packaged build, never from a source checkout, with no window rule
+  anywhere to explain it.
+
+  It was the app's own doing. A compositor decides float-versus-tile from the size
+  constraints on the surface's *first* commit, and takes that decision once. Slint's
+  first layout runs before any data has been pushed into the window, and with empty
+  models nothing in the tree stretches horizontally — so the computed maximum width
+  collapsed onto the declared minimum and the window mapped saying, in effect, *"I
+  cannot be wider than my own minimum"*:
+
+      -> xdg_toplevel#37.set_min_size(912, 700)
+      -> xdg_toplevel#37.set_max_size(980, 16777215)   ← a finite maximum WIDTH
+      -> wl_surface#35.commit()                        ← mapped; the decision is taken
+      …78 ms later…
+      -> xdg_toplevel#37.set_max_size(0, 0)            ← "actually, unbounded"
+
+  Slint corrects itself microseconds after the first buffer is attached, which is too
+  late. The frozen bundle and the source tree measure text slightly differently, land
+  on opposite sides of that race, and so disagreed about a window neither of them was
+  describing correctly. `MainWindow` now declares its own unbounded maximum, so the
+  first commit carries the truth and there is no race to lose.
+
+- **Running the test suite rewrote your own settings.** `SETTINGS_PATH` was built at
+  import time from `mc.config_dir()`, so it was fixed before any test could redirect
+  it — and the tests that redirect the config directory did not redirect this. Every
+  `save_settings` in the suite therefore wrote to the real settings file of whoever ran
+  it, which is how a test run flipped a developer's update channel and community
+  filters underneath them. The path is resolved per call now, and a test asserts it
+  follows the config directory.
+
+- **An empty list collapsed the sheet it was in.** Open Saved profiles with nothing
+  saved, or search the community library for something that matches nothing, and the
+  list area shrank to zero: the "nothing here yet" message was clipped away unread and
+  the footer rode up under the search box with a third of the panel left blank below
+  it.
+
+  A `Flickable` reports its viewport as its own height preference, and an empty
+  viewport is zero tall. That zero propagated upward as the *maximum* height of the
+  pane meant to stretch, so the one child that was supposed to fill the sheet could
+  not grow — and `clip: true` hid the evidence. The Flickable now fills the space it is
+  given, with `viewport-height` describing only what scrolls inside it. Fixed in all
+  four sheets that use the pattern: profiles, community, headphones and devices.
+
+- **Notices stayed on screen forever.** `toast()` set the text and nothing ever
+  cleared it, so "Written to flash." sat over the interface until it was clicked or
+  something else replaced it. They now clear themselves after five seconds, ten for
+  errors, and a notice that has already been replaced can no longer be cleared out
+  from under its successor by an expiry arriving late.
+
+- **The DAC's own EQ profiles were being shown as your curve.** A DAWN PRO2 has five
+  built-in profiles and one custom one — the app writes the custom one, the volume buttons
+  cycle all of them. Cycle to a built-in and Hub Moon read *that* profile and drew it as
+  the curve you were editing, under whatever name you had last applied, with "(edited)"
+  after it. Nudge one band and the custom profile was selected instead, so the other seven
+  bands snapped back to whatever it held, and the curve on screen turned out never to have
+  been one the app could edit.
+
+  The profile row now says which profile is playing and whether it is yours, and offers
+  "my curve" to get back — which is a rewrite rather than a profile change, because the
+  custom profile has no index that selects it. Its index is not hardcoded either: it is
+  learned by watching what the device reports right after this app writes, which costs
+  nothing because that read-back already happened, and remembered per product so the
+  answer is there the first time you look rather than after you edit.
+
+  What "my curve" writes is what this machine last recorded applying — *not* the bands on
+  screen, which while a built-in is playing are the built-in's. The first version of this
+  wrote those, and put −6 dB at 200 Hz into a custom profile as though it were the user's
+  own tuning.
+
+- **The profile stepper reported positions the DAC had refused.** It counted its own
+  clicks. The device accepts 0–4 and silently ignores anything above, so stepping up from
+  9 showed 10 while the DAC stayed put — and stepping down to 4 and back showed 5, 6, 7
+  from a device that had never left 4, with no way back to the custom profile at all. The
+  number shown is now the one read back from the device, and a refused step marks nothing
+  as unsaved.
+
+- **A button could be wired to nothing and nobody would know.** A `callback` the interface
+  declares with no Python handler is an error in neither language: the control is built,
+  it is clickable, it hovers, it does nothing. `tests/test_wiring.py` checks all 79 of
+  them.
+
+- **The community library was slow to scroll, and slow just to sit there.** Measured with
+  `SLINT_DEBUG_PERFORMANCE`: **116 fps** with an empty list, **54** with four hundred
+  community cards, and **49 while scrolling** with dips to 15. Nine cards fit on screen.
+
+  A `for` inside a Flickable builds every row, so four hundred cards at roughly fifteen
+  elements each is six thousand elements laid out on every frame whether or not anyone
+  can see them. The row *slots* are still real — a bare rectangle each, positioned at a
+  fixed pitch, which is also what makes the scroll extent exact rather than measured —
+  but the card inside a slot is now built only when the slot is within a viewport of the
+  screen. **76 fps sitting still and 74 while scrolling**, with the worst dip up from 15
+  to 21. All four library tabs get it, so a long list of saved profiles behaves too.
+
+  Slint's own `ListView` does this properly and lives in `std-widgets`, which this
+  interface deliberately imports none of.
+
+  Four numbers now have to agree — each list's pitch, its slot spacing, its card's height
+  and where its count comes from — and no behavioural test would notice them drifting,
+  because the rows would all still be there and all still correct. `tests/test_lazyrows.py`
+  reads them out of the interface file instead.
+
+- **Thumbnails were drawn on the main thread.** Each community and headphone row carries
+  its curve as a little SVG path, and at 3.1 ms a curve that was 25 ms of dead frames
+  every time a chunk of eight arrived — fifty times over while a page filled in. It is
+  arithmetic over plain floats with nothing device- or view-shaped about it, so it happens
+  on the thread that fetched the curve now, and what arrives is a finished path.
+
+- **A resize could have crashed the window.** The header's "is this window narrow"
+  property was bound to the window's width, and the header's own subtitle changes length
+  on that property — so the window's width depended on a text whose width depended on
+  the window. Slint reports it as a binding loop that "may cause panic at runtime". The
+  test suite cannot see a compiler warning; the app is built from the interface file
+  every run and nothing was reading what the build said. It is assigned from a `changed`
+  handler now, which runs after the width settles.
+
+- **The build baked in icons nothing draws.** The icon generator collected every
+  snake_case string literal in `bridge.py` and kept the ones that happened to share a
+  name with a Material Symbols icon. That was near enough when there were few strings;
+  this release added `"settings"`, `"source"`, `"clear"`, `"verified"` and eight more
+  that mean nothing of the kind, and each one silently baked about a kilobyte of unused
+  path data into every build. It reads the preset table as the table it is now.
+
+### Added
+
+- **One library instead of three panels that were the same panel.** Saved profiles, the
+  community index and the headphone corrections were three separate full-screen sheets,
+  and each of them was the same screen: a searchable list of curves, a preview, apply.
+  They are one **Library** now with the source as a tab — Saved · Recent · Community ·
+  Headphones, what is yours first and then everybody else's, with the count on each tab.
+
+  The buttons did not merge. The headphones button still opens the headphones tab,
+  because landing somewhere you did not ask for — one click from where you did — is not
+  an improvement, and pressing the button you came in by still closes the sheet. What
+  changed is that the other three are a tab away rather than a close and a reopen.
+
+  Writing the chrome once turned up three things it had been hiding. The search box
+  existed three times and one copy had lost its placeholder text entirely. The
+  headphones placeholder said "search 6,015 headphones" against a catalogue that has
+  8,827 in it today — a count written into the interface drifts the moment AutoEQ
+  publishes anything, so it now comes from the data, in the line beside the title. And
+  the recent-curves list, which had been squeezed into a 150-pixel strip above the saved
+  ones, is a tab with the whole pane.
+
+  Nothing is fetched for a tab nobody has opened. The community index is 5.4 MB and the
+  catalogue is 8,827 models; loading both to show one would have made the unified screen
+  slower than the three it replaced.
+
+- **Searching the community library matches what a curve does.** Type "bass" and you
+  get the bass-boosted curves as well as the ones with "bass" in the title. This matters
+  more than it sounds: most of that library is titled in Chinese — `低频增强`, `改善齿音`
+  — and a substring search over the title is no help at all to somebody who cannot type
+  it. A row whose curve has not been fetched yet has one fewer field to match on, the
+  same as one with no description; it is not excluded for being unclassified.
+
+- **Escape goes back, not out.** Every full-screen panel used to carry its own
+  open/closed flag, and every one of them had to remember to switch off all the others
+  by hand — 44 assignments across `bridge.py`, eight of `settings_open = False` alone.
+  There is one stack now (`gui/nav.py`): opening a screen pushes it, the view draws the
+  top of the stack and nothing else, and two panels cannot both be up however the app
+  got there.
+
+  It was meant to be invisible and is not quite. A screen opened from another one shows
+  a back arrow where the close cross was, and one step back returns to where it was
+  opened from — so the release notes reached from Settings land back in Settings, and
+  the supported-device list does too. That one pair used to be faked with a flag that
+  reopened Settings by hand; nothing else could be faked, which is why nothing else did
+  it. A test compares the screen names in the interface file against the ones the app
+  knows, because a string property is the one kind that can carry a typo with no error
+  at all — just a panel that never opens.
+
+- **Curves remember where they came from.** A chip under the presets says what is on
+  the device — "Community · aira 咏叹调", "AutoEQ · HD 600" — and says "(edited)" the
+  moment a band moves. Through 1.2.0 bands were anonymous: once written, a community
+  config, an AutoEQ fit and a curve drawn by hand were byte-identical and the app could
+  not tell you which one you were hearing.
+
+  The DAC holds the bands but has nowhere to put a name, so the name lives on this
+  machine and is re-attached by fingerprint — a short hash over each band's type,
+  frequency, gain and Q, rounded exactly as far as the device round-trips them, because
+  anything finer means every reconnect claims you edited something you did not. A
+  disabled band contributes only the fact that it is disabled: its leftover frequency
+  and gain are never written to the device and must not make two identical curves hash
+  apart. When nothing is known, nothing is claimed — an unrecorded curve is *unknown*,
+  not "manual".
+
+- **A recent list, and a way back.** The library has a **Recent** tab holding what you
+  have applied lately: click one to put it back, or "keep" to promote it to a permanent
+  profile. The bands travel in the entry, so going back needs no network and works on a
+  config that has since been deleted from the library. It is capped at twenty and
+  deduplicated by fingerprint, so flipping between two tunings leaves two rows rather
+  than twenty — and it is deliberately its own tab rather than merged into Saved: this
+  list rolls over by itself, and that one is only ever written by you.
+
+- **The headphones tab draws its corrections, and says whose they are.** Searching for
+  one headphone returns a dozen rows with an identical name — twelve measurements of a
+  Sennheiser HD 600 by twelve people on nine rigs — and until now the only thing
+  telling them apart was a line of small grey text under a bold model name they all
+  shared. The loud half of every row was the half they agreed on.
+
+  Each row now draws its own correction, so two measurements of the same headphone can
+  be compared before either is applied rather than by applying both in turn, and names
+  its measurer in the accent colour with the shape the curve works out to. Above the
+  list, a chip per measurer with a count: oratory1990, crinacle, Rtings and the rest.
+  Searching harder cannot narrow twelve rows that share a name — picking a measurer is
+  the only filter that can.
+
+  Profiles are fetched in chunks and cached to disk exactly as the community curves
+  are, so this costs one fetch per headphone, ever.
+
+- **The community library can be filtered by what a curve actually does.** Nine chips
+  — Neutral, Bass boost, V-shaped, Warm, Treble-tamed, Bright, Bass-cut, Other — each
+  carrying a count, none of which is derived from anything an author typed.
+
+  It cannot be. Of the 9,243 rows a DAWN PRO2 query returns, **25 carry a tag**;
+  titles are things like `"V2 final"` and descriptions are free text with hand-drawn
+  frequency tables in them. So the label comes from the curve: each preset's eight
+  bands are summed into a response, averaged over five regions, and read as a tilt
+  *against the mids* rather than against zero — because judged absolutely, a third of
+  the real library came out "Bright" simply for lifting the presence region a little
+  while doing something else entirely, and a label that catches a third of everything
+  has said nothing. A curve that fits no rule is "Other" rather than being forced into
+  the nearest bucket.
+
+  `tools/classify-index.py` prints the histogram over the real cached library, which
+  is how the thresholds were chosen rather than guessed: no bucket now holds more than
+  20% of it and "Other" holds 11%.
+
+- **Every community card draws its own curve.** A shelf of shapes can be read at a
+  glance in a way a shelf of titles cannot. They arrive a chunk at a time as the
+  prefetch classifies them, filled in under the reader rather than rebuilt around
+  them, and the space is reserved from the start so nothing moves when one lands.
+
+  Curve files are cached permanently, and that is not a shortcut: a `file` ref is
+  content-addressed, so editing a preset publishes a new one and the index points
+  somewhere else. A cached curve can never go stale, only become unused. The whole of
+  a DAWN PRO2's own uploads is about 750 KB.
+
+- **The library knows which presets are for your DAC.** The server pools by
+  `sharedConfigGroupId`, so a DAWN PRO2 query answers with the whole family: 9,243
+  rows, of which 1,485 are DAWN PRO2 uploads and 5,518 belong to a FreeDSP Pro. Each
+  row carries both `productuuid` (who it was uploaded for) and `productUuid` (what we
+  asked about), so telling them apart costs one comparison and no extra request. On by
+  default, with the whole family one click away, and the header says what is being
+  hidden either way — a filter that silently drops five sixths of a library is
+  indistinguishable from a library that is nearly empty.
+
+- **The library can be ordered.** Most liked, most downloaded, or best rated, where a
+  lone five-star rating cannot outrank a preset with eighty. Previously the order was
+  fixed and unwritable. There is deliberately no "newest": no row in the index carries
+  a timestamp, and inventing one out of the array's own sequence would be a label that
+  lies.
+
+- **Motion is one system with an off switch.** `theme.slint` grew a `motion` scale that
+  every duration is multiplied by, and Appearance grew a Full / Reduced / Off control
+  for it. Off is genuinely off — a duration of zero animates nothing — and nothing the
+  app does depends on an animation finishing. It has to be a setting rather than a
+  system preference because Slint cannot read the desktop's reduced-motion flag, and
+  animation somebody cannot switch off is an accessibility problem rather than a matter
+  of taste.
+
+  Along the way every remaining hand-written value went: 37 easings and the last stray
+  520ms are now tokens, the two curves are named for what they are for (`ease-state` for
+  something changing where it already is, `ease-enter` for something arriving), and a
+  test greps the interface file and fails on any animation carrying its own number.
+  1.2.0 had to fix seventeen animations that had drifted off the theme's timing; they
+  drifted because nothing complained.
+
+- **Sheets arrive instead of appearing.** Every panel — settings, community, profiles,
+  headphones, help, devices — used to exist between one frame and the next, because
+  `if open: Sheet {}` puts the whole thing on screen at once. Each now fades in over
+  `Theme.screen`. Closing stays immediate: `if` destroys the element, and keeping a
+  heavy sheet alive purely to fade it out is a cost paid on every frame it is open.
+
+- **About is about the product now, not only about the build.** The app's own mark and
+  name at the size an identity is read at, the version as a chip beside it, then three
+  cards saying what Hub Moon actually does — eight bands on the DAC's own DSP, the
+  community library, AutoEQ corrections — followed by what is plugged in and a way
+  through to the supported-device list. The bug-report block is still there, under a
+  heading that says why it exists rather than as the first thing on the page, and the
+  credits are named: AutoEQ and its measurers, Moondrop's library as read-only and
+  unaffiliated, Slint, and this project's own MIT licence.
+
+- **The last paragraph of About could not be reached.** With the dialog no longer
+  resizing itself, About scrolls — and its scroll area stopped short, so "Credits and
+  licence" was the last thing on the page and the credits themselves were unreachable.
+
+  A `Text` that wraps only knows how tall it is once it knows how wide it is, and the
+  panel's width is not resolved at the moment its Flickable asks the content how tall
+  it would like to be. Every paragraph therefore measured as a single line and the
+  viewport came up around 300px short. The panel's prose now carries an explicit width
+  — the sheet, less its padding, the rail, the rule and the gap either side of it.
+
+- **A narrow window cut the header and footer off.** With a DAC connected the header
+  wants a device chip, a firmware chip, three named buttons and three icons; below
+  about a thousand pixels the last of them ran off the right edge — "how to tune"
+  sliced through the middle of a word, the settings and refresh icons gone altogether.
+  The footer did the same to "save to flash".
+
+  Below 1100px the header and footer keep their buttons and drop their labels, and the
+  subtitle shortens. It is not the window's declared minimum, deliberately: a tiling
+  compositor hands the app whatever the tile is — 939px here, less than the 980 it asks
+  for — so being too narrow is a state the layout has to survive rather than one it can
+  refuse. "compare" keeps its label at every width, because that one says whether you
+  are listening to the curve or bypassing it.
+
+- **The settings dialog stopped resizing itself.** Its height was each tab's own
+  content height, so it grew and shrank under the pointer as you moved down the rail —
+  some 300px between Appearance and Window. It is one height for every tab now, and the
+  panel scrolls if a page needs more. A settings window that will not hold still while
+  you read it is worse than one with room to spare at the bottom.
+
+- **Settings has two new pages, and the settings file has a version.** *Window* holds
+  open-fullscreen and the device watch; *Library* holds curve fetching and the recent
+  list. Every switch is one the app was already deciding on its own — the point of the
+  pages is to hand those decisions back, not to invent preferences.
+
+  `settings.json` now carries a `schema`, which it never has. `load_settings`
+  whitelists keys and silently drops the rest, so until now an unrecognised file and an
+  old one were indistinguishable and no migration could ever have been written. 2.0 is
+  the release that can afford the break, so it is the release that takes it.
+
+  Opening fullscreen is off by default everywhere: on a tiling compositor the window
+  already fills its tile, and true fullscreen additionally covers the bar. It is also
+  not declared in the interface file — `full-screen: true` there is read before the
+  window exists and does nothing at all, verified on a bare Slint window as well as on
+  ours. The property only takes effect when it *changes*, so the app sets it once the
+  event loop is up.
+
+- **The app notices a DAC being plugged in or pulled out.** It used to look exactly
+  once, at launch: a device connected a second later stayed invisible until somebody
+  discovered that the device chip is a button, and one unplugged mid-session was
+  noticed only by the next operation failing. A two-second watch now answers both.
+
+  It costs one `hid.enumerate()` — measured at 0.75 ms — on the worker thread that
+  already owns the device, it never opens the hidraw, it posts nothing unless the
+  answer changed, and it skips itself entirely whenever that worker has real work
+  queued, so a poll can never land in the middle of a drag. An unplug drops the stale
+  handle before announcing itself, and does *not* raise the welcome screen the way a
+  failed search at startup does — pulling a cable out is not a question about what
+  hardware you own.
+
 ## [1.2.0] - 2026-08-17
 
 **Stable.** Five betas, and the one that mattered was invisible to every test in the suite:

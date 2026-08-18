@@ -115,10 +115,21 @@ export struct ProfileRow {
     note: string,
 }
 
+// One thing that was applied recently. Keyed by fingerprint rather than name: two
+// curves can share a name, and what is being pointed at is the curve.
+export struct HistoryRow {
+    fingerprint: string,
+    name: string,
+    note: string,
+}
+
 export struct AeqRow {
     model: string,
     source: string,
     form: string,
+    // Filled in by the prefetch, a chunk at a time.
+    shape: string,
+    curve: string,
 }
 
 export struct HubRow {
@@ -130,6 +141,16 @@ export struct HubRow {
     downloads: int,
     rating: float,
     ratings: int,
+    // Filled in by the prefetch, a chunk at a time, after the row is already on
+    // screen — so both are empty for a card whose curve has not arrived yet.
+    shape: string,
+    curve: string,
+}
+
+// One shape chip: what it is called and how many presets are that shape.
+export struct ShapeRow {
+    name: string,
+    count: int,
 }
 
 // ── small parts ─────────────────────────────────────────────────────────────────
@@ -145,7 +166,7 @@ component IconBtn inherits Rectangle {
     border-radius: self.width / 2;
     background: root.active ? Theme.accent-soft
               : (touch.has-hover ? Theme.card-2 : transparent);
-    animate background { duration: Theme.quick; easing: ease-out; }
+    animate background { duration: Theme.quick; easing: Theme.ease-state; }
 
     Sym {
         d: root.icon;
@@ -162,6 +183,9 @@ component TextBtn inherits Rectangle {
     in property <string> icon;
     in property <bool> primary: false;
     in property <bool> enabled: true;
+    // Icon only. A window narrower than the header's buttons want does not get a
+    // header with the last button cut in half — it gets shorter buttons.
+    in property <bool> compact: false;
     callback clicked();
 
     height: 32px;
@@ -178,7 +202,7 @@ component TextBtn inherits Rectangle {
         : (touch.has-hover ? Theme.card-2 : Theme.card);
     border-width: 1px;
     border-color: root.primary ? transparent : Theme.line-2;
-    animate background { duration: Theme.quick; easing: ease-out; }
+    animate background { duration: Theme.quick; easing: Theme.ease-state; }
 
     inner := HorizontalLayout {
         // The real padding, in one place, rather than a small number here and a
@@ -195,7 +219,7 @@ component TextBtn inherits Rectangle {
             width: root.icon == "" ? 0px : 15px;
             tint: root.primary ? Theme.accent-ink : Theme.sub;
         }
-        Text {
+        if !root.compact: Text {
             text: root.label;
             color: root.primary ? Theme.accent-ink : Theme.text;
             font-size: 12px;
@@ -235,7 +259,7 @@ component HoldBtn inherits Rectangle {
         : (touch.has-hover ? Theme.card-2 : Theme.card);
     border-width: 1px;
     border-color: root.held ? transparent : Theme.line-2;
-    animate background { duration: Theme.quick; easing: ease-out; }
+    animate background { duration: Theme.quick; easing: Theme.ease-state; }
 
     inner := HorizontalLayout {
         // The real padding, in one place, rather than a small number here and a
@@ -304,7 +328,7 @@ component HTrack inherits Rectangle {
         background: Theme.card;
         border-width: 2px;
         border-color: drag.pressed ? Theme.text : root.fill;
-        animate width, border-color { duration: Theme.quick; easing: ease-out; }
+        animate width, border-color { duration: Theme.quick; easing: Theme.ease-state; }
         // grip: two hairlines, which is the whole visual grammar of "this slides"
         Rectangle {
             x: (parent.width - 5px) / 2; y: (parent.height - 8px) / 2;
@@ -358,7 +382,7 @@ component SliderCard inherits Rectangle {
     border-width: 1px;
     border-color: root.alert ? Theme.warn : Theme.line;
     opacity: root.enabled ? 1.0 : 0.45;
-    animate background, border-color { duration: Theme.settle; easing: ease-out; }
+    animate background, border-color { duration: Theme.settle; easing: Theme.ease-state; }
 
     VerticalLayout {
         padding-left: 13px;
@@ -434,10 +458,23 @@ component SliderCard inherits Rectangle {
 
 // The device's own EQ profile slot. Not a preset — those fill the bands below; this
 // picks which profile the DAC plays.
+//
+// The number here is what the DAC reported, never what was asked for. A DAWN PRO2 on
+// firmware 1.5 accepts 0–4 and silently ignores anything above, so a control that
+// counted its own clicks displayed profiles the device had refused — and once it had
+// walked down to 4 there was no way back, because the custom profile has no settable
+// index at all. Stepping is now a request; the reading comes from the device.
+//
+// `on-builtin` is the case that matters: the DAC is playing one of its own presets, so
+// the bands below are that preset's and are not yours to edit. Getting back is a
+// rewrite rather than a profile change, which is what the button says.
 component SlotCard inherits Rectangle {
     in property <int> slot;
+    in property <string> note;
+    in property <bool> on-builtin;
     in property <bool> enabled: true;
     callback stepped(int);
+    callback mine();
 
     height: 62px;
     border-radius: Theme.r-md;
@@ -453,25 +490,37 @@ component SlotCard inherits Rectangle {
         padding-bottom: 9px;
         spacing: 2px;
 
+        // The caption row carries the warning, because the row below it cannot: with
+        // the recovery button in it there is about seven characters of room left, and
+        // "the DAC's own preset" elided to "the …".
         Text {
-            text: "DEVICE SLOT";
-            color: Theme.sub;
+            text: root.on-builtin ? "DEVICE SLOT · THE DAC’S OWN PRESET" : "DEVICE SLOT";
+            color: root.on-builtin ? Theme.warn : Theme.sub;
             font-family: Theme.mono;
             font-size: 9px;
             font-weight: 700;
             letter-spacing: 1px;
             height: 14px;
+            overflow: elide;
         }
         HorizontalLayout {
             spacing: 4px;
             Text {
-                text: root.enabled ? "as reported" : "no device";
+                text: root.on-builtin ? "" : root.note;
                 color: Theme.faint;
                 font-family: Theme.mono;
                 font-size: 9px;
                 vertical-alignment: center;
                 horizontal-stretch: 1;
                 overflow: elide;
+            }
+            // Only drawn where it means something, and it is the whole recovery path:
+            // there is no index that selects the custom profile, so "mine" writes the
+            // bands back, and writing them is what selects it.
+            if root.on-builtin: TextBtn {
+                label: "my curve";
+                icon: Icons.undo;
+                clicked => { root.mine(); }
             }
             IconBtn {
                 icon: Icons.remove;
@@ -702,7 +751,7 @@ component ResponseGraph inherits Rectangle {
         background: self.on ? Theme.accent : Theme.card;
         border-width: 2.5px;
         border-color: self.on ? Theme.accent : Theme.curve;
-        animate width, background, border-color { duration: Theme.quick; easing: ease-out; }
+        animate width, background, border-color { duration: Theme.quick; easing: Theme.ease-state; }
         Text {
             text: "\{b.index + 1}";
             color: parent.on ? Theme.accent-ink : Theme.curve;
@@ -782,7 +831,7 @@ component ResponseGraph inherits Rectangle {
         background: gm.has-hover ? Theme.accent-soft : Theme.bg;
         border-width: 1px;
         border-color: root.readout ? Theme.accent : Theme.line;
-        animate background, border-color { duration: Theme.quick; easing: ease-out; }
+        animate background, border-color { duration: Theme.quick; easing: Theme.ease-state; }
         Sym {
             d: root.readout ? Icons.tune : Icons.show-chart;
             sz: 14px;
@@ -853,7 +902,7 @@ component VTrack inherits Rectangle {
         background: Theme.card;
         border-width: 2px;
         border-color: drag.pressed ? Theme.text : root.fill;
-        animate width, border-color { duration: Theme.quick; easing: ease-out; }
+        animate width, border-color { duration: Theme.quick; easing: Theme.ease-state; }
         Rectangle {
             x: 3px;
             y: (parent.height - 1px) / 2;
@@ -913,7 +962,7 @@ component BandCard inherits Rectangle {
     // A muted band stays legible — you have to be able to read what you turned off
     // in order to decide to turn it back on — but stops competing for attention.
     opacity: root.band.enabled ? 1.0 : 0.55;
-    animate background, border-color, opacity { duration: Theme.quick; easing: ease-out; }
+    animate background, border-color, opacity { duration: Theme.quick; easing: Theme.ease-state; }
 
     // Click anywhere that is not a control to select the band.
     TouchArea { clicked => { root.picked(); } }
@@ -945,7 +994,7 @@ component BandCard inherits Rectangle {
                 height: 12px;
                 border-radius: 6px;
                 background: numt.has-hover ? Theme.accent-soft : transparent;
-                animate width, background { duration: Theme.quick; easing: ease-out; }
+                animate width, background { duration: Theme.quick; easing: Theme.ease-state; }
                 Text {
                     text: numt.has-hover
                         ? (root.band.enabled ? "mute" : "on")
@@ -975,7 +1024,7 @@ component BandCard inherits Rectangle {
                 : Theme.well;
             border-width: 1px;
             border-color: Theme.line-2;
-            animate background { duration: Theme.quick; easing: ease-out; }
+            animate background { duration: Theme.quick; easing: Theme.ease-state; }
             Text {
                 text: root.band.abbr;
                 color: root.band.enabled ? Theme.text : Theme.faint;
@@ -1065,9 +1114,17 @@ component BandCard inherits Rectangle {
 component SheetHead inherits HorizontalLayout {
     in property <string> title;
     in property <string> note;
+    // What one step back returns to, empty when that is the editor. A sheet opened
+    // from another sheet closes *to* it, and the header should say so before you
+    // press the button rather than after.
+    in property <string> back-to;
     callback closed();
     height: 30px;
     spacing: 10px;
+    if root.back-to != "": VerticalLayout {
+        alignment: center;
+        IconBtn { icon: Icons.arrow-back; clicked => { root.closed(); } }
+    }
     Text {
         text: root.title;
         color: Theme.text;
@@ -1084,7 +1141,7 @@ component SheetHead inherits HorizontalLayout {
         horizontal-stretch: 1;
         overflow: elide;
     }
-    IconBtn { icon: Icons.close; clicked => { root.closed(); } }
+    if root.back-to == "": IconBtn { icon: Icons.close; clicked => { root.closed(); } }
 }
 
 // One page of the tuning guide. The figures are SVG path commands drawn by the same
@@ -1154,7 +1211,7 @@ component MoonMark inherits Rectangle {
         border-width: 2px;
         border-color: Theme.accent;
         opacity: root.shown ? 1.0 : 0.0;
-        animate width, opacity { duration: Theme.settle; easing: cubic-bezier(0.2, 0, 0, 1); }
+        animate width, opacity { duration: Theme.settle; easing: Theme.ease-enter; }
     }
     // the crescent: a second disc in the page colour, offset, biting into the first
     Rectangle {
@@ -1165,7 +1222,7 @@ component MoonMark inherits Rectangle {
         border-radius: 54px;
         background: Theme.bg;
         opacity: root.shown ? 1.0 : 0.0;
-        animate x, opacity { duration: Theme.settle; easing: cubic-bezier(0.2, 0, 0, 1); }
+        animate x, opacity { duration: Theme.settle; easing: Theme.ease-enter; }
     }
     // the reading
     for f[i] in root.a: Rectangle {
@@ -1185,7 +1242,7 @@ component MoonMark inherits Rectangle {
         // the next update, so the motion never lands. Retimed to the token pair it finished in
         // ~320ms and then held still for the remaining 440ms of the tick, which reads as a pump
         // rather than a sweep. Continuous motion has to outrun its own driver.
-        animate height, y { duration: 520ms; delay: i * 70ms; easing: cubic-bezier(0.2, 0, 0, 1); }
+        animate height, y { duration: Theme.pulse; delay: i * Theme.pulse-step; easing: Theme.ease-enter; }
     }
     Timer {
         interval: 760ms;
@@ -1209,7 +1266,7 @@ component Splash inherits Rectangle {
     property <bool> leaving: root.stage >= 2;
 
     opacity: root.leaving ? 0.0 : 1.0;
-    animate opacity { duration: Theme.settle; easing: ease-out; }
+    animate opacity { duration: Theme.settle; easing: Theme.ease-state; }
 
     Timer {
         // stage 0 → 1: one tick after the first paint, so the animations have a state
@@ -1258,7 +1315,7 @@ component Splash inherits Rectangle {
                     height: parent.height;
                     border-radius: 2px;
                     background: Theme.accent;
-                    animate width { duration: Theme.settle; easing: cubic-bezier(0.3, 0, 0.2, 1); }
+                    animate width { duration: Theme.settle; easing: Theme.ease-bar; }
                 }
             }
         }
@@ -1279,8 +1336,21 @@ struct DeviceRow {
 // app, which is exactly backwards: the person who needs it is holding a DAC that did
 // not come up, and they are looking at this window, not at GitHub.
 component DevicesSheet inherits Rectangle {
+    // Sheets used to exist between one frame and the next: `if open: Sheet {}` puts
+    // the whole panel on screen at once. `init` flips this the moment the element is
+    // built, so the opacity binding has something to animate from — an entrance, not a
+    // cut. Closing is still immediate: `if` destroys the element, and holding a heavy
+    // sheet alive purely to fade it out is a cost paid on every frame it is open.
+    property <bool> entered;
+    init => { root.entered = true; }
+    opacity: root.entered ? 1.0 : 0.0;
+    animate opacity { duration: Theme.screen; easing: Theme.ease-enter; }
+
     in property <[DeviceRow]> rows;
     in property <string> note;
+    // Empty when a step back lands on the editor; the screen's name when
+    // this one was opened from another.
+    in property <string> back-to;
     callback closed();
 
     background: Theme.card;
@@ -1295,6 +1365,7 @@ component DevicesSheet inherits Rectangle {
         SheetHead {
             title: "Supported devices";
             note: "vendor 0x35D8";
+            back-to: root.back-to;
             closed => { root.closed(); }
         }
         Rectangle { height: 1px; background: Theme.line; }
@@ -1307,10 +1378,14 @@ component DevicesSheet inherits Rectangle {
 
         Rectangle {
             vertical-stretch: 1;
+            // Holds the sheet open when the list is empty — see the profiles sheet
+            // for what a Flickable's viewport does to a stretching parent otherwise.
+            min-height: 120px;
             clip: true;
             Flickable {
+                height: 100%;
                 viewport-width: self.width;
-                viewport-height: list.preferred-height;
+                viewport-height: max(self.height, list.preferred-height);
                 list := VerticalLayout {
                     width: parent.width;
                     spacing: 4px;
@@ -1426,7 +1501,7 @@ component WelcomeCard inherits Rectangle {
     border-color: Theme.line;
     opacity: root.shown ? 1.0 : 0.0;
     y: root.shown ? 0px : 18px;
-    animate opacity, y { duration: Theme.settle; delay: root.rank * Theme.stagger; easing: cubic-bezier(0.2, 0, 0, 1); }
+    animate opacity, y { duration: Theme.settle; delay: root.rank * Theme.stagger; easing: Theme.ease-enter; }
 
     VerticalLayout {
         padding: 14px;
@@ -1633,6 +1708,49 @@ component Welcome inherits Rectangle {
 
 // A two-option choice. Not a checkbox: "dark mode: off" makes you work out what the
 // other state is, where two labelled halves show you both and which one you are on.
+// Segmented, for more than two choices: same moving indicator, driven by an index and
+// a list of labels rather than a bool and two strings. The labels come from the
+// bridge — the order the library can be sorted in is policy, and policy does not live
+// in the view.
+component Choice inherits Rectangle {
+    in property <[string]> options;
+    in property <int> index;
+    callback picked(int);
+
+    property <length> slot: root.options.length > 0
+        ? root.width / root.options.length : root.width;
+
+    height: 30px;
+    border-radius: 15px;
+    background: Theme.card-2;
+    border-width: 1px;
+    border-color: Theme.line-2;
+
+    Rectangle {
+        x: root.index * root.slot;
+        width: root.slot;
+        height: parent.height;
+        border-radius: 15px;
+        background: Theme.accent;
+        animate x { duration: Theme.settle; easing: Theme.ease-enter; }
+    }
+    HorizontalLayout {
+        for o[i] in root.options: Rectangle {
+            Text {
+                text: o;
+                color: i == root.index ? Theme.accent-ink : Theme.sub;
+                font-size: 11.5px;
+                font-weight: 600;
+                width: 100%;
+                height: 100%;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+            TouchArea { mouse-cursor: pointer; clicked => { root.picked(i); } }
+        }
+    }
+}
+
 component Segmented inherits Rectangle {
     in property <string> left;
     in property <string> right;
@@ -1654,7 +1772,7 @@ component Segmented inherits Rectangle {
         height: parent.height;
         border-radius: 16px;
         background: Theme.accent;
-        animate x { duration: Theme.settle; easing: cubic-bezier(0.2, 0, 0, 1); }
+        animate x { duration: Theme.settle; easing: Theme.ease-enter; }
     }
     HorizontalLayout {
         Rectangle {
@@ -1765,7 +1883,7 @@ component NavItem inherits Rectangle {
     border-radius: Theme.r-sm;
     background: root.active ? Theme.accent-soft
         : (nav.has-hover ? Theme.card-2 : transparent);
-    animate background { duration: Theme.quick; easing: ease-out; }
+    animate background { duration: Theme.quick; easing: Theme.ease-state; }
 
     HorizontalLayout {
         padding-left: 10px;
@@ -1805,11 +1923,62 @@ component Meter inherits Rectangle {
         height: parent.height;
         border-radius: 3px;
         background: Theme.accent;
-        animate width { duration: Theme.settle; easing: ease-out; }
+        animate width { duration: Theme.settle; easing: Theme.ease-state; }
+    }
+}
+
+// One thing this app does, with the icon it is known by elsewhere in the interface.
+// About is the page somebody opens before they trust a program with their hardware, so
+// it should say what the program is — not only which version of it broke.
+component AboutCard inherits Rectangle {
+    in property <string> icon;
+    in property <string> title;
+    in property <string> body;
+
+    height: inner.preferred-height + 20px;
+    border-radius: Theme.r-sm;
+    background: Theme.card-2;
+    border-width: 1px;
+    border-color: Theme.line;
+
+    inner := HorizontalLayout {
+        padding: 10px;
+        spacing: 10px;
+        VerticalLayout {
+            alignment: start;
+            width: 18px;
+            Sym { d: root.icon; sz: 16px; tint: Theme.accent; width: 18px; height: 18px; }
+        }
+        VerticalLayout {
+            spacing: 3px;
+            horizontal-stretch: 1;
+            Text {
+                text: root.title;
+                color: Theme.text;
+                font-size: 12px;
+                font-weight: 600;
+            }
+            Text {
+                text: root.body;
+                color: Theme.faint;
+                font-size: 11px;
+                wrap: word-wrap;
+            }
+        }
     }
 }
 
 component SettingsSheet inherits Rectangle {
+    // Sheets used to exist between one frame and the next: `if open: Sheet {}` puts
+    // the whole panel on screen at once. `init` flips this the moment the element is
+    // built, so the opacity binding has something to animate from — an entrance, not a
+    // cut. Closing is still immediate: `if` destroys the element, and holding a heavy
+    // sheet alive purely to fade it out is a cost paid on every frame it is open.
+    property <bool> entered;
+    init => { root.entered = true; }
+    opacity: root.entered ? 1.0 : 0.0;
+    animate opacity { duration: Theme.screen; easing: Theme.ease-enter; }
+
     in property <bool> dark;
     in property <bool> readout;
     in property <int> accent-index;
@@ -1831,6 +2000,22 @@ component SettingsSheet inherits Rectangle {
     in property <int> update-channel;
     in property <bool> update-auto;
     in property <string> install-note;
+    in property <bool> opt-fullscreen;
+    in property <bool> opt-watch;
+    in property <bool> opt-prefetch;
+    in property <bool> opt-history;
+    in property <[string]> motion-labels;
+    in property <int> opt-motion;
+    in property <bool> connected;
+    in property <string> device-name;
+    in property <string> firmware;
+    in property <int> band-count;
+    callback switched(string, bool);
+    callback set-motion(int);
+    callback devices-clicked();
+    // Empty when a step back lands on the editor; the screen's name when
+    // this one was opened from another.
+    in property <string> back-to;
     callback closed();
     callback dark-picked(bool);
     callback readout-picked(bool);
@@ -1853,18 +2038,38 @@ component SettingsSheet inherits Rectangle {
     // Opens on whichever group has something to say. A binding, not a constant, so
     // it picks the right starting tab — and the moment the reader clicks the rail
     // that assignment replaces it, and their choice sticks.
+    // 3 is Updates. It was 1 until Window and Library were inserted ahead of it, and
+    // an index left behind by a reordered rail is a silent bug: the sheet still opens,
+    // just on the wrong page, with the update it was summoned to show one click away.
     property <int> tab: root.update-state == "available" || root.update-state == "fetched"
-        || root.update-state == "installed" || root.busy ? 1 : 0;
+        || root.update-state == "installed" || root.busy ? 3 : 0;
     property <bool> busy: root.update-state == "checking"
         || root.update-state == "downloading" || root.update-state == "staged"
         || root.update-state == "authorising";
     property <bool> has-banner: root.busy || root.update-state == "available"
         || root.update-state == "fetched" || root.update-state == "installed";
 
-    // How tall this sheet would like to be, for the parent to clamp. Three tabs of
-    // very different lengths share one panel: a height that fits the longest leaves
-    // 400px of nothing under the shortest, and one that fits the shortest clips the
-    // longest. Neither is a dialog anybody would design on purpose.
+    // How wide a paragraph in the panel really is: this sheet, less its own padding
+    // (16 twice), the rail (148), the rule (1) and the 14px gap on each side of it —
+    // 209 in all.
+    //
+    // Spelled out because a `Text` that wraps only knows its height once it knows its
+    // width, and the panel's width is not resolved at the moment the Flickable asks
+    // its content how tall it would like to be. Left implicit, every paragraph
+    // measured as one line: the About page's viewport came up some 300px short and
+    // the credits at the bottom of it could not be scrolled to at all.
+    property <length> prose-w: root.width - 209px;
+
+    // How tall this sheet would like to be, for the parent to clamp — and the same
+    // answer whatever tab is showing.
+    //
+    // It used to be each tab's own content height, on the reasoning that a height
+    // fitting the longest tab leaves 400px of nothing under the shortest. That is
+    // true, and it is still the better trade: sized per tab, the dialog grew and
+    // shrank under the pointer as you moved down the rail, jumping some 300px between
+    // Appearance and Window. A settings window that will not hold still while you
+    // read it is worse than one with room to spare at the bottom, and the rail is a
+    // fixed column down the left — only the panel beside it is supposed to change.
     //
     // `pane` is the scrolling content, so this is exact for it; the chrome around it
     // is a constant (16px padding twice, a 30px head, a rule, two 10px gaps) and the
@@ -1879,8 +2084,11 @@ component SettingsSheet inherits Rectangle {
     // means giving every paragraph an explicit width first, which is what SettingRow
     // had to do; About is a column of eight of them, and a floor is the honest cheap
     // answer. It scrolls if it is still short.
-    out property <length> wanted: max(pane.preferred-height, root.tab == 2 ? 620px : 0px)
-        + 83px + (root.has-banner ? 112px : 0px);
+    // A constant, not a maximum over the tabs. `max(content, floor)` still grew for
+    // any tab whose content passed the floor — About did — so the sheet was steady
+    // across four tabs and jumped on the fifth, which is the same complaint with one
+    // fewer symptom. The panel scrolls; the dialog does not resize.
+    out property <length> wanted: 620px + 83px + (root.has-banner ? 112px : 0px);
 
     background: Theme.card;
     border-radius: Theme.r-lg;
@@ -1894,7 +2102,8 @@ component SettingsSheet inherits Rectangle {
 
         SheetHead {
             title: "Settings";
-            note: root.tab == 2 ? "Hub Moon " + root.app-version : root.settings-path;
+            note: root.tab == 4 ? "Hub Moon " + root.app-version : root.settings-path;
+            back-to: root.back-to;
             closed => { root.closed(); }
         }
         Rectangle { height: 1px; background: Theme.line; }
@@ -1982,16 +2191,28 @@ component SettingsSheet inherits Rectangle {
                     picked => { root.tab = 0; }
                 }
                 NavItem {
-                    label: "Updates";
-                    icon: Icons.download;
+                    label: "Window";
+                    icon: Icons.home;
                     active: root.tab == 1;
                     picked => { root.tab = 1; }
                 }
                 NavItem {
-                    label: "About";
-                    icon: Icons.info;
+                    label: "Library";
+                    icon: Icons.groups;
                     active: root.tab == 2;
                     picked => { root.tab = 2; }
+                }
+                NavItem {
+                    label: "Updates";
+                    icon: Icons.download;
+                    active: root.tab == 3;
+                    picked => { root.tab = 3; }
+                }
+                NavItem {
+                    label: "About";
+                    icon: Icons.info;
+                    active: root.tab == 4;
+                    picked => { root.tab = 4; }
                 }
                 Rectangle { vertical-stretch: 1; }
             }
@@ -2045,7 +2266,7 @@ component SettingsSheet inherits Rectangle {
                                                 border-width: 1px;
                                                 border-color: i == root.skin-index
                                                     ? Theme.accent : transparent;
-                                                animate background { duration: Theme.quick; easing: ease-out; }
+                                                animate background { duration: Theme.quick; easing: Theme.ease-state; }
                                                 HorizontalLayout {
                                                     padding-left: 7px;
                                                     padding-right: 9px;
@@ -2108,7 +2329,7 @@ component SettingsSheet inherits Rectangle {
                                                     background: Theme.dark ? a.base-d : a.base;
                                                     border-width: sw.has-hover || i == root.accent-index ? 3px : 0px;
                                                     border-color: Theme.text;
-                                                    animate border-width { duration: Theme.quick; easing: ease-out; }
+                                                    animate border-width { duration: Theme.quick; easing: Theme.ease-state; }
                                                     // The tick is on the swatch rather than beside it: a ring alone
                                                     // reads as hover, and hover and selected must not look the same.
                                                     Sym {
@@ -2144,6 +2365,27 @@ component SettingsSheet inherits Rectangle {
                                     Rectangle { height: 1px; background: Theme.line; }
 
                                     SettingRow {
+                                        label: "Motion";
+                                        note: "How much the interface animates. Off is genuinely off — every duration becomes zero — and nothing about what the app does depends on an animation finishing.";
+                                        control-width: 220px;
+                                        VerticalLayout {
+                                            alignment: center;
+                                            Choice {
+                                                // Explicit: a Choice is built from
+                                                // stretching children and has no width
+                                                // of its own, so in a centred column it
+                                                // collapses to nothing and prints its
+                                                // three labels on top of each other.
+                                                width: 220px;
+                                                options: root.motion-labels;
+                                                index: root.opt-motion;
+                                                picked(i) => { root.set-motion(i); }
+                                            }
+                                        }
+                                    }
+                                    Rectangle { height: 1px; background: Theme.line; }
+
+                                    SettingRow {
                                         label: "Welcome screen";
                                         note: "The opening screen, with what each control does. Shown once on a first run.";
                                         VerticalLayout {
@@ -2163,7 +2405,71 @@ component SettingsSheet inherits Rectangle {
                             }
                         }
 
+                        // ── Window ──
                         if root.tab == 1: VerticalLayout {
+                            spacing: 8px;
+                            SettingRow {
+                                label: "Open fullscreen";
+                                note: "Take the whole screen on launch. On a tiling compositor the window already fills its tile without this — fullscreen additionally covers the bar. Applies from the next start.";
+                                VerticalLayout {
+                                    alignment: center;
+                                    Segmented {
+                                        left: "Off";
+                                        right: "On";
+                                        on-right: root.opt-fullscreen;
+                                        picked(v) => { root.switched("start_fullscreen", v); }
+                                    }
+                                }
+                            }
+                            Rectangle { height: 1px; background: Theme.line; }
+                            SettingRow {
+                                label: "Watch for devices";
+                                note: "Notice a DAC being plugged in or pulled out without being asked. One enumeration every two seconds; it never opens the device and never interrupts an edit.";
+                                VerticalLayout {
+                                    alignment: center;
+                                    Segmented {
+                                        left: "Off";
+                                        right: "On";
+                                        on-right: root.opt-watch;
+                                        picked(v) => { root.switched("watch_devices", v); }
+                                    }
+                                }
+                            }
+                        }
+
+                        // ── Library ──
+                        if root.tab == 2: VerticalLayout {
+                            spacing: 8px;
+                            SettingRow {
+                                label: "Fetch curves";
+                                note: "Read each config's curve so the community list can draw it and say what shape it is. A few hundred bytes each, cached permanently. Off leaves the list working from titles alone.";
+                                VerticalLayout {
+                                    alignment: center;
+                                    Segmented {
+                                        left: "Off";
+                                        right: "On";
+                                        on-right: root.opt-prefetch;
+                                        picked(v) => { root.switched("hub_prefetch", v); }
+                                    }
+                                }
+                            }
+                            Rectangle { height: 1px; background: Theme.line; }
+                            SettingRow {
+                                label: "Recent list";
+                                note: "Keep a note of what you apply, so you can put it back. Twenty entries, on this computer only. Turning it off stops recording — it does not erase what is already there.";
+                                VerticalLayout {
+                                    alignment: center;
+                                    Segmented {
+                                        left: "Off";
+                                        right: "On";
+                                        on-right: root.opt-history;
+                                        picked(v) => { root.switched("keep_history", v); }
+                                    }
+                                }
+                            }
+                        }
+
+                        if root.tab == 3: VerticalLayout {
                             spacing: 8px;
                                     SettingRow {
                                         label: "Check for updates";
@@ -2337,33 +2643,127 @@ component SettingsSheet inherits Rectangle {
                                     Rectangle { height: 1px; background: Theme.line; }
                         }
 
-                        if root.tab == 2: VerticalLayout {
+                        if root.tab == 4: VerticalLayout {
                             spacing: 10px;
 
-                            Text {
-                                text: "Hub Moon " + root.app-version;
-                                color: Theme.text;
-                                font-size: 20px;
-                                font-weight: 700;
+                            // The identity, at the size an identity is read at. The
+                            // mark is the app's own — the one thing on this page that
+                            // may carry a logo, since neither MOONDROP's nor AutoEQ's
+                            // is ours to ship.
+                            HorizontalLayout {
+                                spacing: 14px;
+                                height: 60px;
+                                VerticalLayout {
+                                    alignment: center;
+                                    Mark { size: 52px; behind: Theme.card; }
+                                }
+                                VerticalLayout {
+                                    alignment: center;
+                                    spacing: 3px;
+                                    horizontal-stretch: 1;
+                                    Text {
+                                        text: "Hub Moon";
+                                        color: Theme.text;
+                                        font-size: 24px;
+                                        font-weight: 700;
+                                    }
+                                    Text {
+                                        text: "Parametric EQ for Moondrop USB DACs";
+                                        color: Theme.sub;
+                                        font-size: 12px;
+                                        wrap: word-wrap;
+                                    }
+                                }
+                                VerticalLayout {
+                                    alignment: center;
+                                    Rectangle {
+                                        height: 24px;
+                                        width: vtxt.preferred-width + 20px;
+                                        border-radius: 12px;
+                                        background: Theme.accent-soft;
+                                        border-width: 1px;
+                                        border-color: Theme.accent-line;
+                                        vtxt := Text {
+                                            text: root.app-version;
+                                            color: Theme.accent;
+                                            font-family: Theme.mono;
+                                            font-size: 11px;
+                                            font-weight: 700;
+                                            width: 100%;
+                                            height: 100%;
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                }
                             }
-                            Text {
-                                text: "Parametric EQ for Moondrop USB DACs, over USB HID. MIT licensed.";
-                                color: Theme.sub;
-                                font-size: 12px;
-                                wrap: word-wrap;
+
+                            AboutCard {
+                                icon: Icons.graphic-eq;
+                                title: "Eight bands, on the DAC's own DSP";
+                                body: "The curve runs on the device at 96 kHz, so it applies to everything the computer plays and to nothing the computer has to do. Saved to flash, it survives being unplugged.";
                             }
+                            AboutCard {
+                                icon: Icons.groups;
+                                title: "The community library";
+                                body: "Moondrop's own published configs, read-only, filtered by what each curve actually does and drawn on the card before you apply it.";
+                            }
+                            AboutCard {
+                                icon: Icons.headphones;
+                                title: "Headphone corrections";
+                                body: "AutoEQ's measured targets, fitted to this device's eight bands, with the pre-gain its curve asks for.";
+                            }
+
+                            Rectangle { height: 1px; background: Theme.line; }
+
+                            // What is plugged in, in the place people look for it.
+                            HorizontalLayout {
+                                spacing: 8px;
+                                height: 32px;
+                                VerticalLayout {
+                                    alignment: center;
+                                    horizontal-stretch: 1;
+                                    Text {
+                                        text: root.connected
+                                            ? root.device-name + " · firmware " + root.firmware + " · " + root.band-count + " bands"
+                                            : "No DAC connected";
+                                        color: root.connected ? Theme.text : Theme.faint;
+                                        font-size: 12px;
+                                        overflow: elide;
+                                    }
+                                }
+                                TextBtn {
+                                    label: "Supported devices";
+                                    icon: Icons.usb-off;
+                                    clicked => { root.devices-clicked(); }
+                                }
+                            }
+
                             Text {
                                 text: root.install-note;
                                 color: Theme.faint;
                                 font-size: 11px;
+                                width: root.prose-w;
                                 wrap: word-wrap;
                             }
 
-                            // The block that goes into a bug report. Eleven of the
-                            // twelve supported DACs and all of USB HID on Windows are
-                            // still untested, and closing that depends on reports from
-                            // people whose hardware nobody here owns — so the facts
-                            // they would otherwise be asked for are on screen, in one
+                            Rectangle { height: 1px; background: Theme.line; }
+                            Text {
+                                text: "Report a problem";
+                                color: Theme.text;
+                                font-size: 13px;
+                                font-weight: 700;
+                            }
+                            Text {
+                                text: "Eleven of the twelve supported DACs, and all of USB HID on Windows, have never been exercised on hardware anybody here owns. If yours works — or does not — this is the report.";
+                                color: Theme.faint;
+                                font-size: 11px;
+                                width: root.prose-w;
+                                wrap: word-wrap;
+                            }
+
+                            // The block that goes into a bug report: the facts
+                            // somebody would otherwise be asked for, on screen, in one
                             // selectable lump, behind one button.
                             Rectangle {
                                 height: sysbox.preferred-height + 20px;
@@ -2411,13 +2811,21 @@ component SettingsSheet inherits Rectangle {
                                 text: "Every session writes to that log, including anything that goes wrong on a worker thread. If you are reporting a bug, it is the file to attach.";
                                 color: Theme.faint;
                                 font-size: 11px;
+                                width: root.prose-w;
                                 wrap: word-wrap;
                             }
                             Rectangle { height: 1px; background: Theme.line; }
                             Text {
-                                text: "Headphone corrections come from AutoEQ by Jaakko Pasanen (MIT), measured by the people credited on each row. The community library is Moondrop's own, read-only. Neither this project nor its author is affiliated with MOONDROP.";
+                                text: "Credits and licence";
+                                color: Theme.text;
+                                font-size: 13px;
+                                font-weight: 700;
+                            }
+                            Text {
+                                text: "Hub Moon is MIT licensed, and is not affiliated with MOONDROP in any way — the community library is Moondrop's own and is read only here. Headphone corrections come from AutoEQ by Jaakko Pasanen (MIT), measured by the people credited on each row. The interface is built with Slint.";
                                 color: Theme.faint;
                                 font-size: 11px;
+                                width: root.prose-w;
                                 wrap: word-wrap;
                             }
                         }
@@ -2532,7 +2940,20 @@ component GuideFig inherits Rectangle {
 }
 
 component HelpSheet inherits Rectangle {
+    // Sheets used to exist between one frame and the next: `if open: Sheet {}` puts
+    // the whole panel on screen at once. `init` flips this the moment the element is
+    // built, so the opacity binding has something to animate from — an entrance, not a
+    // cut. Closing is still immediate: `if` destroys the element, and holding a heavy
+    // sheet alive purely to fade it out is a cost paid on every frame it is open.
+    property <bool> entered;
+    init => { root.entered = true; }
+    opacity: root.entered ? 1.0 : 0.0;
+    animate opacity { duration: Theme.screen; easing: Theme.ease-enter; }
+
     in property <[GuidePage]> pages;
+    // Empty when a step back lands on the editor; the screen's name when
+    // this one was opened from another.
+    in property <string> back-to;
     callback closed();
 
     // Same treatment as Settings: the pages are very different lengths — one is a
@@ -2556,6 +2977,7 @@ component HelpSheet inherits Rectangle {
         SheetHead {
             title: "How to tune";
             note: "nothing here is permanent until you save to flash";
+            back-to: root.back-to;
             closed => { root.closed(); }
         }
         Rectangle { height: 1px; background: Theme.line; }
@@ -2630,13 +3052,36 @@ component HubCard inherits Rectangle {
     background: touch.has-hover ? Theme.accent-soft : Theme.card-2;
     border-width: 1px;
     border-color: touch.has-hover ? Theme.accent-line : Theme.line;
-    animate background, border-color { duration: Theme.quick; easing: ease-out; }
+    animate background, border-color { duration: Theme.quick; easing: Theme.ease-state; }
 
     touch := TouchArea { mouse-cursor: pointer; clicked => { root.applied(); } }
 
+    // The curve itself, drawn small on the right. The point of the whole prefetch:
+    // a shelf of shapes can be browsed at a glance in a way a shelf of titles called
+    // "V2 final" cannot. Absent until its chunk lands, and nothing shifts when it
+    // does — the space is reserved either way.
+    Rectangle {
+        x: parent.width - 124px;
+        y: (parent.height - 30px) / 2;
+        width: 108px;
+        height: 30px;
+        // The path is clamped a few pixels past the box by design, so the card clips
+        // rather than letting a +12 dB shelf draw over the title.
+        clip: true;
+        Path {
+            width: 100%;
+            height: 100%;
+            viewbox-width: 108;
+            viewbox-height: 30;
+            commands: root.entry.curve;
+            stroke: Theme.accent;
+            stroke-width: 1.5px;
+        }
+    }
+
     VerticalLayout {
         padding-left: 12px;
-        padding-right: 12px;
+        padding-right: 132px;
         padding-top: 9px;
         padding-bottom: 9px;
         spacing: 2px;
@@ -2669,12 +3114,24 @@ component HubCard inherits Rectangle {
                 vertical-alignment: center;
             }
         }
-        Text {
-            text: "by \{root.entry.author}";
-            color: Theme.accent;
-            font-family: Theme.mono;
-            font-size: 9px;
+        HorizontalLayout {
+            spacing: 7px;
             height: 12px;
+            Text {
+                text: "by \{root.entry.author}";
+                color: Theme.accent;
+                font-family: Theme.mono;
+                font-size: 9px;
+                vertical-alignment: center;
+            }
+            if root.entry.shape != "": Text {
+                text: root.entry.shape;
+                color: Theme.faint;
+                font-family: Theme.mono;
+                font-size: 9px;
+                vertical-alignment: center;
+            }
+            Rectangle { horizontal-stretch: 1; }
         }
         Text {
             text: root.entry.desc;
@@ -2882,96 +3339,93 @@ component PreviewDialog inherits Rectangle {
     }
 }
 
-component CommunitySheet inherits Rectangle {
-    in property <[HubRow]> rows;
-    in property <string> note;
-    in property <bool> busy;
+// One shape filter. Clicking the active one clears the filter, so the control that
+// set it is also the one that undoes it.
+component ShapeChip inherits Rectangle {
+    in property <string> label;
     in property <int> count;
-    callback closed();
-    callback searched(string);
-    callback reloaded();
-    callback applied(string);
+    in property <bool> active;
+    callback picked();
 
-    background: Theme.card;
-    border-radius: Theme.r-lg;
+    height: 24px;
+    width: name.preferred-width + 26px;
+    border-radius: 12px;
+    background: root.active ? Theme.accent
+        : (hover.has-hover ? Theme.accent-soft : Theme.card-2);
     border-width: 1px;
-    border-color: Theme.line-2;
-    clip: true;
+    border-color: root.active ? Theme.accent : Theme.line-2;
+    animate background, border-color { duration: Theme.quick; easing: Theme.ease-state; }
 
-    VerticalLayout {
-        padding: 16px;
-        spacing: 11px;
-
-        SheetHead {
-            title: "Community library";
-            note: root.busy ? "working…" : root.note;
-            closed => { root.closed(); }
-        }
-
-        HorizontalLayout {
-            spacing: 8px;
-            height: 30px;
-            Rectangle {
-                horizontal-stretch: 1;
-                border-radius: Theme.r-sm;
-                background: Theme.card-2;
-                border-width: 1px;
-                border-color: field.has-focus ? Theme.accent : Theme.line-2;
-                animate border-color { duration: Theme.quick; easing: ease-out; }
-                HorizontalLayout {
-                    padding-left: 10px;
-                    padding-right: 10px;
-                    spacing: 7px;
-                    Sym { d: Icons.search; sz: 15px; tint: Theme.faint; width: 15px; }
-                    field := TextInput {
-                        color: Theme.text;
-                        font-size: 12px;
-                        vertical-alignment: center;
-                        single-line: true;
-                        edited => { root.searched(self.text); }
-                    }
-                }
-            }
-            TextBtn {
-                label: "reload";
-                icon: Icons.refresh;
-                enabled: !root.busy;
-                clicked => { root.reloaded(); }
-            }
-        }
-
-        Rectangle {
-            vertical-stretch: 1;
-            clip: true;
-            Flickable {
-                viewport-height: list.preferred-height;
-                list := VerticalLayout {
-                    width: parent.width;
-                    spacing: 7px;
-                    for r in root.rows: HubCard {
-                        entry: r;
-                        applied => { root.applied(r.uuid); }
-                    }
-
-                }
-            }
-            if root.count == 0: Text {
-                text: root.busy ? "" : "Nothing here — try a different search, or reload.";
-                color: Theme.faint;
-                font-size: 12px;
-                width: 100%;
-                horizontal-alignment: center;
-                y: 24px;
-            }
+    name := HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        spacing: 5px;
+        Text {
+            text: root.label;
+            color: root.active ? Theme.accent-ink : Theme.sub;
+            font-size: 10.5px;
+            font-weight: 600;
+            vertical-alignment: center;
         }
         Text {
-            text: "Click any config to see its curve before it goes anywhere near your DAC.";
-            color: Theme.faint;
-            font-size: 11px;
-            wrap: word-wrap;
+            text: "\{root.count}";
+            color: root.active ? Theme.accent-ink : Theme.faint;
+            font-family: Theme.mono;
+            font-size: 9px;
+            vertical-alignment: center;
         }
     }
+    hover := TouchArea { mouse-cursor: pointer; clicked => { root.picked(); } }
 }
+
+// A list that only builds the rows you can see.
+//
+// The library's card lists are a `for` inside a Flickable, which instantiates every
+// row: 400 community cards at roughly fifteen elements each is six thousand elements
+// laid out on every frame, and nine of them fit on screen. Measured with
+// `SLINT_DEBUG_PERFORMANCE=refresh_full_speed`: **116 fps** with an empty list, **80**
+// with forty cards, **54** with four hundred. The cards cost that whether or not
+// anyone can see them.
+//
+// Slint's own `ListView` does this properly, but it lives in `std-widgets` and this
+// interface deliberately imports none of it. So the row *slots* are still real — a
+// bare Rectangle each, which is cheap — and the card inside a slot is built only when
+// the slot is near the viewport. `PITCH` is the row height plus the gap, which is what
+// makes an absolute `y` possible and the viewport height exact rather than measured.
+//
+// The margin is a whole viewport in each direction, so a card is always built before
+// it can be scrolled into view and a fast flick cannot outrun it.
+component LazyRows inherits Rectangle {
+    in property <length> pitch;
+    in property <length> row-height;
+    // Taken from the model's own length, never from a count carried alongside it: the
+    // scroll extent is arithmetic on this, so the two disagreeing would mean a list you
+    // cannot reach the bottom of.
+    in property <int> count;
+    // What the slot at `index` should draw. The caller fills this in — the point of
+    // this component is the windowing, not the row.
+    callback slot(int);
+
+    property <length> top: -flick.viewport-y - flick.height;
+    property <length> bottom: -flick.viewport-y + 2 * flick.height;
+
+    public pure function shown(i: int) -> bool {
+        return i * root.pitch + root.row-height > root.top && i * root.pitch < root.bottom;
+    }
+
+    flick := Flickable {
+        height: 100%;
+        // Exact rather than measured: every row is the same height, so there is no
+        // reason to lay out four hundred of them to find out how tall the list is.
+        viewport-height: max(self.height, root.count * root.pitch);
+        @children
+    }
+}
+
+// One tab of the library. A count rather than a bare name: the difference between
+// "Saved" and "Saved 12" is the difference between a place you might go and a place
+// you know has something in it.
+
 
 // One line of a release's notes. Its own component so the entrance can be staggered
 // by rank, the same way the welcome cards are.
@@ -2983,10 +3437,10 @@ component NoteLine inherits Rectangle {
     height: line.preferred-height + 16px;
     border-radius: Theme.r-sm;
     background: hover.has-hover ? Theme.card-2 : transparent;
-    animate background { duration: Theme.quick; easing: ease-out; }
+    animate background { duration: Theme.quick; easing: Theme.ease-state; }
     opacity: root.shown ? 1.0 : 0.0;
     x: root.shown ? 0px : 14px;
-    animate opacity, x { duration: Theme.settle; delay: root.rank * Theme.stagger; easing: cubic-bezier(0.2, 0, 0, 1); }
+    animate opacity, x { duration: Theme.settle; delay: root.rank * Theme.stagger; easing: Theme.ease-enter; }
 
     hover := TouchArea { }
     line := HorizontalLayout {
@@ -3036,6 +3490,9 @@ component WhatsNew inherits Rectangle {
     // would be false in that state — so each of them asks.
     in property <bool> preview;
     in property <bool> can-install;
+    // Where the corner button lands. Empty when that is the editor — the panel shown
+    // once after an update — and the screen's name when it was opened from Settings.
+    in property <string> back-to;
     callback dismissed();
     callback changelog();
     callback install();
@@ -3099,7 +3556,7 @@ component WhatsNew inherits Rectangle {
                         font-size: 25px;
                         font-weight: 700;
                         opacity: root.shown ? 1.0 : 0.0;
-                        animate opacity { duration: Theme.settle; easing: cubic-bezier(0.2, 0, 0, 1); }
+                        animate opacity { duration: Theme.settle; easing: Theme.ease-enter; }
                     }
                     HorizontalLayout {
                         alignment: start;
@@ -3141,7 +3598,10 @@ component WhatsNew inherits Rectangle {
                 VerticalLayout {
                     alignment: start;
                     padding-top: 14px;
-                    IconBtn { icon: Icons.close; clicked => { root.dismissed(); } }
+                    IconBtn {
+                        icon: root.back-to == "" ? Icons.close : Icons.arrow-back;
+                        clicked => { root.dismissed(); }
+                    }
                 }
             }
         }
@@ -3234,7 +3694,7 @@ component ProfileCard inherits Rectangle {
     background: touch.has-hover ? Theme.card-2 : Theme.card;
     border-width: 1px;
     border-color: touch.has-hover ? Theme.line-2 : Theme.line;
-    animate background, border-color { duration: Theme.quick; easing: ease-out; }
+    animate background, border-color { duration: Theme.quick; easing: Theme.ease-state; }
 
     touch := TouchArea {
         mouse-cursor: pointer;
@@ -3275,15 +3735,358 @@ component ProfileCard inherits Rectangle {
     }
 }
 
-component ProfilesSheet inherits Rectangle {
-    in property <[ProfileRow]> rows;
-    in property <string> note;
+// A recent curve. Two actions and they are different in kind: put it back, or keep
+// it — history rolls over on its own, a profile is permanent.
+component HistoryCard inherits Rectangle {
+    in property <HistoryRow> entry;
+    callback applied();
+    callback kept();
+
+    height: 46px;
+    border-radius: Theme.r-md;
+    background: touch.has-hover ? Theme.accent-soft : Theme.card-2;
+    border-width: 1px;
+    border-color: touch.has-hover ? Theme.accent-line : Theme.line;
+    animate background, border-color { duration: Theme.quick; easing: Theme.ease-state; }
+
+    touch := TouchArea { mouse-cursor: pointer; clicked => { root.applied(); } }
+
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 10px;
+        spacing: 8px;
+        VerticalLayout {
+            alignment: center;
+            horizontal-stretch: 1;
+            spacing: 1px;
+            Text {
+                text: root.entry.name;
+                color: Theme.text;
+                font-size: 12.5px;
+                font-weight: 600;
+                overflow: elide;
+            }
+            Text {
+                text: root.entry.note;
+                color: Theme.faint;
+                font-family: Theme.mono;
+                font-size: 9px;
+                overflow: elide;
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            TextBtn {
+                label: "keep";
+                icon: Icons.save;
+                clicked => { root.kept(); }
+            }
+        }
+    }
+}
+
+
+component AeqCard inherits Rectangle {
+    in property <AeqRow> entry;
+    callback picked();
+
+    height: 54px;
+    border-radius: Theme.r-sm;
+    background: touch.has-hover ? Theme.card-2 : Theme.card;
+    border-width: 1px;
+    border-color: touch.has-hover ? Theme.line-2 : Theme.line;
+    animate background, border-color { duration: Theme.quick; easing: Theme.ease-state; }
+
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+        spacing: 10px;
+        VerticalLayout {
+            alignment: center;
+            horizontal-stretch: 1;
+            spacing: 2px;
+            Text {
+                text: root.entry.model;
+                color: Theme.text;
+                font-size: 13px;
+                font-weight: 600;
+                overflow: elide;
+            }
+            // Who measured it, in the accent — because a search for one headphone
+            // returns a dozen rows with an identical name, and the measurer is the
+            // only thing telling them apart. Drawn quietly it inverted the hierarchy:
+            // the loud half of every row was the half they all agreed on.
+            HorizontalLayout {
+                spacing: 6px;
+                Text {
+                    text: root.entry.source;
+                    color: Theme.accent;
+                    font-family: Theme.mono;
+                    font-size: 10px;
+                    vertical-alignment: center;
+                }
+                Text {
+                    text: root.entry.form + (root.entry.shape == "" ? "" : "  ·  " + root.entry.shape);
+                    color: Theme.faint;
+                    font-family: Theme.mono;
+                    font-size: 10px;
+                    overflow: elide;
+                    horizontal-stretch: 1;
+                    vertical-alignment: center;
+                }
+            }
+        }
+        // The correction itself. Two measurements of one headphone disagree, and this
+        // is where you can see by how much before applying either.
+        Rectangle {
+            width: 108px;
+            height: 30px;
+            clip: true;
+            y: (parent.height - 30px) / 2;
+            Path {
+                width: 100%;
+                height: 100%;
+                viewbox-width: 108;
+                viewbox-height: 30;
+                commands: root.entry.curve;
+                stroke: touch.has-hover ? Theme.accent : Theme.curve;
+                stroke-width: 1.5px;
+            }
+        }
+    }
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.picked(); }
+    }
+}
+
+component LibTab inherits Rectangle {
+    in property <string> label;
+    in property <string> icon;
     in property <int> count;
+    in property <bool> active;
+    callback picked();
+
+    height: 34px;
+    border-radius: Theme.r-sm;
+    background: root.active ? Theme.accent-soft
+        : (hover.has-hover ? Theme.card-2 : transparent);
+    animate background { duration: Theme.quick; easing: Theme.ease-state; }
+
+    hover := TouchArea { mouse-cursor: pointer; clicked => { root.picked(); } }
+
+    HorizontalLayout {
+        padding-left: 11px;
+        padding-right: 11px;
+        spacing: 7px;
+        alignment: center;
+        VerticalLayout {
+            alignment: center;
+            Sym {
+                d: root.icon;
+                sz: 15px;
+                tint: root.active ? Theme.accent : Theme.sub;
+                width: 15px;
+            }
+        }
+        Text {
+            text: root.label;
+            color: root.active ? Theme.accent : Theme.sub;
+            font-size: 12px;
+            font-weight: root.active ? 700 : 500;
+            vertical-alignment: center;
+        }
+        // Zero is not drawn. A count of nothing is the one number that reads as a
+        // fault rather than as information.
+        if root.count > 0: VerticalLayout {
+            alignment: center;
+            Rectangle {
+                height: 16px;
+                width: num.preferred-width + 12px;
+                border-radius: 8px;
+                background: root.active ? Theme.accent : Theme.card-2;
+                num := Text {
+                    text: root.count;
+                    color: root.active ? Theme.accent-ink : Theme.faint;
+                    font-family: Theme.mono;
+                    font-size: 9.5px;
+                    font-weight: 700;
+                    width: 100%;
+                    height: 100%;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+        }
+    }
+
+    // The active tab is underlined into the panel below it, which is what says the
+    // list belongs to this tab rather than sitting near it.
+    if root.active: Rectangle {
+        y: parent.height - 2px;
+        x: 10px;
+        width: parent.width - 20px;
+        height: 2px;
+        border-radius: 1px;
+        background: Theme.accent;
+    }
+}
+
+// A search box. Three of these were written out by hand in three sheets, differing
+// only in their placeholder and in one of them having forgotten the hint entirely.
+component SearchBox inherits Rectangle {
+    in property <string> hint;
+    in-out property <string> text <=> field.text;
+    callback edited(string);
+
+    horizontal-stretch: 1;
+    border-radius: Theme.r-sm;
+    background: Theme.card-2;
+    border-width: 1px;
+    border-color: field.has-focus ? Theme.accent : Theme.line-2;
+    animate border-color { duration: Theme.quick; easing: Theme.ease-state; }
+
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        spacing: 7px;
+        Sym { d: Icons.search; sz: 15px; tint: Theme.faint; width: 15px; }
+        // The hint sits *behind* the field rather than beside it — as a sibling in
+        // the layout it took its own column and pushed the caret into the middle of
+        // the box.
+        Rectangle {
+            horizontal-stretch: 1;
+            field := TextInput {
+                width: 100%;
+                height: 100%;
+                color: Theme.text;
+                font-size: 12px;
+                vertical-alignment: center;
+                single-line: true;
+                edited => { root.edited(self.text); }
+            }
+            if field.text == "": Text {
+                x: 0px;
+                width: 100%;
+                height: 100%;
+                text: root.hint;
+                color: Theme.faint;
+                font-size: 12px;
+                vertical-alignment: center;
+            }
+        }
+    }
+}
+
+// A sideways strip of filter chips: curve shapes in the community tab, measurers in
+// the headphones tab. Both are "narrow this list by an attribute that is not in its
+// name", and both scroll because there are more than fit.
+component ChipStrip inherits Rectangle {
+    in property <[ShapeRow]> chips;
+    in property <string> active;
+    callback picked(string);
+
+    height: 24px;
+    clip: true;
+    Flickable {
+        width: 100%;
+        height: 100%;
+        viewport-width: row.preferred-width;
+        viewport-height: self.height;
+        row := HorizontalLayout {
+            spacing: 6px;
+            height: 24px;
+            for c in root.chips: ShapeChip {
+                label: c.name;
+                count: c.count;
+                active: root.active == c.name;
+                picked => { root.picked(c.name); }
+            }
+        }
+    }
+}
+
+// The library: four sources for a curve, one screen.
+//
+// These were three separate sheets — community, headphones, saved profiles — and each
+// was the same screen: a list of curves you can search, filtered somehow, previewed
+// before it goes anywhere near the DAC. They had three search boxes, three empty
+// states, three list panes and three sets of the same layout bugs, and history was
+// about to become a fourth. Everything outside the rows themselves is written once
+// here; the rows differ because the things genuinely differ.
+//
+// The entry points do not merge. The headphones button still opens the headphones
+// tab — landing somewhere you did not ask for, one click from where you did, is not
+// an improvement. What changes is that the other three are now one click away instead
+// of a close and a reopen.
+component LibrarySheet inherits Rectangle {
+    // Sheets used to exist between one frame and the next: `if open: Sheet {}` puts
+    // the whole panel on screen at once. `init` flips this the moment the element is
+    // built, so the opacity binding has something to animate from — an entrance, not a
+    // cut. Closing is still immediate: `if` destroys the element, and holding a heavy
+    // sheet alive purely to fade it out is a cost paid on every frame it is open.
+    property <bool> entered;
+    init => { root.entered = true; }
+    opacity: root.entered ? 1.0 : 0.0;
+    animate opacity { duration: Theme.screen; easing: Theme.ease-enter; }
+
+    // 0 saved · 1 recent · 2 community · 3 headphones. The order the bridge's
+    // LIB_TABS is in — mine first, then everybody else's.
+    in property <int> tab;
+    in property <string> note;
+    // Empty when a step back lands on the editor; the screen's name when this one was
+    // opened from another.
+    in property <string> back-to;
+
+    in property <[ProfileRow]> profiles;
+    in property <int> profile-count;
+    in property <[HistoryRow]> history;
+    in property <int> history-count;
+
+    in property <[HubRow]> hub-rows;
+    in property <int> hub-count;
+    in property <bool> hub-busy;
+    in property <[string]> sorts;
+    in property <int> sort-index;
+    in property <bool> own-only;
+    in property <[ShapeRow]> shapes;
+    in property <string> shape;
+
+    in property <[AeqRow]> aeq-rows;
+    in property <int> aeq-count;
+    in property <bool> aeq-busy;
+    in property <[ShapeRow]> sources;
+    in property <string> source;
+
     callback closed();
+    callback tab-picked(int);
+
     callback named(string);
     callback saved();
-    callback applied(string);
-    callback removed(string);
+    callback profile-applied(string);
+    callback profile-removed(string);
+
+    callback history-applied(string);
+    callback history-kept(string);
+    callback history-cleared();
+
+    callback hub-searched(string);
+    callback hub-reloaded();
+    callback hub-applied(string);
+    callback sorted(int);
+    callback own-picked(bool);
+    callback shape-picked(string);
+
+    callback aeq-searched(string);
+    callback aeq-reloaded();
+    callback aeq-picked(string, string, string);
+    callback source-picked(string);
+
+    property <bool> busy: root.tab == 2 ? root.hub-busy
+        : (root.tab == 3 ? root.aeq-busy : false);
+    property <int> count: root.tab == 0 ? root.profile-count
+        : (root.tab == 1 ? root.history-count
+        : (root.tab == 2 ? root.hub-count : root.aeq-count));
 
     background: Theme.card;
     border-radius: Theme.r-lg;
@@ -3296,12 +4099,49 @@ component ProfilesSheet inherits Rectangle {
         spacing: 11px;
 
         SheetHead {
-            title: "Saved profiles";
-            note: root.note;
+            title: "Library";
+            note: root.busy ? "working…" : root.note;
+            back-to: root.back-to;
             closed => { root.closed(); }
         }
 
         HorizontalLayout {
+            spacing: 2px;
+            height: 34px;
+            alignment: start;
+            LibTab {
+                label: "Saved";
+                icon: Icons.favorite;
+                count: root.profile-count;
+                active: root.tab == 0;
+                picked => { root.tab-picked(0); }
+            }
+            LibTab {
+                label: "Recent";
+                icon: Icons.undo;
+                count: root.history-count;
+                active: root.tab == 1;
+                picked => { root.tab-picked(1); }
+            }
+            LibTab {
+                label: "Community";
+                icon: Icons.groups;
+                count: root.hub-count;
+                active: root.tab == 2;
+                picked => { root.tab-picked(2); }
+            }
+            LibTab {
+                label: "Headphones";
+                icon: Icons.headphones;
+                count: root.aeq-count;
+                active: root.tab == 3;
+                picked => { root.tab-picked(3); }
+            }
+        }
+        Rectangle { height: 1px; background: Theme.line; }
+
+        // ── the controls that belong to the tab you are on ──
+        if root.tab == 0: HorizontalLayout {
             spacing: 8px;
             height: 30px;
             Rectangle {
@@ -3310,7 +4150,7 @@ component ProfilesSheet inherits Rectangle {
                 background: Theme.card-2;
                 border-width: 1px;
                 border-color: pname.has-focus ? Theme.accent : Theme.line-2;
-                animate border-color { duration: Theme.quick; easing: ease-out; }
+                animate border-color { duration: Theme.quick; easing: Theme.ease-state; }
                 HorizontalLayout {
                     padding-left: 10px;
                     padding-right: 10px;
@@ -3346,191 +4186,209 @@ component ProfilesSheet inherits Rectangle {
             }
         }
 
-        Rectangle {
-            vertical-stretch: 1;
-            clip: true;
-            Flickable {
-                viewport-height: plist.preferred-height;
-                plist := VerticalLayout {
-                    width: parent.width;
-                    spacing: 7px;
-                    for r in root.rows: ProfileCard {
-                        entry: r;
-                        applied => { root.applied(r.name); }
-                        removed => { root.removed(r.name); }
-                    }
-                }
-            }
-            if root.count == 0: Text {
-                text: "Nothing saved yet. Name the curve you have now and save it.";
-                color: Theme.faint;
-                font-size: 12px;
-                width: 100%;
-                horizontal-alignment: center;
-                y: 24px;
+        // Just the button. The footer already says what this list is, and saying it
+        // here as well is the same panel explaining itself to you twice.
+        if root.tab == 1: HorizontalLayout {
+            height: 30px;
+            alignment: end;
+            TextBtn {
+                label: "clear";
+                icon: Icons.close;
+                enabled: root.history-count > 0;
+                clicked => { root.history-cleared(); }
             }
         }
-        Text {
-            text: "Saved on this computer, not on the DAC — so there is no limit and they survive a device slot being overwritten. Each file is an ordinary export: mail one to somebody and they can import it.";
-            color: Theme.faint;
-            font-size: 11px;
-            wrap: word-wrap;
-        }
-    }
-}
 
-component AeqCard inherits Rectangle {
-    in property <AeqRow> entry;
-    callback picked();
-
-    height: 54px;
-    border-radius: Theme.r-sm;
-    background: touch.has-hover ? Theme.card-2 : Theme.card;
-    border-width: 1px;
-    border-color: touch.has-hover ? Theme.line-2 : Theme.line;
-    animate background, border-color { duration: Theme.quick; easing: ease-out; }
-
-    HorizontalLayout {
-        padding-left: 12px;
-        padding-right: 12px;
-        spacing: 10px;
-        VerticalLayout {
-            alignment: center;
-            horizontal-stretch: 1;
-            spacing: 2px;
-            Text {
-                text: root.entry.model;
-                color: Theme.text;
-                font-size: 13px;
-                font-weight: 600;
-                overflow: elide;
-            }
-            // The rig matters as much as the name: two sources measuring the same
-            // headphone do not agree, so the row says whose measurement this is.
-            Text {
-                text: root.entry.source + "  ·  " + root.entry.form;
-                color: Theme.faint;
-                font-size: 11px;
-                overflow: elide;
-            }
-        }
-        VerticalLayout {
-            alignment: center;
-            Sym { d: Icons.show-chart; sz: 16px; tint: touch.has-hover ? Theme.accent : Theme.faint; width: 16px; }
-        }
-    }
-    touch := TouchArea {
-        mouse-cursor: pointer;
-        clicked => { root.picked(); }
-    }
-}
-
-component AutoEqSheet inherits Rectangle {
-    in property <[AeqRow]> rows;
-    in property <string> note;
-    in property <bool> busy;
-    in property <int> count;
-    callback closed();
-    callback searched(string);
-    callback reloaded();
-    callback picked(string, string, string);
-
-    background: Theme.card;
-    border-radius: Theme.r-lg;
-    border-width: 1px;
-    border-color: Theme.line-2;
-    clip: true;
-
-    VerticalLayout {
-        padding: 16px;
-        spacing: 11px;
-
-        SheetHead {
-            title: "Headphone corrections";
-            note: root.busy ? "working…" : root.note;
-            closed => { root.closed(); }
-        }
-
-        HorizontalLayout {
+        if root.tab == 2: HorizontalLayout {
             spacing: 8px;
             height: 30px;
-            Rectangle {
-                horizontal-stretch: 1;
-                border-radius: Theme.r-sm;
-                background: Theme.card-2;
-                border-width: 1px;
-                border-color: field.has-focus ? Theme.accent : Theme.line-2;
-                animate border-color { duration: Theme.quick; easing: ease-out; }
-                HorizontalLayout {
-                    padding-left: 10px;
-                    padding-right: 10px;
-                    spacing: 7px;
-                    Sym { d: Icons.search; sz: 15px; tint: Theme.faint; width: 15px; }
-                    // The hint sits *behind* the field rather than beside it — as a
-                    // sibling in the layout it took its own column and pushed the
-                    // caret into the middle of the box.
-                    Rectangle {
-                        horizontal-stretch: 1;
-                        field := TextInput {
-                            width: 100%;
-                            height: 100%;
-                            color: Theme.text;
-                            font-size: 12px;
-                            vertical-alignment: center;
-                            single-line: true;
-                            edited => { root.searched(self.text); }
-                        }
-                        if field.text == "": Text {
-                            x: 0px;
-                            width: 100%;
-                            height: 100%;
-                            text: "search 6,015 headphones…";
-                            color: Theme.faint;
-                            font-size: 12px;
-                            vertical-alignment: center;
-                        }
-                    }
-                }
+            SearchBox {
+                hint: "search the community library…";
+                edited(t) => { root.hub-searched(t); }
             }
             TextBtn {
                 label: "reload";
                 icon: Icons.refresh;
-                enabled: !root.busy;
-                clicked => { root.reloaded(); }
+                enabled: !root.hub-busy;
+                clicked => { root.hub-reloaded(); }
             }
         }
+        // Which library, and in what order. Both are local — the index is already on
+        // disk, so neither costs a request.
+        if root.tab == 2: HorizontalLayout {
+            spacing: 8px;
+            height: 30px;
+            Segmented {
+                // Wider than the default 190: "Whole family" is a longer label than
+                // this control was built for and sat against its rounded edge.
+                width: 212px;
+                left: "This DAC";
+                right: "Whole family";
+                on-right: !root.own-only;
+                picked(v) => { root.own-picked(!v); }
+            }
+            Choice {
+                horizontal-stretch: 1;
+                options: root.sorts;
+                index: root.sort-index;
+                picked(i) => { root.sorted(i); }
+            }
+        }
+        // What the curves actually do — derived from the bands, because 25 of the
+        // library's 9,243 rows carry a tag and nothing can be filtered on that. Chips
+        // appear as their curves are classified, and only for shapes something
+        // matched, so no chip ever leads to an empty list.
+        if root.tab == 2 && root.shapes.length > 0: ChipStrip {
+            chips: root.shapes;
+            active: root.shape;
+            picked(n) => { root.shape-picked(n); }
+        }
 
+        if root.tab == 3: HorizontalLayout {
+            spacing: 8px;
+            height: 30px;
+            SearchBox {
+                // No count in the hint. It said "6,015 headphones" against a
+                // catalogue that has 8,827 in it today — a number written into the
+                // view drifts the moment upstream publishes anything. The real one is
+                // in the note beside the title, where it comes from the data.
+                hint: "search the headphone catalogue…";
+                edited(t) => { root.aeq-searched(t); }
+            }
+            TextBtn {
+                label: "reload";
+                icon: Icons.refresh;
+                enabled: !root.aeq-busy;
+                clicked => { root.aeq-reloaded(); }
+            }
+        }
+        // Who measured it. One headphone comes back measured by a dozen people on a
+        // dozen rigs, and picking a measurer is the only filter that narrows *that* —
+        // searching harder cannot, because every one of those rows has the same name.
+        if root.tab == 3 && root.sources.length > 0: ChipStrip {
+            chips: root.sources;
+            active: root.source;
+            picked(n) => { root.source-picked(n); }
+        }
+
+        // ── the list ──
         Rectangle {
             vertical-stretch: 1;
+            // An empty list must still hold the sheet open. A Flickable reports its
+            // viewport as its own height preference, and with no rows in it that is
+            // zero — which propagated up as this Rectangle's maximum, so the one child
+            // meant to stretch could not, `clip: true` swallowed the "nothing here"
+            // message, and the footer rode up under the search box leaving a third of
+            // the sheet blank. The Flickable fills the space it is given;
+            // `viewport-height` only ever describes what scrolls inside it.
+            min-height: 120px;
             clip: true;
-            Flickable {
-                viewport-height: alist.preferred-height;
-                alist := VerticalLayout {
-                    width: parent.width;
-                    spacing: 7px;
-                    for r in root.rows: AeqCard {
+
+            if root.tab == 0: cprof := LazyRows {
+                pitch: 61px;                    // 54px card + 7px gap
+                row-height: 54px;
+                count: root.profiles.length;
+                for r[i] in root.profiles: Rectangle {
+                    y: i * 61px;
+                    height: 54px;
+                    width: 100%;
+                    if cprof.shown(i): ProfileCard {
                         entry: r;
-                        picked => { root.picked(r.model, r.source, r.form); }
+                        applied => { root.profile-applied(r.name); }
+                        removed => { root.profile-removed(r.name); }
                     }
                 }
             }
-            if root.count == 0: Text {
-                text: root.busy ? "" : "No headphone matches that.";
-                color: Theme.faint;
-                font-size: 12px;
-                width: 100%;
-                horizontal-alignment: center;
+            if root.tab == 1: chist := LazyRows {
+                pitch: 52px;                    // 46px card + 6px gap
+                row-height: 46px;
+                count: root.history.length;
+                for h[i] in root.history: Rectangle {
+                    y: i * 52px;
+                    height: 46px;
+                    width: 100%;
+                    if chist.shown(i): HistoryCard {
+                        entry: h;
+                        applied => { root.history-applied(h.fingerprint); }
+                        kept => { root.history-kept(h.fingerprint); }
+                    }
+                }
+            }
+            if root.tab == 2: chub := LazyRows {
+                pitch: 73px;                    // 66px card + 7px gap
+                row-height: 66px;
+                count: root.hub-rows.length;
+                for r[i] in root.hub-rows: Rectangle {
+                    y: i * 73px;
+                    height: 66px;
+                    width: 100%;
+                    if chub.shown(i): HubCard {
+                        entry: r;
+                        applied => { root.hub-applied(r.uuid); }
+                    }
+                }
+            }
+            if root.tab == 3: caeq := LazyRows {
+                pitch: 61px;                    // 54px card + 7px gap
+                row-height: 54px;
+                count: root.aeq-rows.length;
+                for r[i] in root.aeq-rows: Rectangle {
+                    y: i * 61px;
+                    height: 54px;
+                    width: 100%;
+                    if caeq.shown(i): AeqCard {
+                        entry: r;
+                        picked => { root.aeq-picked(r.model, r.source, r.form); }
+                    }
+                }
+            }
+
+            if root.count == 0 && !root.busy: VerticalLayout {
                 y: 24px;
+                // `alignment: start`, or the two lines are stretched to fill the whole
+                // empty pane and end up 300px apart — a heading at the top of the
+                // sheet and its own second sentence down by the footer, reading as two
+                // unrelated messages.
+                alignment: start;
+                spacing: 5px;
+                Text {
+                    text: root.tab == 0 ? "Nothing saved yet."
+                        : (root.tab == 1 ? "Nothing applied yet this session."
+                        : (root.tab == 2 ? "Nothing here."
+                        : "No headphone matches that."));
+                    color: Theme.sub;
+                    font-size: 13px;
+                    font-weight: 600;
+                    width: 100%;
+                    horizontal-alignment: center;
+                }
+                // An empty list should say what to do about it. "Nothing here" on its
+                // own is a dead end three of these four tabs can be talked out of.
+                Text {
+                    text: root.tab == 0 ? "Name the curve you have now and save it."
+                        : (root.tab == 1 ? "Apply a preset or a community curve and it turns up here."
+                        : (root.tab == 2 ? "Try a different search, widen it to the whole family, or reload."
+                        : "Try part of the name — “hd 600” finds the HD 600 under every measurer."));
+                    color: Theme.faint;
+                    font-size: 11.5px;
+                    width: 100%;
+                    horizontal-alignment: center;
+                }
             }
         }
+
         Text {
-            text: "AutoEQ publishes ten filters per headphone and this DAC has eight, so two are always left out — the preview names them. Corrections by Jaakko Pasanen and the measurers credited on each row (MIT).";
+            text: root.tab == 0 ? "Saved on this computer, not on the DAC — so there is no limit and they survive a device slot being overwritten. Each file is an ordinary export: mail one to somebody and they can import it."
+                : (root.tab == 1 ? "The last curves you applied, kept until they roll off the end of the list. Keeping one makes it a saved profile, which nothing rolls off."
+                : (root.tab == 2 ? "Click any config to see its curve before it goes anywhere near your DAC."
+                : "AutoEQ publishes ten filters per headphone and this DAC has eight, so two are always left out — the preview names them. Corrections by Jaakko Pasanen and the measurers credited on each row (MIT)."));
             color: Theme.faint;
             font-size: 11px;
             wrap: word-wrap;
         }
     }
 }
+
 
 // ── window ──────────────────────────────────────────────────────────────────────
 export component MainWindow inherits Window {
@@ -3548,6 +4406,36 @@ export component MainWindow inherits Window {
     preferred-height: 820px;
     min-width: 980px;
     min-height: 700px;
+    // Why a maximum on a window that has no maximum.
+    //
+    // A tiling compositor decides float-vs-tile from the size constraints the surface
+    // carries on its FIRST commit, and that decision is taken once. Slint's first
+    // layout runs before the bridge has pushed a single row, and with empty models
+    // nothing in the tree stretches horizontally — so the computed maximum width
+    // collapses to the declared minimum and the toplevel maps advertising
+    // `set_max_size(980, …)`: "I cannot be wider than my own minimum". Hyprland reads
+    // that as a window it cannot tile and floats it. Slint corrects itself ~80 ms
+    // later with `set_max_size(0, 0)`, microseconds after the first buffer is
+    // attached, which is already too late.
+    //
+    // That race is why the same code tiles from source and floats from the frozen
+    // bundle: the two measure text slightly differently and land on opposite sides of
+    // it. Declaring the maximum here puts an unbounded one on the first commit, which
+    // is the truth about this window, and removes the race rather than winning it.
+    // Verified against the frozen 1.2.0 bundle: floating before, tiled after.
+    max-width: 100000px;
+    full-screen: root.want-fullscreen;
+
+    // Below this the header and footer stop showing button labels. It is not the
+    // window's minimum — a tiling compositor hands the app whatever the tile is,
+    // happily less than the minimum it asked for, so "too narrow" is a state the
+    // layout has to survive rather than one it can refuse.
+    // Assigned, not bound. A binding would read the window's width, which is derived
+    // in part from what its children want — and the header's subtitle changes length
+    // on this very property. Slint spots the cycle and says it "may cause panic at
+    // runtime"; a `changed` handler runs after the width settles and closes it.
+    property <bool> narrow;
+    changed width => { root.narrow = root.width < 1100px; }
 
     // ── state, pushed in from the bridge ──
     in property <bool> connected;
@@ -3560,11 +4448,20 @@ export component MainWindow inherits Window {
     in property <bool> supports-pregain: true;
     in property <float> global-gain;
     in property <int> slot: -1;
+    // What the profile row says under its number, and whether the DAC is playing one of
+    // its own presets rather than the curve this app owns.
+    in property <string> slot-note;
+    in property <bool> slot-on-builtin;
     in property <bool> clipping;
     in property <string> headroom-hint;
     in property <[BandRow]> bands;
     in property <[PresetRow]> presets;
     in property <string> active-preset;
+    // "Community · aira 咏叹调 (edited)", or empty when nothing is known about the
+    // curve on the device — which is not the same as it being hand-drawn.
+    in property <string> source-label;
+    in property <[HistoryRow]> history-rows;
+    in property <int> history-count;
     in property <string> curve-path;
     in property <string> flat-path;
     in property <string> pregain-path;
@@ -3579,22 +4476,30 @@ export component MainWindow inherits Window {
     in property <string> toast-text;
     in property <bool> toast-error;
     in property <int> selected: -1;
-    in property <bool> help-open;
-    in property <bool> settings-open;
-    in property <bool> prof-open;
-    in property <string> prof-note;
+    // Which screen is up — "" is the editor — and what a step back returns to. One
+    // property instead of a boolean per screen: see gui/nav.py.
+    in property <string> nav;
+    in property <string> nav-under;
+    // Which of the library's four sources is showing, and the count line under its
+    // title. Both are the bridge's — the view has no way to know how many of 9,243
+    // rows passed a filter, and working it out here would be maths in the view.
+    in property <int> lib-tab;
+    in property <string> lib-note;
     in property <int> prof-count;
     in property <[ProfileRow]> prof-rows;
-    in property <bool> aeq-open;
     in property <bool> aeq-busy;
-    in property <string> aeq-note;
     in property <int> aeq-count;
     in property <[AeqRow]> aeq-rows;
-    in property <bool> hub-open;
+    in property <[ShapeRow]> aeq-sources;
+    in property <string> aeq-source;
     in property <bool> hub-busy;
-    in property <string> hub-note;
     in property <int> hub-count;
     in property <[HubRow]> hub-rows;
+    in property <[string]> hub-sorts;
+    in property <int> hub-sort;
+    in property <bool> hub-own;
+    in property <[ShapeRow]> hub-shapes;
+    in property <string> hub-shape;
     in property <bool> preview-open;
     in property <string> preview-title;
     in property <string> preview-author;
@@ -3604,6 +4509,15 @@ export component MainWindow inherits Window {
     in property <string> preview-flat-path;
     in property <string> app-version;
     in property <string> settings-path;
+    in property <bool> opt-fullscreen;
+    in property <bool> opt-watch;
+    in property <bool> opt-prefetch;
+    in property <bool> opt-history;
+    in property <[string]> motion-labels;
+    in property <int> opt-motion;
+    // Set from Python once the window exists — see Bridge.start(). Declaring
+    // `full-screen: true` here does nothing at all: winit only acts on a change.
+    in property <bool> want-fullscreen;
     // "idle" | "checking" | "current" | "available" | "downloading" | "staged"
     in property <string> update-state: "idle";
     in property <string> update-note;
@@ -3628,10 +4542,8 @@ export component MainWindow inherits Window {
     in property <int> tour-step: -1;
     in property <string> tour-head;
     in property <string> tour-body;
-    in property <bool> dev-open;
     in property <[DeviceRow]> device-rows;
     in property <string> device-note;
-    in property <bool> whatsnew-open;
     in property <string> whatsnew-from;
     in property <string> whatsnew-version;
     in property <bool> whatsnew-preview;
@@ -3668,6 +4580,8 @@ export component MainWindow inherits Window {
     callback dismiss-welcome();
     callback show-welcome();
     callback toggle-community();
+    callback library-tab(int);
+    callback reselect-custom();
     callback toggle-profiles();
     callback profile-name-edited(string);
     callback profile-save();
@@ -3678,6 +4592,15 @@ export component MainWindow inherits Window {
     callback autoeq-reload();
     callback autoeq-pick(string, string, string);
     callback community-search(string);
+    callback community-sort(int);
+    callback community-own(bool);
+    callback community-shape(string);
+    callback autoeq-source(string);
+    callback set-switch(string, bool);
+    callback set-motion(int);
+    callback history-apply(string);
+    callback history-keep(string);
+    callback history-clear();
     callback community-apply(string);
     callback community-reload();
     callback preview-apply();
@@ -3702,17 +4625,20 @@ export component MainWindow inherits Window {
     callback start-tour();
     callback tour-next();
     callback tour-end();
-    callback dismiss-whatsnew();
+    // One step back, wherever you are. Every sheet's close button, the back arrow
+    // and Escape are the same action.
+    callback nav-pop();
     callback show-whatsnew();
     callback preview-whatsnew();
     callback restart-app();
 
-    property <bool> sheet-open: root.help-open || root.hub-open || root.settings-open || root.aeq-open || root.prof-open || root.whatsnew-open || root.dev-open;
+    property <bool> sheet-open: root.nav != "";
 
     // Theme is a global, and a global cannot bind to a property on a component — so the
     // flow runs the other way: the bridge pushes `dark` here and this forwards it once.
     // `init` covers the first paint, `changed` every flip after it.
     init => {
+        root.narrow = root.width < 1100px;
         Theme.dark = root.dark;
         Theme.accent-index = root.accent-index;
         Theme.skin-index = root.skin-index;
@@ -3731,14 +4657,10 @@ export component MainWindow inherits Window {
             // is stacked. The welcome screen is deliberately not in this list: it is
             // where you are, not something on top of you.
             if (e.text == Key.Escape) {
-                if (root.whatsnew-open) { root.dismiss-whatsnew(); }
-                else if (root.dev-open) { root.toggle-devices(); }
-                else if (root.preview-open) { root.preview-close(); }
-                else if (root.prof-open) { root.toggle-profiles(); }
-                else if (root.aeq-open) { root.toggle-autoeq(); }
-                else if (root.hub-open) { root.toggle-community(); }
-                else if (root.help-open) { root.toggle-help(); }
-                else if (root.settings-open) { root.toggle-settings(); }
+                // The preview is the one thing that draws over a sheet rather than
+                // instead of it, so it is the one thing tested before the stack.
+                if (root.preview-open) { root.preview-close(); }
+                else if (root.sheet-open) { root.nav-pop(); }
                 else if (root.toast-text != "") { root.dismiss-toast(); }
                 return EventResult.accept;
             }
@@ -3843,7 +4765,8 @@ export component MainWindow inherits Window {
                         font-weight: 700;
                     }
                     Text {
-                        text: "\{root.band-count}-band parametric EQ · DSP @ 96 kHz";
+                        text: root.narrow ? "\{root.band-count}-band · 96 kHz"
+                            : "\{root.band-count}-band parametric EQ · DSP @ 96 kHz";
                         color: Theme.faint;
                         font-family: Theme.mono;
                         font-size: 9px;
@@ -3859,7 +4782,7 @@ export component MainWindow inherits Window {
                     background: dev-touch.has-hover ? Theme.card-2 : Theme.bg;
                     border-width: 1px;
                     border-color: root.connected ? Theme.accent-line : Theme.line;
-                    animate background, border-color { duration: Theme.quick; easing: ease-out; }
+                    animate background, border-color { duration: Theme.quick; easing: Theme.ease-state; }
                     dev-touch := TouchArea { mouse-cursor: pointer; clicked => { root.refresh(); } }
                     chip := HorizontalLayout {
                         padding-left: 11px;
@@ -3947,16 +4870,19 @@ export component MainWindow inherits Window {
                         TextBtn {
                             label: "headphones";
                             icon: Icons.headphones;
+                            compact: root.narrow;
                             clicked => { root.toggle-autoeq(); }
                         }
                         TextBtn {
                             label: "community";
                             icon: Icons.groups;
+                            compact: root.narrow;
                             clicked => { root.toggle-community(); }
                         }
                         TextBtn {
                             label: "how to tune";
                             icon: Icons.help;
+                            compact: root.narrow;
                             clicked => { root.toggle-help(); }
                         }
                     }
@@ -3972,7 +4898,7 @@ export component MainWindow inherits Window {
                         }
                         IconBtn {
                             icon: Icons.tune;
-                            active: root.settings-open;
+                            active: root.nav == "settings";
                             clicked => { root.toggle-settings(); }
                         }
                         IconBtn {
@@ -3995,10 +4921,16 @@ export component MainWindow inherits Window {
                 spacing: 10px;
                 height: 62px;
                 SlotCard {
-                    width: 190px;
+                    // Wider than it was: the row now carries a recovery button on the
+                    // one state where it is needed, and 190px put it on top of the
+                    // stepper.
+                    width: root.slot-on-builtin ? 258px : 190px;
                     slot: root.slot;
+                    note: root.slot-note;
+                    on-builtin: root.slot-on-builtin;
                     enabled: root.connected;
                     stepped(d) => { root.step-slot(d); }
+                    mine => { root.reselect-custom(); }
                 }
                 SliderCard {
                     horizontal-stretch: 1;
@@ -4049,7 +4981,7 @@ export component MainWindow inherits Window {
                               : (pt.has-hover ? Theme.accent-soft : Theme.card);
                     border-width: 1px;
                     border-color: self.on ? Theme.accent : Theme.line;
-                    animate background, border-color { duration: Theme.quick; easing: ease-out; }
+                    animate background, border-color { duration: Theme.quick; easing: Theme.ease-state; }
                     HorizontalLayout {
                         alignment: center;
                         spacing: 6px;
@@ -4071,6 +5003,28 @@ export component MainWindow inherits Window {
                         mouse-cursor: pointer;
                         clicked => { root.apply-preset(i); }
                     }
+                }
+            }
+
+            // What is on the device, and whether it is still what was applied. Sits
+            // between the presets and the plot because that is the reading order of
+            // the question it answers: I picked something — what is it now?
+            //
+            // Absent, not empty, when nothing is known. A curve whose origin this
+            // machine never recorded gets no chip rather than a chip claiming it was
+            // drawn by hand.
+            if root.source-label != "": HorizontalLayout {
+                height: 18px;
+                spacing: 7px;
+                Sym { d: Icons.note; sz: 12px; tint: Theme.faint; width: 12px; }
+                Text {
+                    text: root.source-label;
+                    color: Theme.faint;
+                    font-family: Theme.mono;
+                    font-size: 10px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                    horizontal-stretch: 1;
                 }
             }
 
@@ -4124,9 +5078,9 @@ export component MainWindow inherits Window {
                     horizontal-stretch: 1;
                     overflow: elide;
                 }
-                TextBtn { label: "profiles"; icon: Icons.favorite; clicked => { root.toggle-profiles(); } }
-                TextBtn { label: "import"; icon: Icons.upload-file; clicked => { root.import-file(); } }
-                TextBtn { label: "export"; icon: Icons.download; clicked => { root.export-file(); } }
+                TextBtn { label: "profiles"; icon: Icons.favorite; compact: root.narrow; clicked => { root.toggle-profiles(); } }
+                TextBtn { label: "import"; icon: Icons.upload-file; compact: root.narrow; clicked => { root.import-file(); } }
+                TextBtn { label: "export"; icon: Icons.download; compact: root.narrow; clicked => { root.export-file(); } }
                 // Hold, do not click. A/B is a comparison you make with your ears
                 // over a few seconds of music, and a toggle makes you look at the
                 // screen to find out which side you are on.
@@ -4140,10 +5094,11 @@ export component MainWindow inherits Window {
                     label: "undo";
                     icon: Icons.undo;
                     enabled: root.can-undo;
+                    compact: root.narrow;
                     clicked => { root.undo(); }
                 }
-                TextBtn { label: "revert"; icon: Icons.restart-alt; clicked => { root.revert(); } }
-                TextBtn { label: "reload"; icon: Icons.refresh; clicked => { root.refresh(); } }
+                TextBtn { label: "revert"; icon: Icons.restart-alt; compact: root.narrow; clicked => { root.revert(); } }
+                TextBtn { label: "reload"; icon: Icons.refresh; compact: root.narrow; clicked => { root.refresh(); } }
                 TextBtn {
                     label: "save to flash";
                     icon: Icons.save;
@@ -4206,14 +5161,11 @@ export component MainWindow inherits Window {
         // just does nothing, which looks exactly like a scrim that failed to lay out.
         background: #0a0709aa;
         TouchArea {
-            clicked => {
-                if (root.help-open) { root.toggle-help(); }
-                else if (root.settings-open) { root.toggle-settings(); }
-                else { root.toggle-community(); }
-            }
+            clicked => { root.nav-pop(); }
         }
     }
-    if root.settings-open: SettingsSheet {
+    if root.nav == "settings": SettingsSheet {
+        back-to: root.nav-under;
         x: (root.width - self.width) / 2;
         y: max(24px, (root.height - self.height) / 2);
         // The largest sheet in the app, and deliberately so. It is the only one whose
@@ -4244,8 +5196,21 @@ export component MainWindow inherits Window {
         update-channel: root.update-channel;
         update-auto: root.update-auto;
         install-note: root.install-note;
+        connected: root.connected;
+        device-name: root.device-name;
+        firmware: root.firmware;
+        band-count: root.band-count;
+        devices-clicked => { root.toggle-devices(); }
+        opt-fullscreen: root.opt-fullscreen;
+        opt-watch: root.opt-watch;
+        opt-prefetch: root.opt-prefetch;
+        opt-history: root.opt-history;
+        motion-labels: root.motion-labels;
+        opt-motion: root.opt-motion;
+        set-motion(i) => { root.set-motion(i); }
+        switched(k, v) => { root.set-switch(k, v); }
         about-text: root.about-text;
-        closed => { root.toggle-settings(); }
+        closed => { root.nav-pop(); }
         dark-picked(v) => { root.set-dark(v); }
         readout-picked(v) => { root.set-readout(v); }
         accent-picked(i) => { root.set-accent(i); }
@@ -4264,16 +5229,17 @@ export component MainWindow inherits Window {
         preview-notes => { root.preview-whatsnew(); }
         restart-clicked => { root.restart-app(); }
     }
-    if root.dev-open: DevicesSheet {
+    if root.nav == "devices": DevicesSheet {
+        back-to: root.nav-under;
         x: (root.width - self.width) / 2;
         y: max(24px, (root.height - self.height) / 2);
         width: min(660px, root.width - 56px);
         height: min(660px, root.height - 60px);
         rows: root.device-rows;
         note: root.device-note;
-        closed => { root.toggle-devices(); }
+        closed => { root.nav-pop(); }
     }
-    if root.whatsnew-open: WhatsNew {
+    if root.nav == "whatsnew": WhatsNew {
         x: (root.width - self.width) / 2;
         y: (root.height - self.height) / 2;
         width: min(560px, root.width - 80px);
@@ -4281,61 +5247,73 @@ export component MainWindow inherits Window {
         version: root.whatsnew-version;
         from-version: root.whatsnew-from;
         preview: root.whatsnew-preview;
+        back-to: root.nav-under;
         can-install: root.update-can-install || root.update-can-elevate;
         notes: root.whatsnew-notes;
-        dismissed => { root.dismiss-whatsnew(); }
+        dismissed => { root.nav-pop(); }
         changelog => { root.open-notes(); }
         install => { root.install-update(); }
     }
-    if root.prof-open: ProfilesSheet {
+    if root.nav == "library": LibrarySheet {
+        back-to: root.nav-under;
         x: (root.width - self.width) / 2;
         y: 60px;
-        width: min(640px, root.width - 80px);
-        height: min(620px, root.height - 130px);
-        rows: root.prof-rows;
-        note: root.prof-note;
-        count: root.prof-count;
-        closed => { root.toggle-profiles(); }
+        // The widest of the three it replaces. The community rows carry a thumbnail
+        // and a name and an author, and were the reason 760 was picked; the others
+        // are no worse for the room.
+        width: min(760px, root.width - 80px);
+        height: root.height - 130px;
+        tab: root.lib-tab;
+        note: root.lib-note;
+        closed => { root.nav-pop(); }
+        tab-picked(i) => { root.library-tab(i); }
+
+        profiles: root.prof-rows;
+        profile-count: root.prof-count;
         named(t) => { root.profile-name-edited(t); }
         saved => { root.profile-save(); }
-        applied(n) => { root.profile-apply(n); }
-        removed(n) => { root.profile-delete(n); }
+        profile-applied(n) => { root.profile-apply(n); }
+        profile-removed(n) => { root.profile-delete(n); }
+
+        history: root.history-rows;
+        history-count: root.history-count;
+        history-applied(f) => { root.history-apply(f); }
+        history-kept(f) => { root.history-keep(f); }
+        history-cleared => { root.history-clear(); }
+
+        hub-rows: root.hub-rows;
+        hub-count: root.hub-count;
+        hub-busy: root.hub-busy;
+        sorts: root.hub-sorts;
+        sort-index: root.hub-sort;
+        own-only: root.hub-own;
+        shapes: root.hub-shapes;
+        shape: root.hub-shape;
+        hub-searched(t) => { root.community-search(t); }
+        hub-reloaded => { root.community-reload(); }
+        hub-applied(u) => { root.community-apply(u); }
+        sorted(i) => { root.community-sort(i); }
+        own-picked(v) => { root.community-own(v); }
+        shape-picked(n) => { root.community-shape(n); }
+
+        aeq-rows: root.aeq-rows;
+        aeq-count: root.aeq-count;
+        aeq-busy: root.aeq-busy;
+        sources: root.aeq-sources;
+        source: root.aeq-source;
+        aeq-searched(t) => { root.autoeq-search(t); }
+        aeq-reloaded => { root.autoeq-reload(); }
+        aeq-picked(m, sc, f) => { root.autoeq-pick(m, sc, f); }
+        source-picked(n) => { root.autoeq-source(n); }
     }
-    if root.aeq-open: AutoEqSheet {
-        x: (root.width - self.width) / 2;
-        y: 60px;
-        width: min(720px, root.width - 80px);
-        height: root.height - 130px;
-        rows: root.aeq-rows;
-        note: root.aeq-note;
-        busy: root.aeq-busy;
-        count: root.aeq-count;
-        closed => { root.toggle-autoeq(); }
-        searched(t) => { root.autoeq-search(t); }
-        reloaded => { root.autoeq-reload(); }
-        picked(m, s, f) => { root.autoeq-pick(m, s, f); }
-    }
-    if root.help-open: HelpSheet {
+    if root.nav == "help": HelpSheet {
+        back-to: root.nav-under;
         pages: root.guide-pages;
         x: (root.width - self.width) / 2;
         y: max(24px, (root.height - self.height) / 2);
         width: min(760px, root.width - 56px);
         height: clamp(self.wanted, 380px, min(760px, root.height - 60px));
-        closed => { root.toggle-help(); }
-    }
-    if root.hub-open: CommunitySheet {
-        x: (root.width - self.width) / 2;
-        y: 60px;
-        width: min(760px, root.width - 80px);
-        height: root.height - 130px;
-        rows: root.hub-rows;
-        note: root.hub-note;
-        busy: root.hub-busy;
-        count: root.hub-count;
-        closed => { root.toggle-community(); }
-        searched(t) => { root.community-search(t); }
-        reloaded => { root.community-reload(); }
-        applied(u) => { root.community-apply(u); }
+        closed => { root.nav-pop(); }
     }
 
     // Last child, so it covers everything — including a settings sheet that may have
@@ -4399,7 +5377,7 @@ export component MainWindow inherits Window {
             border-radius: Theme.r-md;
             border-width: 2px;
             border-color: Theme.accent;
-            animate x, y, width, height { duration: Theme.settle; easing: cubic-bezier(0.2, 0, 0, 1); }
+            animate x, y, width, height { duration: Theme.settle; easing: Theme.ease-enter; }
         }
 
         TouchArea { clicked => { root.tour-next(); } }
@@ -4415,7 +5393,7 @@ export component MainWindow inherits Window {
             background: Theme.card;
             border-width: 1px;
             border-color: Theme.accent;
-            animate x, y { duration: Theme.settle; easing: cubic-bezier(0.2, 0, 0, 1); }
+            animate x, y { duration: Theme.settle; easing: Theme.ease-enter; }
             cap := VerticalLayout {
                 padding: 13px;
                 spacing: 5px;

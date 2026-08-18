@@ -41,6 +41,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 
 import slint
@@ -56,7 +57,10 @@ from . import autoeq
 from . import curve as curve_mod
 from . import devices as devices_mod
 from . import guide as guide_mod
+from . import nav as nav_mod
 from . import profiles as prof
+from . import shapes as shape_mod
+from . import tuning
 from . import updater
 from .diagnostics import log
 from .icons import PATHS as ICON_PATHS
@@ -122,10 +126,115 @@ AEQ_LIMIT = 200
 PREVIEW_W = 1000.0
 PREVIEW_H = 600.0
 
+# How the community library can be ordered, and by what. The labels are pushed to the
+# view rather than written into it, so this table is the only place the choice exists.
+#
+# There is no "newest": the index carries no timestamp on any row — uuid, title, file,
+# desc, like, dislike, favorite, downloadcount, comment_count, score, score_count and
+# the two product uuids is the whole of it — and inventing an order out of the array's
+# own sequence would be a label that lies. Every key here is descending, with the
+# tie-breaks chosen so that a preset with no ratings at all cannot outrank one with a
+# hundred.
+# The curve drawn on each community card. Small, and drawn from the same maths as the
+# big plot — a thumbnail that disagreed with the preview would be worse than none.
+THUMB_W = 108.0
+THUMB_H = 30.0
+
+# The thumbnail's own dB range, and deliberately not the editor's ±12. Thirty pixels
+# of height across 24 dB turns nearly every real preset into a flat line — the shapes
+# are there, drawn two pixels tall. ±8 dB is where the library's curves actually live,
+# and `svg_curve` runs anything bigger along the ceiling rather than off the card.
+THUMB_TOP = 8.0
+THUMB_BOT = -8.0
+
+# How many curves one prefetch job fetches before reporting back. Eight is about a
+# second of work at these sizes: short enough that a click never waits long behind it,
+# long enough that the queue is not mostly overhead.
+PREFETCH_CHUNK = 8
+
+# Concurrent fetches inside one chunk. See `HubWorker.prefetch`.
+PREFETCH_FETCHERS = 4
+
+def aeq_key(row):
+    """What identifies one correction. AutoEQ publishes no ids: a headphone is a
+    model, measured by somebody, on a rig — and the whole point of the list is that
+    the same model appears a dozen times with different measurers."""
+    return "%s|%s|%s" % (row.get("source", ""), row.get("form", ""),
+                         row.get("model", ""))
+
+
+HUB_SORTS = (
+    ("Liked", lambda r: (r["likes"], r["downloads"], r["rating"])),
+    ("Downloaded", lambda r: (r["downloads"], r["likes"], r["rating"])),
+    ("Rated", lambda r: (r["rating"], r["ratings"], r["likes"])),
+)
+
+# The library's four sources, in the order the tab strip draws them: what is yours
+# first, then what is everybody else's. The index is what crosses into the view.
+LIB_SAVED, LIB_RECENT, LIB_COMMUNITY, LIB_HEADPHONES = range(4)
+LIB_TABS = 4
+
+# What the motion setting multiplies every animation by. Zero is not "very fast": a
+# duration of zero animates nothing at all, which is exactly what somebody asking for
+# no motion is asking for.
+MOTION_SCALES = (1.0, 0.5, 0.0)
+MOTION_LABELS = ("Full", "Reduced", "Off")
+
+# How often to ask whether a DAC has been plugged in or pulled out. Through 1.2.0
+# nothing asked at all: the app looked once at launch, and a device connected a second
+# later stayed invisible until somebody thought to click the device chip. Two seconds
+# is under the time it takes to plug a cable in and look at the screen, and the poll
+# is one `hid.enumerate()` — measured at 0.75 ms — on a worker thread that skips the
+# check whenever it has real work queued.
+DEVICE_POLL = timedelta(seconds=2)
+
+# How long a notice stays up. Through 1.2.0 it stayed forever: `toast()` set the text
+# and nothing ever cleared it, so "Written to flash." sat over the interface until it
+# was clicked or something else replaced it. Errors get longer because they are the
+# ones worth reading twice — and both are in the log either way.
+TOAST_SECONDS = timedelta(seconds=5)
+TOAST_ERROR_SECONDS = timedelta(seconds=10)
+
 # Platform-correct since 1.1.0 — %APPDATA% on Windows, ~/Library/Application Support
 # on macOS, unchanged XDG on Linux. mc.config_dir() is the single answer, and
 # mc.migrate_legacy_config() carries a 1.0.0 file across on the two that moved.
-SETTINGS_PATH = os.path.join(mc.config_dir(), "settings.json")
+def settings_path():
+    """Resolved on every call, not captured at import.
+
+    It used to be a module constant, which meant the answer was fixed by whatever
+    `mc.config_dir()` said the moment this file was first imported — before any test
+    could redirect it. The tests that redirect the config directory therefore did not
+    redirect this, and every `save_settings` in the suite wrote to the real settings
+    file of whoever ran it: this is how a test run flipped a developer's update
+    channel and community filters under them.
+    """
+    return os.path.join(mc.config_dir(), "settings.json")
+
+# The settings file has never carried a version. Adding one now is what makes any
+# *future* change to its shape survivable: `load_settings` whitelists keys and silently
+# drops the rest, so today an unrecognised file and an old one are indistinguishable.
+# 2.0 is the release that can afford the break, so it is the release that takes it.
+SETTINGS_SCHEMA = 2
+
+
+def _thumbnail(bands):
+    """A row's curve as an SVG path.
+
+    Drawn on the fetching thread, deliberately. It was drawn where the results
+    landed — on the UI thread — and at 3.1 ms a curve that is 25 ms of dead frames
+    every time a chunk of eight arrived, fifty times over while a page filled in.
+    It is arithmetic over plain floats with nothing device- or view-shaped in it, so
+    there is no reason for the main loop to be the one doing it.
+    """
+    return curve_mod.svg_curve(bands, width=THUMB_W, height=THUMB_H,
+                               top_db=THUMB_TOP, bot_db=THUMB_BOT)
+
+
+def _clamp_int(value, low, high):
+    try:
+        return max(low, min(int(value), high))
+    except (TypeError, ValueError):
+        return low
 
 # Q below ~0.1 is a filter so wide it is a tone control, above 10 so narrow it is a
 # ring. The device would take more; nothing musical lives out there.
@@ -291,7 +400,7 @@ def load_settings():
     the config dir rather than anywhere near an EQ profile. A missing or unreadable
     file is not an error; it just means the defaults."""
     try:
-        with open(SETTINGS_PATH, encoding="utf-8") as fh:
+        with open(settings_path(), encoding="utf-8") as fh:
             data = json.load(fh)
     except (OSError, json.JSONDecodeError):
         data = {}
@@ -306,7 +415,11 @@ def load_settings():
         auto_default = updater.can_self_update()
     except Exception:
         auto_default = False
-    return {"dark": bool(data.get("dark", False)),
+    def flag(key, default):
+        return bool(data.get(key, default))
+
+    return {"schema": SETTINGS_SCHEMA,
+            "dark": bool(data.get("dark", False)),
             "readout": bool(data.get("readout", False)),
             "accent": int(accent) if isinstance(accent, (int, float)) else 0,
             # The surfaces and the ink, independent of the accent hue. Index into
@@ -319,16 +432,43 @@ def load_settings():
             # something newer than it turns up.
             "skipped_version": str(data.get("skipped_version", "") or ""),
             # what ran last, so a new version can say what changed
-            "last_run_version": str(data.get("last_run_version", "") or "")}
+            "last_run_version": str(data.get("last_run_version", "") or ""),
+
+            # ── 2.0 ──
+            # Off everywhere by default. On a tiling compositor the window already
+            # fills its tile, and true fullscreen additionally covers the bar — which
+            # is rarely what anyone wants from an EQ they use *alongside* a player.
+            "start_fullscreen": flag("start_fullscreen", False),
+            # The two-second device watch. An off switch rather than a knob: the only
+            # reasons to want it off are a machine where enumeration is expensive and
+            # somebody who simply does not want the app looking.
+            "watch_devices": flag("watch_devices", True),
+            # Community defaults, so the tab opens the way it was left.
+            # product id (as a string, because JSON keys are) -> the index the DAC's
+            # custom EQ profile answers to. Learned by observation the first time
+            # anything is applied; see Bridge._note_slot.
+            "custom_slots": {str(k): int(v) for k, v in
+                             (data.get("custom_slots") or {}).items()
+                             if str(v).lstrip("-").isdigit()},
+            "hub_own": flag("hub_own", True),
+            "hub_sort": _clamp_int(data.get("hub_sort", 0), 0, len(HUB_SORTS) - 1),
+            # Fetching curves to classify and draw them. Off means no chips and no
+            # thumbnails — the tab still works, from the cached index alone.
+            "hub_prefetch": flag("hub_prefetch", True),
+            # The recent list. Off stops recording; it does not erase what is there.
+            "keep_history": flag("keep_history", True),
+            # 0 full · 1 reduced · 2 off. Index into MOTION_SCALES.
+            "motion": _clamp_int(data.get("motion", 0), 0, len(MOTION_SCALES) - 1)}
 
 
 def save_settings(settings):
     try:
-        os.makedirs(os.path.dirname(SETTINGS_PATH), exist_ok=True)
-        tmp = SETTINGS_PATH + ".tmp"
+        path = settings_path()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as fh:
             json.dump(settings, fh, indent=2)
-        os.replace(tmp, SETTINGS_PATH)   # atomic: a killed write leaves the old file
+        os.replace(tmp, path)            # atomic: a killed write leaves the old file
     except OSError:
         pass                             # a preference that will not persist is not
                                          # worth interrupting the session over
@@ -383,6 +523,12 @@ class _Worker(threading.Thread):
 
     def submit(self, fn, *args):
         self._jobs.put((fn, args))
+
+    def idle(self):
+        """Nothing queued. Only a hint — a job may start between the check and the
+        next submit — which is all the device watch needs it to be: it decides
+        whether to add a poll to a queue that already has real work in it."""
+        return self._jobs.empty()
 
     def shutdown(self):
         self._jobs.put((_QUIT, ()))
@@ -445,6 +591,26 @@ class DeviceWorker(_Worker):
         }
 
     # ── jobs ──
+    def probe(self):
+        """Is the world still the way the UI thinks it is?
+
+        Enumeration only — this never opens the hidraw and never reads from a device
+        it already holds, so it can run on the same queue as real work without being
+        able to disturb it. `hid.enumerate()` costs well under a millisecond here, and
+        the watch skips itself entirely whenever the queue is busy.
+
+        Silence is the normal case: nothing is posted unless the answer changed.
+        """
+        present = bool(mc.find_devices())
+        if present and self._dev is None:
+            self._post("appeared", None)
+        elif not present and self._dev is not None:
+            # Drop the handle before telling anyone. The device is already gone; what
+            # is being closed is our own stale file descriptor, and leaving it open
+            # means the next plug-in of the same DAC opens a second one.
+            self._close()
+            self._post("vanished", None)
+
     def refresh(self):
         self._post("busy", True)
         try:
@@ -539,12 +705,27 @@ class DeviceWorker(_Worker):
             self._post("error", str(exc))
 
     def set_slot(self, index):
+        """Ask for a profile, then report the one the device is actually on.
+
+        The asking and the getting are different things. A DAWN PRO2 on firmware 1.5
+        accepts 0–4 and **silently ignores everything above**, so the old optimistic
+        `self.slot = requested` had the app displaying profiles the DAC had refused —
+        and once it had walked down to 4 there was no way back up, because the custom
+        profile has no settable index at all. One extra read on an explicit click, and
+        the number on screen can only ever be one the device agreed to.
+        """
         if self._dev is None:
             return
         try:
             self._dev.set_active_eq_index(int(index), save=False)
         except Exception as exc:
             self._post("error", str(exc))
+            return
+        self._post("slot", self._slot_now())
+
+    def _slot_now(self):
+        got = self._dev.get_active_eq_index()
+        return -1 if got is None else int(got)
 
     def save_to_flash(self):
         if self._dev is None:
@@ -584,14 +765,48 @@ class HubWorker(_Worker):
         self._post("hub_busy", True)
         try:
             rows, cached = mc.hub_fetch_index(product_uuid, refresh=refresh)
-            slim = [self._slim(r) for r in rows]
-            slim.sort(key=lambda d: (d["likes"], d["downloads"], d["rating"]),
-                      reverse=True)
+            # Unsorted on purpose since 2.0: the order is the user's choice now, and
+            # re-sorting a list of 9,000 dictionaries is far cheaper than re-fetching
+            # 5 MB to change it.
+            slim = [self._slim(r, product_uuid) for r in rows]
             self._post("hub_index", (slim, cached))
         except Exception as exc:  # noqa: BLE001 — any network/parse failure is a toast
             self._post("hub_error", "Couldn't reach the Moondrop library (%s)." % exc)
         finally:
             self._post("hub_busy", False)
+
+    def prefetch(self, chunk, band_count):
+        """Fetch and classify a handful of curves, and say what they turned out to be.
+
+        Deliberately a *chunk* rather than "the whole list": one thread serves this
+        queue, and a job that walked 400 presets would sit in front of the click that
+        actually matters — somebody opening a preset they can already see. Small jobs,
+        re-submitted by the bridge as each lands, let a `resolve` slip in between two
+        of them.
+
+        Nothing here is fatal. A curve that will not fetch or will not parse is left
+        unclassified and the card simply carries no shape; the alternative is a
+        network hiccup emptying a filter.
+        """
+        def fetch(item):
+            uuid, file_ref = item
+            try:
+                bands, _dropped = mc.hub_preset_bands(file_ref, band_count)
+            except Exception:                          # noqa: BLE001 — see docstring
+                return None
+            if not bands:
+                return None
+            return (uuid, shape_mod.classify(bands), _thumbnail(bands))
+
+        # Concurrent, because every one of these is a few hundred bytes and several
+        # hundred milliseconds of waiting for somebody else's CDN; done one after
+        # another a chunk took long enough to watch. Four at a time is a deliberate
+        # ceiling rather than a tuning knob: this is a third-party client, and getting
+        # its user agent rate-limited would break the feature for everyone at once.
+        with ThreadPoolExecutor(max_workers=PREFETCH_FETCHERS) as pool:
+            out = [r for r in pool.map(fetch, chunk) if r]
+        if out:
+            self._post("hub_shapes", out)
 
     def resolve(self, uuid, title, band_count):
         """Fetch one config's curve. Always a preview — nothing is written to the DAC
@@ -615,7 +830,7 @@ class HubWorker(_Worker):
             self._post("hub_busy", False)
 
     @staticmethod
-    def _slim(row):
+    def _slim(row, product_uuid=""):
         def num(v):
             try:
                 return int(float(v))
@@ -641,6 +856,20 @@ class HubWorker(_Worker):
             "downloads": num(row.get("downloadcount")),
             "rating": round(score, 1) if rated > 0 else 0.0,
             "ratings": rated,
+            # Carried from the index rather than looked up later. `hub_resolve_file`
+            # answers the same question by scanning the whole 5 MB cache file, which
+            # is fine for the one preset somebody clicked and is not fine at all for
+            # the four hundred the prefetch is about to classify.
+            "file": row.get("file") or "",
+            # Uploaded *for* this device, as opposed to merely pooled with it.
+            #
+            # The server pools by sharedConfigGroupId, so a DAWN PRO2 query answers
+            # with the whole family: 9,243 rows, of which 1,485 are DAWN PRO2 uploads
+            # and 5,518 belong to a FreeDSP Pro. Each row carries both keys — the
+            # lower-case `productuuid` is who it was uploaded for, the camelCase
+            # `productUuid` is what we asked about — so telling the two apart costs one
+            # comparison and no extra request. Neither key is a typo for the other.
+            "own": str(row.get("productuuid", "")) == str(product_uuid),
         }
 
 
@@ -818,6 +1047,36 @@ class AutoEqWorker(_Worker):
             self._post("aeq_busy", False)
         self._post("aeq_rows", (rows, self.index.get("count", 0)))
 
+    def prefetch(self, chunk, band_count):
+        """Fit and classify a handful of corrections so the list can draw them.
+
+        Same shape as the community prefetch and for the same reasons: small chunks so
+        a click never queues behind the whole page, concurrent fetches because the wait
+        is somebody else's server rather than the arithmetic, and silence for anything
+        that will not load — a headphone with no drawable curve simply has no curve on
+        its row.
+
+        AutoEQ profiles are already cached to disk by `fetch_profile`, so this is a
+        one-time cost per headphone and free on every visit after it.
+        """
+        if self.index is None:
+            return
+
+        def one(row):
+            try:
+                text = autoeq.fetch_profile(self.index, row)
+                bands, _pre, _dropped, _warn = autoeq.fit(text, band_count)
+            except Exception:                          # noqa: BLE001 — see docstring
+                return None
+            if not bands:
+                return None
+            return (aeq_key(row), shape_mod.classify(bands), _thumbnail(bands))
+
+        with ThreadPoolExecutor(max_workers=PREFETCH_FETCHERS) as pool:
+            out = [r for r in pool.map(one, chunk) if r]
+        if out:
+            self._post("aeq_shapes", out)
+
     def pick(self, row, band_count):
         self._post("aeq_busy", True)
         try:
@@ -946,6 +1205,17 @@ class Bridge:
         self.pregain = 0.0
         self.global_gain = 0.0
         self.slot = 7
+        # Which profile index the app's own curve lives at, learned the only way it can
+        # be: a write to the custom PEQ store selects that store, so whatever the device
+        # reports right after we have written *is* the custom one. Not hardcoded to 9 —
+        # that is what one DAWN PRO2 on one firmware happened to say, and a constant
+        # here would be a guess about every other device in the table.
+        self.custom_slot = None
+        # True while the DAC is playing one of its own built-in profiles. The bands on
+        # screen are then that profile's, read back from the device, and they are not
+        # ours to edit: the next write would select the custom store and the other seven
+        # bands would snap to whatever it holds.
+        self.on_builtin = False
         self.band_count = 8
         self.bands = [dict(b) for b in DEMO_BANDS]
         self.selected = -1
@@ -965,14 +1235,36 @@ class Bridge:
         # Whether the opening screen has been shown for this run, by any route — a
         # first launch or a DAC that did not turn up. Either counts.
         self._greeted = self.welcome_open
-        self.help_open = False
-        self.settings_open = False
-        self.hub_open = False
+        # Which screen is up, and what is under it. One object instead of the seven
+        # booleans this used to be — see gui/nav.py for why.
+        self.nav = nav_mod.Nav()
+        # …and which of the library's four sources it is showing, when that is the
+        # screen. Not persisted: it is set by whichever button opened the library, so
+        # remembering it across runs would send you somewhere you did not click.
+        self.lib_tab = LIB_COMMUNITY
         self.hub_busy = False
         self.hub_note = ""
         self.hub_query = ""
         self.hub_rows = []          # the full slim index
         self.hub_visible = []       # what the list is showing
+        self.hub_sort = self.settings["hub_sort"]
+        # Default to this DAC's own uploads. The pooled family is five sixths other
+        # people's hardware, and a first-time visitor scrolling FreeDSP Pro presets
+        # while looking for DAWN PRO2 ones has no way to know that is what happened.
+        self.hub_own = self.settings["hub_own"]
+        self.hub_matched = 0        # how many passed the filters, before the cap
+        # Where the current curve came from, and the ring of what came before it.
+        # `source` is None whenever nothing is known — which is not the same as
+        # "hand-drawn", and must never be labelled as though it were.
+        self.source = None
+        self.history = tuning.load_history()
+        self.hub_shape = ""         # the shape chip in force; "" is all of them
+        self.hub_counts = {}        # label -> how many match, before the chip
+        self._shape_of = {}         # uuid -> one of shapes.LABELS, once classified
+        self._thumb_of = {}         # uuid -> its curve as an svg path
+        self._to_classify = []      # what the prefetch has left to do
+        self._chip_sig = None       # so the chip row is only rebuilt when it changes
+        self._hist_sig = None       # likewise for the recent list
         self.preview = None         # the config being looked at, before it is applied
 
         # plot geometry, reported by the view on resize; until the first report we
@@ -1024,13 +1316,11 @@ class Bridge:
         self._solo_muted = {}
 
         # ── the supported-device list and the walkthrough ──
-        self.dev_open = False
         # -1 when the tour is not running. It points at real elements rather than
         # describing them, so the steps are numbered by what they highlight.
         self.tour_step = -1
 
         # ── what's new ──
-        self.whatsnew_open = False
         self.whatsnew_from = ""
         self.whatsnew_notes = []
         # Which version the panel is describing, and whether it is installed. The same
@@ -1043,22 +1333,32 @@ class Bridge:
         self.update_asked = False
 
         # ── saved profiles ──
-        self.prof_open = False
         self.prof_rows = []
-        self.prof_note = ""
         self.prof_name = ""
         self._prof_model = None
         self._prof_sig = None
 
         # ── AutoEQ ──
-        self.aeq_open = False
         self.aeq_busy = False
         self.aeq_note = ""
         self.aeq_query = ""
-        self.aeq_rows = []
+        self.aeq_found = []         # everything the search matched
+        self.aeq_rows = []          # …after the measurer chip
+        self.aeq_source = ""        # the measurer chip in force; "" is all of them
+        self.aeq_counts = {}        # measurer -> how many of the matches are theirs
+        self._aeq_shape_of = {}     # aeq_key -> shape label
+        self._aeq_thumb_of = {}     # aeq_key -> svg path
+        self._aeq_to_classify = []
+        self._aeq_chip_sig = None
         self.aeq_total = 0
         self._aeq_model = None
         self._aeq_sig = None
+
+        # Bumped by every toast; an expiry timer only fires if its stamp is still
+        # current. See `toast`.
+        self._toast_gen = 0
+        # The device watch, started in `start()` and held so it keeps ticking.
+        self._watch = None
 
         self.install_kind = updater.install_kind()
         self.install_note = updater.describe_install(self.install_kind)
@@ -1083,6 +1383,7 @@ class Bridge:
         window.set_global_gain = self.set_global_gain
         window.match_headroom = self.match_headroom
         window.step_slot = self.step_slot
+        window.reselect_custom = self.reselect_custom
         window.plot_press = self.plot_press
         window.plot_move = self.plot_move
         window.plot_release = self.plot_release
@@ -1104,9 +1405,20 @@ class Bridge:
         window.dismiss_welcome = self.dismiss_welcome
         window.show_welcome = self.show_welcome
         window.toggle_community = self.toggle_community
+        window.library_tab = self.library_tab
         window.community_search = self.community_search
         window.community_apply = self.community_apply
         window.community_reload = self.community_reload
+        window.community_sort = self.community_sort
+        window.community_own = self.community_own
+        window.community_shape = self.community_shape
+        window.set_motion = self.set_motion
+        window.motion_labels = slint.ListModel(list(MOTION_LABELS))
+        window.autoeq_source = self.autoeq_source
+        window.set_switch = self.set_switch
+        window.history_apply = self.history_apply
+        window.history_keep = self.history_keep
+        window.history_clear = self.history_clear
         window.preview_apply = self.preview_apply
         window.preview_close = self.preview_close
         window.dismiss_toast = lambda: (self.toast(""), self.push())
@@ -1120,7 +1432,7 @@ class Bridge:
         window.reset_band = self.reset_band
         window.solo_band = self.solo_band
         window.undo = self.undo
-        window.dismiss_whatsnew = self.dismiss_whatsnew
+        window.nav_pop = self.nav_pop
         window.show_whatsnew = self.show_whatsnew
         window.preview_whatsnew = self.preview_whatsnew
         window.copy_diagnostics = self.copy_diagnostics
@@ -1145,17 +1457,32 @@ class Bridge:
         window.app_version = mc.__version__
         # The sheet used to print "~/.config/hub-moon/settings.json" as a literal,
         # which stopped being true on two of the three platforms.
-        window.settings_path = "saved to " + SETTINGS_PATH
+        window.settings_path = "saved to " + settings_path()
 
         # The view is handed the finished outline rather than a name: it has no way to
         # look a name up, and giving it one would mean a second copy of the icon table.
         # Fixed strings built from fixed filters, so this is a one-off: nothing in
         # the guide depends on the window size or on what is connected.
         window.guide_pages = slint.ListModel(guide_mod.pages())
+        # Built once: the labels never change, and handing the view a fresh model on
+        # every push would rebuild the control under the pointer.
+        window.hub_sorts = slint.ListModel([label for label, _key in HUB_SORTS])
         window.presets = slint.ListModel([
             {"name": name, "icon": ICON_PATHS.get(icon, "")}
             for name, icon, _b, _p in PRESETS
         ])
+
+    # ── the device watch ──
+    def _poll_device(self):
+        """Ask the worker to look, unless looking would get in the way.
+
+        Runs on the UI thread and does nothing there but decide. Skipped while a job
+        is running or queued, so a poll can never land between a drag's writes, and
+        skipped once the updater has taken over, when the process is on its way out.
+        """
+        if self.busy or self.handing_over or not self.dev.idle():
+            return
+        self.dev.submit(self.dev.probe)
 
     # ── worker → UI ──
     def _post(self, kind, payload):
@@ -1174,8 +1501,17 @@ class Bridge:
             self.pregain = round(state["pregain"], 1)
             self.global_gain = round(state["globalGain"], 1)
             self.slot = state["activeProfile"]
+            # `clean` is False exactly when this snapshot followed a batch write, and a
+            # write to the custom PEQ store selects that store — so this is the one
+            # moment the custom profile's own index can be observed, and it costs
+            # nothing: `apply_bands` already re-reads to show what the DAC took.
+            self._note_slot(learn=not clean)
             self.band_count = state["bandCount"]
             self.bands = [dict(b) for b in state["bands"]]
+            # The device can hold bands but not their name, so the name is read back
+            # from this machine and re-attached by fingerprint. `describe` decides
+            # whether it still fits; nothing here assumes it does.
+            self.source = tuning.load_state(self.product_id)
             if self._reverting:
                 clean, self._reverting = True, False
             if clean:
@@ -1183,6 +1519,16 @@ class Bridge:
                 self.toast("")
                 if self.pristine is None:
                     self._snapshot()
+        elif kind == "slot":
+            # The device's answer, not the request. See DeviceWorker.set_slot.
+            was = self.slot
+            self.slot = int(payload)
+            # A profile chosen live is unsaved state like any other, but only when the
+            # device actually moved — a refused step must not mark anything dirty.
+            if self.slot != was:
+                self.dirty = True
+            self._note_slot()
+            self.push()
         elif kind == "no_device":
             self.connected = False
             self.device_name = "Demo — no DAC"
@@ -1212,6 +1558,21 @@ class Bridge:
             if not self._greeted:
                 self._greeted = True
                 self.welcome_open = True
+        elif kind == "appeared":
+            # A DAC turned up between polls. This is the device chip's own job, done
+            # without anybody having to know the chip is a button.
+            log.info("a device appeared; reading it")
+            self.dev.submit(self.dev.refresh)
+        elif kind == "vanished":
+            # An unplug is not a failed search. `no_device` opens the welcome screen
+            # on the session's first miss, which is right when the app started with
+            # nothing plugged in and wrong here — it would throw a full-screen
+            # greeting over the work of somebody who just pulled a cable out and
+            # knows perfectly well what they did.
+            log.info("the device went away")
+            self._greeted = True
+            self._handle("no_device", "The DAC was unplugged.")
+            return                      # the inner call already pushed
         elif kind == "busy":
             self.busy = bool(payload)
         elif kind == "saved":
@@ -1232,7 +1593,17 @@ class Bridge:
         elif kind == "hub_index":
             rows, cached = payload
             self.hub_rows = rows
-            self.hub_note = "%d configs%s" % (len(rows), " (cached)" if cached else "")
+            self._filter_hub()
+            self._hub_summary()
+            if cached:
+                self.hub_note += " · cached"
+        elif kind == "hub_shapes":
+            # Kept, because `push` runs on every state change and re-sampling 220
+            # points per card each time would cost more than the fetch did. Drawn on
+            # the worker — see `_thumbnail`.
+            for uuid, label, thumb in payload:
+                self._shape_of[uuid] = label
+                self._thumb_of[uuid] = thumb
             self._filter_hub()
         elif kind == "hub_bands":
             self._adopt_hub_bands(*payload)
@@ -1243,10 +1614,16 @@ class Bridge:
             self.aeq_note = str(payload)
         elif kind == "aeq_rows":
             rows, total = payload
-            self.aeq_rows = rows
+            self.aeq_found = rows
             self.aeq_total = total
-            self.aeq_note = ("%d of %d headphones" % (len(rows), total)
-                             if rows else "No headphone matches that.")
+            self._filter_aeq()
+            self.aeq_note = ("%d of %d headphones" % (len(self.aeq_rows), total)
+                             if self.aeq_rows else "No headphone matches that.")
+        elif kind == "aeq_shapes":
+            for key, label, thumb in payload:
+                self._aeq_shape_of[key] = label
+                self._aeq_thumb_of[key] = thumb
+            self._filter_aeq()
         elif kind == "aeq_profile":
             self._adopt_autoeq(*payload)
         elif kind == "update_result":
@@ -1335,8 +1712,22 @@ class Bridge:
 
     # ── UI → workers ──
     def start(self):
+        self._apply_motion()
         self._check_whats_new()
         self.dev.submit(self.dev.refresh)
+        # Held on the Bridge: dropping a Timer stops it, so a local would watch for
+        # exactly as long as this method runs.
+        if self.settings["watch_devices"]:
+            self._watch = slint.Timer()
+            self._watch.start(slint.TimerMode.Repeated, DEVICE_POLL, self._poll_device)
+        if self.settings["start_fullscreen"]:
+            # Not `full-screen: true` in the .slint — that is read before the window
+            # exists and winit ignores it, verified on a bare Slint window as well as
+            # on ours. The property only takes effect when it *changes* after the
+            # window is up, so the change is made from a timer once the loop is
+            # running rather than during construction.
+            slint.Timer.single_shot(timedelta(milliseconds=200),
+                                    lambda: setattr(self.win, "want_fullscreen", True))
         # The opening update check is quiet and cached: it only reaches the network
         # once a day, it never raises, and it says nothing at all unless there is
         # something newer than what is running. A check that announces "you are up to
@@ -1439,8 +1830,10 @@ class Bridge:
         self.whatsnew_version = mc.__version__
         self.whatsnew_preview = False
         self.whatsnew_notes = updater.release_notes(self.settings["channel"])
-        self.whatsnew_open = True
-        self.welcome_open = False               # one opening screen, not two
+        # One opening screen, not two — and nothing under it, because an update
+        # notice arrives before you have been anywhere.
+        self.nav.reset(nav_mod.WHATSNEW)
+        self.welcome_open = False
         log.info("updated from %s to %s; showing what changed", was, mc.__version__)
 
     def show_whatsnew(self):
@@ -1460,8 +1853,7 @@ class Bridge:
         self.whatsnew_version = mc.__version__
         self.whatsnew_preview = False
         self.whatsnew_notes = updater.release_notes(self.settings["channel"])
-        self.whatsnew_open = True
-        self.settings_open = False
+        self.nav.open(nav_mod.WHATSNEW)
         self.push()
 
     def preview_whatsnew(self):
@@ -1480,32 +1872,15 @@ class Bridge:
         self.whatsnew_version = found.get("version", "")
         self.whatsnew_preview = True
         self.whatsnew_notes = list(found.get("notes") or [])
-        self.whatsnew_open = True
-        self.settings_open = False
-        self.push()
-
-    def dismiss_whatsnew(self):
-        self.whatsnew_open = False
-        # A preview is only ever reached from Settings — the Updates tab's button, or a
-        # check made there. Dismissing it back to the main window would strand somebody
-        # who has just read what is in the release next to the button that installs it.
-        if self.whatsnew_preview:
-            self.settings_open = True
-        self.whatsnew_preview = False
+        self.nav.open(nav_mod.WHATSNEW)
         self.push()
 
     # ── saved profiles ──
     def toggle_profiles(self):
-        self.prof_open = not self.prof_open
-        if self.prof_open:
-            self.aeq_open = self.hub_open = self.help_open = self.settings_open = False
-            self._reload_profiles()
-        self.push()
+        self.open_library(LIB_SAVED)
 
     def _reload_profiles(self):
         self.prof_rows = prof.load_all()
-        self.prof_note = ("%d saved" % len(self.prof_rows) if self.prof_rows
-                          else "Nothing saved yet.")
 
     def profile_name_edited(self, text):
         self.prof_name = str(text or "")
@@ -1560,16 +1935,133 @@ class Bridge:
         while len(bands) < self.band_count:
             bands.append(_disabled_band(len(bands)))
 
-        self._replace_bands(bands, float(row["pregain"]))
+        self._replace_bands(bands, float(row["pregain"]),
+                            tuning.source("profile", row["name"], bands,
+                                          ident=row.get("path", ""),
+                                          pregain=row["pregain"]))
         if row.get("global_gain") is not None:
             self.set_global_gain(float(row["global_gain"]))
         self.active_preset = ""
-        self.prof_open = False
+        self.nav.reset()
         note = "Loaded “%s”." % row["name"]
         if dropped:
             note += " %d band%s past this device's %d were dropped." % (
                 dropped, "" if dropped == 1 else "s", self.band_count)
         self.toast(note, False)
+        self.push()
+
+    def _apply_motion(self):
+        """Push the motion scale into the theme.
+
+        Slint globals are writable from Python, so one assignment reaches every
+        animation in the app — none of which has to know the setting exists. Guarded
+        because a window built from a .slint without the global (an older interface
+        file, a test double) must not take the app down over an animation preference.
+        """
+        try:
+            self.win.Theme.motion = MOTION_SCALES[self.settings["motion"]]
+        except Exception:                              # noqa: BLE001 — see docstring
+            log.debug("could not set the motion scale", exc_info=True)
+
+    def set_motion(self, index):
+        self.settings["motion"] = max(0, min(int(index), len(MOTION_SCALES) - 1))
+        save_settings(self.settings)
+        self._apply_motion()
+        self.push()
+
+    # ── the 2.0 settings ──
+    SWITCHES = ("start_fullscreen", "watch_devices", "hub_prefetch", "keep_history")
+
+    def set_switch(self, key, on):
+        """Flip one of the plain on/off settings and act on it immediately.
+
+        A preference that only takes effect after a restart is a preference people
+        report as broken, so each of these is applied here as well as saved — except
+        fullscreen, which is a start-up choice by definition and says so in the UI.
+        """
+        key = str(key)
+        if key not in self.SWITCHES:
+            return
+        self.settings[key] = bool(on)
+        save_settings(self.settings)
+        if key == "watch_devices":
+            if on and self._watch is None:
+                self._watch = slint.Timer()
+                self._watch.start(slint.TimerMode.Repeated, DEVICE_POLL,
+                                  self._poll_device)
+            elif on:
+                self._watch.start(slint.TimerMode.Repeated, DEVICE_POLL,
+                                  self._poll_device)
+            elif self._watch is not None:
+                self._watch.stop()
+        elif key == "hub_prefetch" and on:
+            self._pump_classification()          # pick up where it left off
+        self.push()
+
+    # ── history: what has been applied lately ──
+    def history_apply(self, fingerprint):
+        """Put a recent curve back on the device.
+
+        The bands travel in the entry itself rather than being re-fetched, so this
+        works with no network and on a config that has since been deleted from the
+        library — and it is what makes flipping between two tunings cheap. The entry
+        is re-used as the source, so coming back to a curve does not invent a new
+        identity for it; `remember` simply moves the one entry to the top.
+        """
+        entry = next((e for e in self.history
+                      if e.get("fingerprint") == str(fingerprint)), None)
+        if not entry:
+            return
+        bands, dropped = [], 0
+        for n, f in enumerate(entry.get("bands") or []):
+            if n >= self.band_count:
+                dropped += 1
+                continue
+            ftype, freq, gain, q = clamp_band(f["type"], f["frequency"],
+                                              f["gain"], f["q"])
+            bands.append({"index": n, "type": ftype, "frequency": freq,
+                          "gain": gain, "q": q})
+        while len(bands) < self.band_count:
+            bands.append(_disabled_band(len(bands)))
+        self._replace_bands(bands, entry.get("pregain"), dict(entry))
+        self.active_preset = ""
+        self.nav.reset()
+        note = "Back to “%s”." % (entry.get("name") or "that curve")
+        if dropped:
+            note += " %d band%s past this device's %d were dropped." % (
+                dropped, "" if dropped == 1 else "s", self.band_count)
+        self.toast(note, False)
+        self.push()
+
+    def history_keep(self, fingerprint):
+        """Promote a history entry to a profile — the one bridge between the two.
+
+        History is capped and rolls over on its own; a profile is permanent and only
+        ever written by the person using the app. This is how something crosses from
+        the first to the second, and it copies rather than moves: the entry stays in
+        history until it ages out normally.
+        """
+        entry = next((e for e in self.history
+                      if e.get("fingerprint") == str(fingerprint)), None)
+        if not entry:
+            return
+        name = entry.get("name") or "Kept curve"
+        try:
+            prof.save(name, entry.get("bands") or [], entry.get("pregain") or 0.0,
+                      device=self.device_name if self.connected else "",
+                      slot=self.slot if self.slot >= 0 else None)
+        except OSError as exc:
+            self.toast("Could not save that profile (%s)." % exc, True)
+            self.push()
+            return
+        self._reload_profiles()
+        self.toast("Kept “%s” as a profile." % name, False)
+        self.push()
+
+    def history_clear(self):
+        tuning.forget_all()
+        self.history = []
+        self.toast("Cleared the recent list.", False)
         self.push()
 
     def profile_delete(self, name):
@@ -1583,14 +2075,7 @@ class Bridge:
 
     # ── AutoEQ ──
     def toggle_autoeq(self):
-        self.aeq_open = not self.aeq_open
-        if self.aeq_open:
-            self.prof_open = False
-            self.hub_open = self.help_open = self.settings_open = False
-            if not self.aeq_rows:
-                self.aeq_note = "Loading the catalogue…"
-                self.aeq.submit(self.aeq.load, self.aeq_query, False)
-        self.push()
+        self.open_library(LIB_HEADPHONES)
 
     def autoeq_search(self, text):
         self.aeq_query = str(text or "")
@@ -1640,6 +2125,9 @@ class Bridge:
             note += " · " + w
 
         self.preview = {
+            # Which library this came from, so the applied curve can be labelled with
+            # it later. The preview dialog serves both and looks identical for each.
+            "kind": "autoeq",
             "uuid": "",
             "title": row["model"],
             # The dialog renders this as "by <author>", so it must not say "measured
@@ -1672,9 +2160,10 @@ class Bridge:
         if not found:
             return
         # Reached from the preview panel as well as from Settings. Leaving that open
-        # over a progress bar it cannot show would hide the thing it just started.
-        self.whatsnew_open = False
-        self.settings_open = True
+        # over a progress bar it cannot show would hide the thing it just started —
+        # and `open` on a screen already in the stack goes back to it, so this lands
+        # on the Settings that the preview was opened from.
+        self.nav.open(nav_mod.SETTINGS)
         self.update_state = "downloading"
         self.update_progress = 0.0
         self.update_command = ""
@@ -1832,8 +2321,9 @@ class Bridge:
         """Walk the window, not a slideshow of it."""
         self.tour_step = 0
         self.welcome_open = False
-        self.settings_open = self.help_open = self.hub_open = False
-        self.aeq_open = self.prof_open = self.dev_open = False
+        # The tour points at the window itself, so the window has to be what you are
+        # looking at.
+        self.nav.reset()
         self.push()
 
     def tour_next(self):
@@ -1859,10 +2349,7 @@ class Bridge:
 
     # ── the supported-device list ──
     def toggle_devices(self):
-        self.dev_open = not self.dev_open
-        if self.dev_open:
-            self.help_open = self.hub_open = self.aeq_open = False
-            self.prof_open = self.settings_open = False
+        self.nav.toggle(nav_mod.DEVICES)
         self.push()
 
     # ── A/B, bypass, undo ──
@@ -2222,19 +2709,96 @@ class Bridge:
     def match_headroom(self):
         self.set_pregain(suggest_pregain(self.bands))
 
+    def _note_slot(self, learn=False):
+        """Are we on our curve, or on one of the DAC's own presets?
+
+        Learned rather than declared. `learn` is set only for a reading taken straight
+        after this app wrote bands, and since writing the custom PEQ store is what
+        selects it, that reading *is* the custom index by definition. Never guessed from
+        a plain refresh: a user who cycled to a built-in with the volume buttons and then
+        launched the app would have that built-in adopted as "mine", which is the exact
+        confusion this is here to clear up.
+
+        Remembered per product, because it is a fact about the hardware and not about
+        this session — so the answer survives a relaunch, and the app can say "that is
+        the DAC's preset, not your curve" the first time you look at it.
+        """
+        if learn and self.slot >= 0:
+            self.custom_slot = self.slot
+            known = dict(self.settings.get("custom_slots") or {})
+            if known.get(str(self.product_id)) != self.slot:
+                known[str(self.product_id)] = self.slot
+                self.settings["custom_slots"] = known
+                save_settings(self.settings)
+                log.info("custom EQ profile on 0x%04X is index %d",
+                         self.product_id, self.slot)
+        if self.custom_slot is None:
+            self.custom_slot = (self.settings.get("custom_slots") or {}).get(
+                str(self.product_id))
+        self.on_builtin = (self.custom_slot is not None and self.slot >= 0
+                           and self.slot != self.custom_slot)
+
+    def slot_note(self):
+        """What the profile row says under its number."""
+        if not self.connected:
+            return "no device"
+        if self.slot < 0:
+            return "not reported"
+        if self.on_builtin:
+            return "the DAC's own preset"
+        if self.custom_slot is None:
+            # Honest about not knowing. It is learned the first time anything is
+            # applied, and claiming ownership before that would be a guess.
+            return "as reported"
+        return "your curve"
+
     def step_slot(self, direction):
-        """The DAC's active EQ profile. Worth knowing before you touch it: on a
-        DAWN PRO2 running firmware 1.5 this reads 9 whether the EQ is on or off, so
-        it is *not* a proxy for "is the EQ engaged" — and moving it off the custom
-        slot means the bands below stop being what you hear."""
+        """The DAC's active EQ profile.
+
+        Two things worth knowing, both measured. On a DAWN PRO2 (firmware 1.5) this
+        reads 9 whether the EQ is on or off, so it is *not* a proxy for "is the EQ
+        engaged". And the device accepts 0–4 only, silently ignoring anything above —
+        which is why nothing is assumed here: the request goes out, and the worker
+        reports back whichever profile the DAC is actually on.
+
+        Stepping off the custom profile means the bands below stop being what you hear.
+        Stepping back on cannot be done by index at all — see `reselect_custom`.
+        """
         if not self.connected or self.slot < 0:
             return
-        nxt = int(_clamp(self.slot + int(direction), 0, 9))
-        if nxt == self.slot:
+        want = self.slot + int(direction)
+        if want < 0:
             return
-        self.slot = nxt
-        self.dirty = True
-        self.dev.submit(self.dev.set_slot, nxt)
+        self.dev.submit(self.dev.set_slot, want)
+
+    def reselect_custom(self):
+        """Back to your own curve from one of the DAC's presets.
+
+        Not a profile change — a rewrite. The custom profile has no settable index, and
+        writing the custom PEQ store is what selects it.
+
+        **Not the bands on screen.** While the DAC is on one of its own presets, those
+        bands *are* that preset's, read back from the device — so writing them would put
+        the DAC's preset into your custom profile and call it yours, which is losing the
+        curve rather than restoring it. The first version of this did exactly that, and
+        the DAWN PRO2 came back holding −6 dB at 200 Hz.
+
+        What gets written is what this machine last recorded applying to this device. If
+        there is no such record there is nothing to restore: the custom profile cannot be
+        read without first selecting it, and selecting it means writing — so the honest
+        answer is to say so and let the user apply something.
+        """
+        if not self.connected or not self.on_builtin:
+            return
+        src = tuning.load_state(self.product_id) or {}
+        bands = [dict(b) for b in (src.get("bands") or [])]
+        if len(bands) != self.band_count:
+            self.toast("No curve saved for this DAC on this computer — apply a preset "
+                       "or a saved profile and it becomes the custom profile again.",
+                       True)
+            return
+        self._replace_bands(bands, src.get("pregain"), src)
+        self.toast("Back to “%s”." % (src.get("name") or "your curve"), False)
         self.push()
 
     # ── presets ──
@@ -2253,15 +2817,24 @@ class Bridge:
                 ftype, freq, gain, q = "disabled", 1000, 0.0, 1.0
             bands.append({"index": n, "type": ftype, "frequency": freq,
                           "gain": gain, "q": q})
-        self._replace_bands(bands, pre)
+        self._replace_bands(bands, pre,
+                            tuning.source("preset", name, bands, ident=str(i),
+                                          pregain=pre))
         self.active_preset = name
         self.toast("Applied %s." % name, False)
         self.push()
 
-    def _replace_bands(self, bands, pregain):
+    def _replace_bands(self, bands, pregain, source=None):
         # Every wholesale change lands here — preset, import, community config,
-        # AutoEQ fit, saved profile — so this is the one place undo has to be told.
+        # AutoEQ fit, saved profile — so this is the one place undo has to be told,
+        # and the one place that knows what the curve about to be written *is*.
         self._remember()
+        # Recorded before the write rather than after: what is on the device from here
+        # on is this curve, whether or not the write itself reports back.
+        self.source = source
+        tuning.save_state(self.product_id, source)
+        if source and self.settings["keep_history"]:
+            self.history = tuning.remember(source)
         self.bands = bands
         self.selected = -1
         self.dirty = True
@@ -2306,7 +2879,9 @@ class Bridge:
         while len(bands) < self.band_count:
             bands.append(_disabled_band(len(bands)))
         pre = data.get("pregain")
-        self._replace_bands(bands, None if pre is None else float(pre))
+        self._replace_bands(bands, None if pre is None else float(pre),
+                            tuning.source("import", filename, bands,
+                                          pregain=pre or 0.0))
         if "global_gain" in data:
             self.set_global_gain(float(data["global_gain"]))
         self.active_preset = ""
@@ -2314,12 +2889,7 @@ class Bridge:
 
     # ── community library ──
     def toggle_community(self):
-        self.hub_open = not self.hub_open
-        if self.hub_open:
-            self.help_open = False
-            if not self.hub_rows:
-                self.community_reload(False)
-        self.push()
+        self.open_library(LIB_COMMUNITY)
 
     def community_reload(self, refresh=True):
         uuid = mc.PRODUCT_UUIDS.get(self.product_id) or mc.PRODUCT_UUIDS[0x011D]
@@ -2333,13 +2903,134 @@ class Bridge:
         self.push()
 
     def _filter_hub(self):
-        q = self.hub_query.strip().lower()
+        """Device filter, then search, then shape, then order. All local — the index
+        is already on disk, and nothing here goes near the network."""
         rows = self.hub_rows
+        if self.hub_own:
+            rows = [r for r in rows if r["own"]]
+        q = self.hub_query.strip().lower()
         if q:
+            # The shape counts as text. Typing "bass" should find the bass-boosted
+            # curves whose authors never used the word — most of this library is
+            # titled in Chinese, and a substring search over `title` alone is no help
+            # at all to somebody who cannot type it. Only for rows whose curve has
+            # come down: an unclassified row is not silently excluded, it simply has
+            # one fewer field to match on, the same as one with an empty description.
             rows = [r for r in rows
                     if q in r["title"].lower() or q in r["author"].lower()
-                    or q in r["desc"].lower()]
+                    or q in r["desc"].lower()
+                    or q in self._shape_of.get(r["uuid"], "").lower()]
+        # Counted before the shape filter is applied, or picking a chip would empty
+        # every other chip's count and there would be no way back.
+        self.hub_counts = {}
+        for r in rows:
+            label = self._shape_of.get(r["uuid"])
+            if label:
+                self.hub_counts[label] = self.hub_counts.get(label, 0) + 1
+        if self.hub_shape:
+            rows = [r for r in rows
+                    if self._shape_of.get(r["uuid"]) == self.hub_shape]
+        rows = sorted(rows, key=HUB_SORTS[self.hub_sort][1], reverse=True)
+        self.hub_matched = len(rows)
         self.hub_visible = rows[:HubWorker.CAP]
+        self._queue_classification()
+        # Pumped from here rather than from the one place a chunk lands, or changing
+        # the filter would queue work that nothing ever picked up: the prefetch would
+        # stop for good the first time it ran dry.
+        self._pump_classification()
+
+    def _queue_classification(self):
+        """Line up the curves for what is on screen, nearest the top first.
+
+        Only what the user can actually reach: the whole family is 9,243 presets and
+        fetching all of them to answer a question nobody asked would be both slow and
+        rude to somebody else's CDN. What is visible is at most `CAP`, they are cached
+        permanently once fetched, and the second visit classifies nothing at all.
+        """
+        self._to_classify = [(r["uuid"], r["file"]) for r in self.hub_visible
+                             if r["uuid"] not in self._shape_of and r.get("file")]
+
+    def _pump_classification(self):
+        """Hand the next chunk to the worker, if there is one and anyone is looking."""
+        if (not self.showing(LIB_COMMUNITY) or not self._to_classify
+                or not self.settings["hub_prefetch"]):
+            return
+        chunk, self._to_classify = (self._to_classify[:PREFETCH_CHUNK],
+                                    self._to_classify[PREFETCH_CHUNK:])
+        self.hub.submit(self.hub.prefetch, chunk, self.band_count)
+
+    def _filter_aeq(self):
+        """Apply the measurer chip and count what each measurer has to offer.
+
+        Counted before the chip is applied, for the same reason the community counts
+        are: picking one must not zero every other chip and leave no way back.
+        """
+        self.aeq_counts = {}
+        for r in self.aeq_found:
+            src = r.get("source", "")
+            self.aeq_counts[src] = self.aeq_counts.get(src, 0) + 1
+        rows = self.aeq_found
+        if self.aeq_source:
+            rows = [r for r in rows if r.get("source") == self.aeq_source]
+        self.aeq_rows = rows
+        self._aeq_to_classify = [r for r in rows
+                                 if aeq_key(r) not in self._aeq_shape_of]
+        self._pump_aeq()
+
+    def _pump_aeq(self):
+        if (not self.showing(LIB_HEADPHONES) or not self._aeq_to_classify
+                or not self.settings["hub_prefetch"]):
+            return
+        chunk, self._aeq_to_classify = (self._aeq_to_classify[:PREFETCH_CHUNK],
+                                        self._aeq_to_classify[PREFETCH_CHUNK:])
+        self.aeq.submit(self.aeq.prefetch, chunk, self.band_count)
+
+    def autoeq_source(self, source):
+        """Filter by who measured it. Clicking the chip in force clears it."""
+        want = str(source)
+        self.aeq_source = "" if want == self.aeq_source else want
+        self._filter_aeq()
+        self.push()
+
+    def community_shape(self, label):
+        """Filter by what the curve does. Clicking the chip already in force clears
+        it, so the filter can always be undone with the control that set it."""
+        want = str(label)
+        self.hub_shape = "" if want == self.hub_shape else want
+        self._filter_hub()
+        self.push()
+
+    def community_sort(self, index):
+        self.hub_sort = max(0, min(int(index), len(HUB_SORTS) - 1))
+        self.settings["hub_sort"] = self.hub_sort
+        save_settings(self.settings)
+        self._filter_hub()
+        self.push()
+
+    def community_own(self, own):
+        """Show only what was uploaded for this DAC, or the whole pooled family."""
+        self.hub_own = bool(own)
+        self.settings["hub_own"] = self.hub_own
+        save_settings(self.settings)
+        self._filter_hub()
+        self._hub_summary()
+        self.push()
+
+    def _hub_summary(self):
+        """The line under the title. It has to say what is being hidden, because a
+        filter that silently drops five sixths of a library is indistinguishable from
+        a library that is nearly empty."""
+        if not self.hub_rows:
+            return
+        own = sum(1 for r in self.hub_rows if r["own"])
+        if self.hub_own:
+            self.hub_note = "%d for your DAC · %d more in the family" % (
+                own, len(self.hub_rows) - own)
+        else:
+            self.hub_note = "%d in the family · %d for your DAC" % (
+                len(self.hub_rows), own)
+        if self.hub_matched > HubWorker.CAP:
+            self.hub_note += " · showing the top %d" % HubWorker.CAP
 
     def community_apply(self, uuid):
         row = next((r for r in self.hub_rows if r["uuid"] == uuid), None)
@@ -2370,6 +3061,7 @@ class Bridge:
             note += " · %d band%s past this device's %d dropped" % (
                 dropped, "" if dropped == 1 else "s", self.band_count)
         self.preview = {
+            "kind": "hub",
             "uuid": uuid,
             "title": row["title"] if row else "Config",
             "author": row["author"] if row else "",
@@ -2384,11 +3076,14 @@ class Bridge:
         if not self.preview:
             return
         p, self.preview = self.preview, None
-        self._replace_bands([dict(b) for b in p["bands"]], p["pregain"])
+        self._replace_bands(
+            [dict(b) for b in p["bands"]], p["pregain"],
+            tuning.source(p.get("kind", "hub"), p["title"], p["bands"],
+                          ident=p.get("uuid", ""), author=p.get("author", ""),
+                          pregain=p["pregain"]))
         self.active_preset = ""
-        self.hub_open = False
-        self.aeq_open = False
-        self.prof_open = False
+        # Whatever was being browsed, the answer to "apply this" is the curve itself.
+        self.nav.reset()
         self.toast("Applied “%s”." % p["title"], False)
         self.push()
 
@@ -2397,22 +3092,91 @@ class Bridge:
         self.push()
 
     # ── help and appearance ──
+    # ── the library ──
+    def open_library(self, tab):
+        """The Saved / Recent / Community / Headphones buttons all land here.
+
+        They stay four separate buttons on purpose: three of them used to open three
+        separate panels, and landing somewhere you did not ask for — one click from
+        where you did — would not be an improvement. What changed is that the other
+        three are now a tab away rather than a close and a reopen.
+        """
+        if self.showing(tab):
+            self.nav.back()                 # the button you came in by closes it
+        else:
+            self.lib_tab = tab
+            self.nav.open(nav_mod.LIBRARY)
+            self._enter_tab(tab)
+        self.push()
+
+    def library_tab(self, index):
+        """Switching source from inside the sheet."""
+        tab = _clamp_int(index, 0, LIB_TABS - 1)
+        if tab != self.lib_tab:
+            self.lib_tab = tab
+            self._enter_tab(tab)
+        self.push()
+
+    def showing(self, tab):
+        """Is that source the one on screen? Both halves matter: a tab that is not
+        selected and a library that is not the top of the stack are equally invisible,
+        and background work — thumbnails, curve classification — must stop for either."""
+        return self.nav.at(nav_mod.LIBRARY) and self.lib_tab == tab
+
+    def _enter_tab(self, tab):
+        """Whatever arriving at a source costs, paid once, on arrival.
+
+        Nothing is fetched for a tab nobody has opened: the community index is 5.4 MB
+        and the AutoEQ catalogue is 8,827 models, and loading both to show one would
+        be the unification making the app slower than the three panels it replaced.
+        """
+        if tab == LIB_SAVED:
+            self._reload_profiles()
+        elif tab == LIB_COMMUNITY:
+            if not self.hub_rows:
+                self.community_reload(False)
+        elif tab == LIB_HEADPHONES:
+            if not self.aeq_rows:
+                self.aeq_note = "Loading the catalogue…"
+                self.aeq.submit(self.aeq.load, self.aeq_query, False)
+
+    def _lib_note(self):
+        """The line beside "Library" — whatever the tab you are on has to say.
+
+        Deliberately empty when a list is empty: explaining that is the list's own
+        job, in the middle of the space where the rows would have been, and saying it
+        here as well left the sheet stating "Nothing saved yet." twice, once in each
+        half of itself.
+        """
+        if self.lib_tab == LIB_SAVED:
+            return "%d saved" % len(self.prof_rows) if self.prof_rows else ""
+        if self.lib_tab == LIB_RECENT:
+            return "%d recent" % len(self.history) if self.history else ""
+        if self.lib_tab == LIB_COMMUNITY:
+            return self.hub_note
+        return self.aeq_note
+
+    def nav_pop(self):
+        """One step back: Escape, the back arrow, and every sheet's close button.
+
+        There is one of these and not one per screen. A screen opened from another —
+        the release notes from Settings, the device list from the guide — comes back
+        to the one it was opened from, because that is what the stack says, not
+        because this function knows about that pair.
+        """
+        left = self.nav.back()
+        if left == nav_mod.WHATSNEW:
+            # Only meaningful while the panel is up: it decides whether the panel is
+            # describing this build or the one on offer.
+            self.whatsnew_preview = False
+        self.push()
+
     def toggle_help(self):
-        self.help_open = not self.help_open
-        if self.help_open:
-            self.aeq_open = False
-            self.prof_open = False
-            self.hub_open = False
-            self.settings_open = False
+        self.nav.toggle(nav_mod.HELP)
         self.push()
 
     def toggle_settings(self):
-        self.settings_open = not self.settings_open
-        if self.settings_open:
-            self.aeq_open = False
-            self.prof_open = False
-            self.hub_open = False
-            self.help_open = False
+        self.nav.toggle(nav_mod.SETTINGS)
         self.push()
 
     def set_dark(self, on):
@@ -2449,9 +3213,7 @@ class Bridge:
 
     def show_welcome(self):
         self.welcome_open = True
-        self.settings_open = False
-        self.help_open = False
-        self.hub_open = False
+        self.nav.reset()
         self.push()
 
     def set_readout(self, on):
@@ -2471,6 +3233,10 @@ class Bridge:
         other two workers were then never waited on at all. A worker wedged in a
         blocking read must not be able to hold up the two that are not.
         """
+        # Before anything else: stop asking. A poll queued after the shutdown job
+        # would be a device read on a worker that has already closed its handle.
+        if self._watch is not None:
+            self._watch.stop()
         workers = (self.dev, self.hub, self.io, self.upd, self.aeq)
         self.dev.submit(self.dev.shutdown_device)
         for w in workers:
@@ -2486,8 +3252,27 @@ class Bridge:
 
     # ── push state into the view ──
     def toast(self, text, is_error=False):
+        """Say something, and take it back down again.
+
+        Every notice is stamped with a generation. A timer only clears the text if the
+        stamp it captured is still the current one, so a message that has already been
+        replaced or dismissed cannot have its successor cleared out from under it by
+        an old timer arriving late. `slint.Timer.single_shot` cannot be cancelled,
+        which is why the check is on the value rather than on the timer.
+        """
         self.win.toast_text = text
         self.win.toast_error = bool(is_error)
+        self._toast_gen += 1
+        if not text:
+            return
+        gen = self._toast_gen
+
+        def expire():
+            if self._toast_gen == gen:
+                self.win.toast_text = ""
+
+        slint.Timer.single_shot(
+            TOAST_ERROR_SECONDS if is_error else TOAST_SECONDS, expire)
 
     def push(self):
         w = self.win
@@ -2501,6 +3286,8 @@ class Bridge:
         w.supports_pregain = self.supports_pregain
         w.global_gain = float(self.global_gain)
         w.slot = self.slot
+        w.slot_note = self.slot_note()
+        w.slot_on_builtin = self.on_builtin
         w.selected = self.selected
         w.active_preset = self.active_preset
         w.dark = self.settings["dark"]
@@ -2508,12 +3295,48 @@ class Bridge:
         w.accent_index = self.settings["accent"]
         w.skin_index = self.settings["skin"]
         w.welcome_open = self.welcome_open
-        w.help_open = self.help_open
-        w.settings_open = self.settings_open
-        w.hub_open = self.hub_open
+        # One property for seven screens. The view draws whichever this names and
+        # nothing else, so it cannot show two at once however this got here.
+        w.nav = self.nav.top
+        w.nav_under = self.nav.under
+        w.lib_tab = self.lib_tab
+        w.lib_note = self._lib_note()
         w.hub_busy = self.hub_busy
-        w.hub_note = self.hub_note
         w.hub_count = len(self.hub_visible)
+        w.hub_sort = self.hub_sort
+        w.hub_own = self.hub_own
+        w.hub_shape = self.hub_shape
+        w.opt_fullscreen = self.settings["start_fullscreen"]
+        w.opt_watch = self.settings["watch_devices"]
+        w.opt_prefetch = self.settings["hub_prefetch"]
+        w.opt_history = self.settings["keep_history"]
+        w.opt_motion = self.settings["motion"]
+        # Recomputed on every push rather than stored: it is a statement about the
+        # bands as they are *now*, and the whole point is that it stops being true
+        # the moment somebody drags a handle.
+        # Silent while the DAC is playing one of its own presets: the bands on screen
+        # are that preset's, and naming them after the last thing this app applied read
+        # as "your community curve, edited" over eight bands the app never wrote. The
+        # source is kept rather than cleared, so cycling back to the custom profile gets
+        # its name back.
+        w.source_label = ("" if self.on_builtin
+                          else tuning.describe(self.source, self.bands))
+        hist = [{"fingerprint": e.get("fingerprint", ""),
+                 "name": e.get("name", ""), "note": tuning.summary(e)}
+                for e in self.history]
+        hsig = tuple(h["fingerprint"] for h in hist)
+        if hsig != self._hist_sig:
+            self._hist_sig = hsig
+            w.history_rows = slint.ListModel(hist)
+        w.history_count = len(hist)
+        # Only the shapes something actually matched, so the row never offers a chip
+        # that leads to an empty list.
+        chips = [{"name": s_, "count": self.hub_counts.get(s_, 0)}
+                 for s_ in shape_mod.LABELS if self.hub_counts.get(s_)]
+        sig = tuple((c["name"], c["count"]) for c in chips)
+        if sig != self._chip_sig:
+            self._chip_sig = sig
+            w.hub_shapes = slint.ListModel(chips)
 
         w.update_state = self.update_state
         w.update_note = self.update_note
@@ -2569,19 +3392,29 @@ class Bridge:
                 self._band_model.set_row_data(i, row)
         # Same rule as the bands: only hand over a new model when the list actually
         # changed, or every push tears down and rebuilds up to 400 cards.
+        hub_rows = [
+            {"uuid": r["uuid"], "title": r["title"], "author": r["author"],
+             "desc": r["desc"], "likes": r["likes"], "downloads": r["downloads"],
+             "rating": float(r["rating"]), "ratings": r["ratings"],
+             "shape": self._shape_of.get(r["uuid"], ""),
+             "curve": self._thumb_of.get(r["uuid"], "")}
+            for r in self.hub_visible
+        ]
         sig = tuple(r["uuid"] for r in self.hub_visible)
         if sig != self._hub_sig:
             self._hub_sig = sig
-            self._hub_model = slint.ListModel([
-                {"uuid": r["uuid"], "title": r["title"], "author": r["author"],
-                 "desc": r["desc"], "likes": r["likes"], "downloads": r["downloads"],
-                 "rating": float(r["rating"]), "ratings": r["ratings"]}
-                for r in self.hub_visible
-            ])
+            self._hub_model = slint.ListModel(hub_rows)
             w.hub_rows = self._hub_model
+        elif self._hub_model is not None:
+            # Same presets, new information about them: the curves arrive in chunks
+            # from the prefetch, so the list is filled in under the reader rather than
+            # rebuilt around them. Same rule as the band cards — a fresh ListModel
+            # tears down every card, and here that would jump the scroll position
+            # every time eight more thumbnails landed.
+            for i, row in enumerate(hub_rows):
+                self._hub_model.set_row_data(i, row)
 
         w.comparing = self.comparing
-        w.dev_open = self.dev_open
         w.tour_step = self.tour_step
         if 0 <= self.tour_step < len(self.TOUR):
             head, body = self.TOUR[self.tour_step]
@@ -2596,7 +3429,6 @@ class Bridge:
             w.device_note = devices_mod.summary()
         w.soloed = self._solo
         w.can_undo = bool(self._history)
-        w.whatsnew_open = self.whatsnew_open
         w.whatsnew_from = self.whatsnew_from
         w.whatsnew_version = self.whatsnew_version
         w.whatsnew_preview = self.whatsnew_preview
@@ -2604,8 +3436,6 @@ class Bridge:
             if self.whatsnew_notes else slint.ListModel([])
         w.about_text = self.diagnostics_text()
 
-        w.prof_open = self.prof_open
-        w.prof_note = self.prof_note
         w.prof_count = len(self.prof_rows)
         psig = tuple((r["name"], r["saved"]) for r in self.prof_rows)
         if psig != self._prof_sig:
@@ -2615,17 +3445,32 @@ class Bridge:
                 for r in self.prof_rows])
             w.prof_rows = self._prof_model
 
-        w.aeq_open = self.aeq_open
         w.aeq_busy = self.aeq_busy
-        w.aeq_note = self.aeq_note
         w.aeq_count = len(self.aeq_rows)
+        aeq_rows = [
+            {"model": r["model"], "source": r["source"], "form": r["form"],
+             "shape": self._aeq_shape_of.get(aeq_key(r), ""),
+             "curve": self._aeq_thumb_of.get(aeq_key(r), "")}
+            for r in self.aeq_rows]
         asig = tuple((r["model"], r["source"]) for r in self.aeq_rows)
         if asig != self._aeq_sig:
             self._aeq_sig = asig
-            self._aeq_model = slint.ListModel([
-                {"model": r["model"], "source": r["source"], "form": r["form"]}
-                for r in self.aeq_rows])
+            self._aeq_model = slint.ListModel(aeq_rows)
             w.aeq_rows = self._aeq_model
+        elif self._aeq_model is not None:
+            # Same headphones, new curves: filled in under the reader as each chunk
+            # lands, never rebuilt around them.
+            for i, row in enumerate(aeq_rows):
+                self._aeq_model.set_row_data(i, row)
+        w.aeq_source = self.aeq_source
+        # Measurers, most-published first — which is also roughly most-trusted, and is
+        # the order `autoeq.SOURCE_ORDER` already ranks search results by.
+        chips = sorted(self.aeq_counts.items(), key=lambda kv: (-kv[1], kv[0]))
+        chips = [{"name": n, "count": c} for n, c in chips[:12]]
+        csig = tuple((c["name"], c["count"]) for c in chips)
+        if csig != self._aeq_chip_sig:
+            self._aeq_chip_sig = csig
+            w.aeq_sources = slint.ListModel(chips)
 
         if self._plot_w > 1 and self._plot_h > 1:
             self._push_curves(w)
