@@ -1,63 +1,73 @@
 {
   "schema": 1,
-  "version": "1.2.0b5",
+  "version": "2.0.0b1",
   "channel": "beta",
-  "tag": "v1.2.0b5",
-  "date": "2026-08-16",
-  "summary": "v1.2.0b5",
-  "notes_url": "https://hubmoon.miyukivigil.tech/changelog.html#v1-2-0b5",
+  "tag": "v2.0.0b1",
+  "date": "2026-08-18",
+  "summary": "v2.0.0b1",
+  "notes_url": "https://hubmoon.miyukivigil.tech/changelog.html#v2-0-0b1",
   "notes": [
-    "A frozen build could not run any system program.",
-    "The import hid failure handler called system_env() before it was defined \u2014 it runs at import time, above where the helper first landed."
+    "The window opened floating, and only on some machines.",
+    "Running the test suite rewrote your own settings.",
+    "An empty list collapsed the sheet it was in.",
+    "Notices stayed on screen forever. toast() set the text and nothing ever cleared it, so \"Written to flash.\" sat over the interface until it was clicked or something else replaced it.",
+    "The DAC's own EQ profiles were being shown as your curve.",
+    "The profile stepper reported positions the DAC had refused.",
+    "A button could be wired to nothing and nobody would know.",
+    "The community library was slow to scroll, and slow just to sit there.",
+    "Thumbnails were drawn on the main thread.",
+    "A resize could have crashed the window.",
+    "The build baked in icons nothing draws.",
+    "One library instead of three panels that were the same panel."
   ],
   "assets": {
     "arch-package": {
-      "url": "https://github.com/MiyukiVigil/Hub_Moon/releases/download/v1.2.0b5/hub-moon-1.2.0b5-1-x86_64.pkg.tar.zst",
-      "sha256": "b57eddc7cbd9678752378fb3600f8dd30fc3326e57dfcdda035c286586f14115",
-      "size": 40265678,
-      "name": "hub-moon-1.2.0b5-1-x86_64.pkg.tar.zst"
+      "url": "https://github.com/MiyukiVigil/Hub_Moon/releases/download/v2.0.0b1/hub-moon-2.0.0b1-1-x86_64.pkg.tar.zst",
+      "sha256": "cb97368eff10529e25d7e827841f60faf3f0c9fbd6d8bedbabccad10ea43bf5b",
+      "size": 40332769,
+      "name": "hub-moon-2.0.0b1-1-x86_64.pkg.tar.zst"
     },
     "rpm-package": {
-      "url": "https://github.com/MiyukiVigil/Hub_Moon/releases/download/v1.2.0b5/hub-moon-1.2.0b5-1.x86_64.rpm",
-      "sha256": "9ab5a752b7af68cdf11004f8a1497678a28dd7ade84cfb25e3fe31c1591f371d",
-      "size": 41785168,
-      "name": "hub-moon-1.2.0b5-1.x86_64.rpm"
+      "url": "https://github.com/MiyukiVigil/Hub_Moon/releases/download/v2.0.0b1/hub-moon-2.0.0b1-1.x86_64.rpm",
+      "sha256": "14ecbcbfad038e6fdae346838fe0a80151d8ad30fa29233134029393c9da4def",
+      "size": 41841877,
+      "name": "hub-moon-2.0.0b1-1.x86_64.rpm"
     },
     "deb-package": {
-      "url": "https://github.com/MiyukiVigil/Hub_Moon/releases/download/v1.2.0b5/hub-moon_1.2.0b5-1_amd64.deb",
-      "sha256": "6e46e9f59660859f47dbceb12cb6f60d0258ee32df77585c6774d47729f9f156",
-      "size": 41750112,
-      "name": "hub-moon_1.2.0b5-1_amd64.deb"
+      "url": "https://github.com/MiyukiVigil/Hub_Moon/releases/download/v2.0.0b1/hub-moon_2.0.0b1-1_amd64.deb",
+      "sha256": "72713948ef7f35162aa28a6154310b83f94f724fc4457c40c658fbee44be92e6",
+      "size": 41800328,
+      "name": "hub-moon_2.0.0b1-1_amd64.deb"
     },
     "linux-tarball": {
-      "url": "https://github.com/MiyukiVigil/Hub_Moon/releases/download/v1.2.0b5/HubMoon-1.2.0b5-linux-x86_64.tar.gz",
-      "sha256": "1c3f37a1f2cd6d6feada9e704b75a32d96170cce585b3b064536abc97ace53be",
-      "size": 40952773,
-      "name": "HubMoon-1.2.0b5-linux-x86_64.tar.gz"
+      "url": "https://github.com/MiyukiVigil/Hub_Moon/releases/download/v2.0.0b1/HubMoon-2.0.0b1-linux-x86_64.tar.gz",
+      "sha256": "6f83da387f98cf42ef472d8b633c672395101043389ad29fc503b95200e3e038",
+      "size": 40992928,
+      "name": "HubMoon-2.0.0b1-linux-x86_64.tar.gz"
     },
     "macos-dmg-arm64": {
-      "url": "https://github.com/MiyukiVigil/Hub_Moon/releases/download/v1.2.0b5/HubMoon-1.2.0b5-macOS-arm64.dmg",
-      "sha256": "cb226acf0ad4bb7bdefc5035070b1d0ad78e2e0615d0d8fd527e074af42bf9da",
-      "size": 22135866,
-      "name": "HubMoon-1.2.0b5-macOS-arm64.dmg"
+      "url": "https://github.com/MiyukiVigil/Hub_Moon/releases/download/v2.0.0b1/HubMoon-2.0.0b1-macOS-arm64.dmg",
+      "sha256": "a52546f3ff07762877c0ea5c8e15a75e38b0c4898fc0cf5438565eb3b5afa362",
+      "size": 22185883,
+      "name": "HubMoon-2.0.0b1-macOS-arm64.dmg"
     },
     "windows-portable": {
-      "url": "https://github.com/MiyukiVigil/Hub_Moon/releases/download/v1.2.0b5/HubMoon-1.2.0b5-windows-portable.zip",
-      "sha256": "e74dbe8b5fd339ab37c8a0aa122166c8bc85b2da67fe18ad2f094f98dc6a697c",
-      "size": 22560706,
-      "name": "HubMoon-1.2.0b5-windows-portable.zip"
+      "url": "https://github.com/MiyukiVigil/Hub_Moon/releases/download/v2.0.0b1/HubMoon-2.0.0b1-windows-portable.zip",
+      "sha256": "0a73d8959ed132b0b7548186ff9856e5929875971ef3b41a2d4f55a02f4a7d66",
+      "size": 22605315,
+      "name": "HubMoon-2.0.0b1-windows-portable.zip"
     },
     "appimage": {
-      "url": "https://github.com/MiyukiVigil/Hub_Moon/releases/download/v1.2.0b5/HubMoon-1.2.0b5-x86_64.AppImage",
-      "sha256": "92c6ac20c77c51d03a950c6874149d73d64d0dd5e1031910248e9cd05c1e24fd",
-      "size": 38296056,
-      "name": "HubMoon-1.2.0b5-x86_64.AppImage"
+      "url": "https://github.com/MiyukiVigil/Hub_Moon/releases/download/v2.0.0b1/HubMoon-2.0.0b1-x86_64.AppImage",
+      "sha256": "9b71c2de00eea954bfa16782b1274149d3cb47c0bad0daac901a1847105ed01b",
+      "size": 38341112,
+      "name": "HubMoon-2.0.0b1-x86_64.AppImage"
     },
     "windows-installer": {
-      "url": "https://github.com/MiyukiVigil/Hub_Moon/releases/download/v1.2.0b5/HubMoon-Setup-1.2.0b5.exe",
-      "sha256": "05043d856b294b66a483b0714fe406794c3e4cac88ee33361d6189abc54cf6b3",
-      "size": 18194592,
-      "name": "HubMoon-Setup-1.2.0b5.exe"
+      "url": "https://github.com/MiyukiVigil/Hub_Moon/releases/download/v2.0.0b1/HubMoon-Setup-2.0.0b1.exe",
+      "sha256": "e8642f24692b8b1cc504c1cd09cd8dff5ce3537cfc1309e82b2265388dbda570",
+      "size": 18230502,
+      "name": "HubMoon-Setup-2.0.0b1.exe"
     }
   }
 }
