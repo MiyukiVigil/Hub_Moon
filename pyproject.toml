@@ -22,7 +22,7 @@ dependencies = ["hidapi>=0.14.0", "certifi"]
 #   pip install hub-moon           → CLI only
 #   pip install "hub-moon[gui]"    → CLI + desktop GUI
 [project.optional-dependencies]
-gui = ["slint>=1.13"]
+gui = ["slint>=1.13", "pystray>=0.19.5", "Pillow>=9"]
 
 [project.urls]
 Homepage = "https://hubmoon.miyukivigil.tech"

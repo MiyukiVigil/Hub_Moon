@@ -28,7 +28,7 @@ import argparse
 # bundle, the GUI shows it, and the updater compares against it. Everything that
 # used to carry its own copy — and had already drifted, the .app was still
 # announcing 0.2.0 at 1.0.0 — now asks this.
-__version__ = "2.0.0b1"
+__version__ = "2.0.0"
 
 def system_env():
     """The environment to spawn a *system* program with.
@@ -625,8 +625,8 @@ DEFAULT_BANDS = 8
 # The app assumes it is (isInPEQMode: readEQIndex() === peqIndex), but a DAWN PRO2
 # on firmware 1.5 reports active profile 9 in both its EQ-off and custom-EQ modes,
 # while band writes carrying peqIndex 7 are plainly audible in custom-EQ mode. The
-# EQ on/off toggle (both volume buttons) is not reflected in any readable register
-# we could find, so do not gate writes on the active profile.
+# EQ on/off toggle is instead readable at RAM 0x10648c on firmware 1.5.
+# Use get_physical_eq_mode(), not the stored active profile, to gate previews.
 DEVICE_PEQ_INDEX = {0x98D5: 4}
 DEFAULT_PEQ_INDEX = 7
 
@@ -817,6 +817,8 @@ class MoondropDevice:
         self.bands = band_count(self.product_id)
         self.peq_index = peq_profile_index(self.product_id)
         self.supports_pregain = self.product_id not in NO_PREGAIN_DEVICES
+        self.supports_physical_volume = False
+        self.supports_eq_mode = False
         # A previous process may have left unread reports queued; clear them so the
         # first read of this session cannot pick up someone else's answer.
         self.drain()
@@ -861,12 +863,160 @@ class MoondropDevice:
                 return
 
     def get_firmware_version(self):
+        self.supports_physical_volume = False
+        self.supports_eq_mode = False
         res = self.send_command([CMD_READ, SUB_FIRMWARE_VERSION, 0])
         if not res:
             return "Unknown"
         payload = bytes(res[4:])
         version = payload.split(b'\x00')[0].decode('utf-8', errors='ignore')
+        # These RAM addresses were verified on DAWN PRO2 firmware 1.5 only.
+        self.supports_physical_volume = self.product_id == 0x011D and version == "1.5"
+        self.supports_eq_mode = self.supports_physical_volume
         return version
+
+    def get_physical_eq_mode(self):
+        """Read the button-selected mode, separately from the stored EQ profile.
+
+        8 is normal/red; 9 is custom/yellow on the verified firmware. Other
+        values are returned unchanged because built-in profiles can also exist.
+        """
+        if not getattr(self, "supports_eq_mode", False):
+            return None
+        address = struct.pack('<I', 0x10648c)
+        reply = self.send_command([CMD_READ, 0, 8] + list(address))
+        if (not reply or len(reply) < 12 or reply[3] != 8
+                or bytes(reply[4:8]) != address):
+            raise OSError("EQ-mode read did not verify")
+        mode = struct.unpack('<I', bytes(reply[8:12]))[0]
+        if mode > 9:
+            raise ValueError("EQ-mode value outside verified range")
+        return mode
+
+    def _eq_ram_word(self, address):
+        packed = struct.pack('<I', address)
+        reply = self.send_command([CMD_READ, 0, 8] + list(packed))
+        if (not reply or len(reply) < 12 or reply[3] != 8
+                or bytes(reply[4:8]) != packed):
+            raise OSError("EQ RAM response did not verify")
+        return bytes(reply[8:12])
+
+    def _write_eq_ram_word(self, address, word):
+        if address not in (0x10648c, 0x11d234, 0x106550) or len(word) != 4:
+            raise ValueError("Invalid EQ switch address or word")
+        self.send_command([CMD_WRITE, 0, 8] + list(struct.pack('<I', address))
+                          + list(word), wait_response=False)
+        if address != 0x106550 and self._eq_ram_word(address) != word:
+            raise OSError("EQ-mode write did not verify")
+
+    def _wait_eq_reload(self):
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            pending = self._eq_ram_word(0x106550)
+            if pending[0] == 0:
+                return pending
+            if pending[0] not in (1, 3):
+                raise OSError("DAC is busy with another firmware operation")
+            time.sleep(0.02)
+        raise OSError("DAC EQ reload timed out")
+
+    def set_custom_eq_enabled(self, enabled):
+        """Switch the actual button mode and reload DSP, without saving to flash.
+
+        Verified on DAWN PRO2 1.5, including LED and audible changes. The reload
+        job reads the stored profile field; temporarily use 8 for bypass, then
+        restore profile 9 so a later physical button hold selects custom EQ.
+        Calls must share the caller's device queue with all other HID operations.
+        """
+        if not getattr(self, "supports_eq_mode", False):
+            raise ValueError("EQ switching requires DAWN PRO2 firmware 1.5")
+        original = self.get_physical_eq_mode()
+        header = self._eq_ram_word(0x11d234)
+        if header != struct.pack('<HH', 2, 9):
+            raise ValueError("Load a custom EQ curve before switching EQ mode")
+        target = 9 if enabled else 8
+        if target == original:
+            return original
+
+        def reload(mode):
+            pending = self._wait_eq_reload()
+            self._write_eq_ram_word(0x11d234, header[:2] + struct.pack('<H', mode))
+            self._write_eq_ram_word(0x10648c, struct.pack('<I', mode))
+            self._write_eq_ram_word(0x106550, bytes([3]) + pending[1:])
+            self._wait_eq_reload()
+            self._write_eq_ram_word(0x11d234, header)
+            if self.get_physical_eq_mode() != mode:
+                raise OSError("EQ mode did not verify")
+            if self._eq_ram_word(0x1064ec)[1] != mode:
+                raise OSError("DSP profile reload did not verify")
+
+        try:
+            reload(target)
+        except Exception:
+            try:
+                reload(original)
+            except Exception:
+                # A disconnected DAC may be unreachable; retain the first error.
+                pass
+            raise
+        return target
+
+    def _physical_volume_word(self):
+        if not self.supports_physical_volume:
+            raise ValueError("Physical volume requires DAWN PRO2 firmware 1.5")
+        address = struct.pack('<I', 0x0011D22C)
+        reply = self.send_command([CMD_READ, 0, 12] + list(address))
+        if (not reply or len(reply) < 16 or reply[3] != 12
+                or bytes(reply[4:8]) != address):
+            raise OSError("Invalid physical-volume response")
+        word = bytes(reply[8:12])
+        raw = struct.unpack('<h', word[:2])[0]
+        # At minimum the button handler checks before subtracting its next
+        # 153-unit step. The observed end stop is -15453, below nominal -15360.
+        # Accept one step of overshoot without permitting arbitrary RAM values.
+        if not -15360 - 153 <= raw <= 0:
+            raise OSError(f"Physical-volume value outside verified range: {raw}")
+        return word
+
+    def get_physical_volume(self):
+        """Button volume in dB, separate from EQ trim; no flash access."""
+        raw = struct.unpack('<h', self._physical_volume_word()[:2])[0]
+        return max(-60.0, raw / 256.0)
+
+    def set_physical_volume(self, db):
+        """Live button-volume write, preserving adjacent state and EQ trim."""
+        if not math.isfinite(db) or not -60 <= db <= 0:
+            raise ValueError("Physical volume must be between -60 and 0 dB")
+        original = self._physical_volume_word()
+        trim_reply = self.send_command([CMD_READ, SUB_DAC_OFFSET, 0])
+        if not trim_reply or len(trim_reply) < 6:
+            raise OSError("Could not read EQ trim before changing volume")
+        trim_raw = struct.unpack('<h', bytes(trim_reply[4:6]))[0]
+        if trim_raw % 256:
+            raise OSError("EQ trim cannot be preserved by this firmware's gain update")
+        trim = trim_raw / 256.0
+        # Firmware buttons use (0 - -15360) // 100 = 153 in Q8.8 units.
+        raw = max(-15360, min(0, round(db * 256 / 153) * 153))
+        target = struct.pack('<h', raw) + original[2:]
+        if target == original:
+            return self.get_physical_volume()
+        def apply(word):
+            self.send_command([CMD_WRITE, 0, 8] + list(struct.pack('<I', 0x0011D22C))
+                              + list(word), wait_response=False)
+            # Rewriting the unchanged trim runs the firmware's gain update.
+            self.set_global_gain(trim, save=False)
+        try:
+            apply(target)
+            actual = self._physical_volume_word()
+            if actual != target:
+                raise OSError("Physical-volume write did not verify")
+        except Exception:
+            try:
+                apply(original)
+            except Exception:
+                pass  # Device may have been unplugged; propagate the original error.
+            raise
+        return raw / 256.0
 
     def get_active_eq_index(self):
         res = self.send_command([CMD_READ, SUB_ACTIVE_EQ, 0])
@@ -903,7 +1053,10 @@ class MoondropDevice:
     def set_global_gain(self, db, save=True):
         val = round(db * 256)
         val_bytes = struct.pack('<h', val)
-        self.send_command([CMD_WRITE, SUB_DAC_OFFSET, 0, val_bytes[0], val_bytes[1]])
+        # DAWN PRO2 firmware 1.5 applies this write without an acknowledgement.
+        # Waiting for one stalls every slider movement until the read timeout.
+        self.send_command([CMD_WRITE, SUB_DAC_OFFSET, 0, val_bytes[0], val_bytes[1]],
+                          wait_response=False)
         if save:
             self.save_offset_to_flash()
 

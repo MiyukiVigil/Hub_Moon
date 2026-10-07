@@ -106,7 +106,8 @@ def main(argv=None):
 
     ui_file = os.path.join(_res_dir("ui"), "app.slint")
     try:
-        window = slint.load_file(ui_file).MainWindow()
+        components = slint.load_file(ui_file)
+        window = components.MainWindow()
     except Exception:
         # A .slint that will not compile means no window will ever appear, and the
         # user is owed a reason rather than a process that exits with nothing.
@@ -116,14 +117,34 @@ def main(argv=None):
 
     gc_timer = _pin_gc_to_ui_thread()   # noqa: F841 — held so the timer keeps firing
     bridge = Bridge(window)
+    from .tray import TrayController, WindowCloseHandler
+    from .bridge import invoke_from_event_loop
+    tray = TrayController(bridge, invoke_from_event_loop,
+                          os.path.join(_res_dir('ui'), 'hub-moon.png'),
+                          components.VolumeWindow)
+    if tray.start():
+        bridge.tray = tray
+        window.tray_available = sys.platform == 'win32'
+        if sys.platform == 'win32':
+            def install_close_handler():
+                handler = WindowCloseHandler(invoke_from_event_loop,
+                                             lambda: setattr(window, 'close_dialog_open', True))
+                try:
+                    if handler.start():
+                        tray.close_handler = handler
+                    else:
+                        log.warning('Window close choice unavailable')
+                except Exception:
+                    log.warning('Window close choice unavailable', exc_info=True)
+            slint.Timer.single_shot(timedelta(milliseconds=200), install_close_handler)
 
     # Ctrl-C should close the DAC handle rather than leaving it open on exit.
     def _bye(*_):
         slint.quit_event_loop()
     signal.signal(signal.SIGINT, _bye)
 
-    bridge.start()
     try:
+        bridge.start()
         # window.run() — not show() + run_event_loop(). The loop exits as soon as no
         # window is shown, and show() does not keep it alive on its own, so the pair
         # returns instantly with exit code 0 and no window ever appears.

@@ -5,6 +5,48 @@ All notable changes to **moondrop_control.py** are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [2.0.0] - 2026-10-06
+
+Prepared for the stable channel. Includes the 2.0 beta's unified library,
+community curve filters, and curve provenance, plus the DAC controls below.
+
+### Added
+
+- A **system tray menu** changes EQ mode, applies EQ presets and saved profiles,
+  adjusts physical volume, and saves to the DAC through the existing device queue.
+  Windows can minimize to the tray and reopen the window without losing edits.
+  Tray volume opens a slider synced with the DAC's physical buttons. Closing the
+  Windows window offers Exit app, Close to tray, or Cancel.
+
+- A **Custom EQ / EQ off** button replaces Device Slot on DAWN PRO2 firmware
+  1.5. It switches the real DSP mode and LED, follows physical-button changes,
+  and does not save to flash.
+
+- DAWN PRO2 firmware 1.5 shows the physical EQ mode separately from its stored
+  profile. In red/normal mode, GUI EQ edits stay staged; switching to yellow
+  applies them live. Saving requires yellow mode and writes the editor's curve.
+
+- A **Volume** slider for DAWN PRO2 firmware 1.5 controls the same live gain as
+  the physical buttons and follows button changes. EQ trim remains separate.
+  Unsupported firmware does not enable this control.
+
+### Fixed
+
+- Physical volume remains connected at the DAC's minimum button setting,
+  including its final step below the nominal range. Button updates poll every
+  250 ms.
+
+- Volume drags no longer replay queued positions or change on mouse hover.
+  The thumb follows the pointer immediately and applies the latest target.
+
+- The DAC output slider now says **Volume trim**, with **separate from buttons**
+  beside it. On DAWN PRO2 firmware 1.5, this adjusts a different setting from the
+  physical volume buttons.
+- Live volume-trim writes no longer wait for an acknowledgement the DAWN PRO2
+  does not send, avoiding a response timeout on every slider adjustment.
+
 ## [2.0.0b1] - 2026-08-18
 
 The first build on the **2.0** line, and on the **beta** channel — stable stays on

@@ -128,6 +128,15 @@ Pre-Gain attenuates the input signal to prevent digital clipping when adding pos
 * **Read Receive:** Bytes `4` and `5` (16-bit signed little-endian integer) divided by 256.0.
 * **Write Send:** `[1, 3, 0, low_byte, high_byte]` where bytes represent the value scaled by 256.0.
 
+**Hardware check (2026-10-06, DAWN PRO2 firmware 1.5):** Writing -12 dB changed
+the sound and read back correctly; restoring 0 dB was verified. These writes do
+not acknowledge, so a live slider should not wait for a write reply. Physical
+volume-down presses left the offset at 0 dB: this is a separate volume trim.
+The official web app 1.6.5 defines `DEVICE_VOLUME=36`, but its DAWN PRO2 registry
+does not enable the device-volume feature, and `[128, 36, 0]` received no matching
+reply on this unit. Hardware-button volume synchronization remains unverified;
+do not present this offset as the physical volume setting.
+
 ### 3.5. Write PEQ Band Parameters (Write)
 Updates parameters for a specific Parametric EQ band index (0 to 7).
 * **Write Send:** A custom 63-byte payload:

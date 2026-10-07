@@ -21,6 +21,19 @@ saved profiles of your own. It edits live on the DSP so you hear every move, and
 flash** keeps anything after you unplug. It updates itself, and it explains what it is doing while
 it does it.
 
+On **DAWN PRO2 firmware 1.5**, **Custom EQ** switches the real red/yellow DSP
+mode, and **Volume** follows the physical buttons. Edits in red/normal mode stay
+staged until custom EQ is enabled.
+
+The **system tray** menu offers EQ on/off, EQ presets, saved profiles, volume
+slider, and Save to DAC. Choosing a preset or saved profile enables custom EQ on
+supported firmware. On Windows, use the header's minimize icon or **Minimize to tray**
+to keep the app running in the background; **Show Hub Moon** brings it back.
+Closing the Windows window offers **Exit app**, **Close to tray**, or **Cancel**
+when the tray is available. **Quit Hub Moon** exits directly. All tray actions share
+the window's device connection. Tray availability on other desktops depends on
+their native menu backend; the main window still works when no tray is available.
+
 Everything below documents the **command line**, which is the same engine with a different front.
 Reach for it to script something, to drive Hub Moon from another program (see *Building a front-end
 on this*), or because you would rather not have a window open. It is not the reduced version — the

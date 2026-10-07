@@ -9,6 +9,7 @@
 // writes to the hidraw.
 
 import { Theme, Regions, Accents, Skins } from "theme.slint";
+export { Theme }
 import { Icons } from "icons.slint";
 
 // A Material Symbols glyph, drawn rather than shaped: `d` is an outline from
@@ -350,7 +351,11 @@ component HTrack inherits Rectangle {
         // must keep dragging, so the hit area is deliberately taller than what is
         // painted, and inset by the same 8px it is widened by.
         property <float> at: max(0, min(1, ((self.mouse-x - 8px) / 1px) / max(1, parent.width / 1px)));
-        moved => { root.moved(root.minimum + self.at * (root.maximum - root.minimum)); }
+        moved => {
+            if self.pressed {
+                root.moved(root.minimum + self.at * (root.maximum - root.minimum));
+            }
+        }
         pointer-event(e) => {
             if (e.kind == PointerEventKind.down) {
                 root.moved(root.minimum + self.at * (root.maximum - root.minimum));
@@ -4447,6 +4452,11 @@ export component MainWindow inherits Window {
     in property <float> pregain;
     in property <bool> supports-pregain: true;
     in property <float> global-gain;
+    in property <float> physical-volume;
+    in property <bool> supports-physical-volume;
+    in property <int> physical-eq-mode: -1;
+    in property <bool> tray-available: false;
+    in-out property <bool> close-dialog-open: false;
     in property <int> slot: -1;
     // What the profile row says under its number, and whether the DAC is playing one of
     // its own presets rather than the curve this app owns.
@@ -4557,8 +4567,12 @@ export component MainWindow inherits Window {
     callback select-band(int);
     callback set-pregain(float);
     callback set-global-gain(float);
+    callback set-physical-volume(float);
     callback match-headroom();
     callback step-slot(int);
+    callback toggle-custom-eq();
+    callback minimize-to-tray();
+    callback exit-app();
     callback plot-press(float, float);
     callback plot-move(float, float);
     callback plot-release();
@@ -4820,7 +4834,10 @@ export component MainWindow inherits Window {
                     border-width: 1px;
                     border-color: Theme.line;
                     fw := Text {
-                        text: "fw \{root.firmware}";
+                        text: root.physical-eq-mode == 8 ? "EQ off · edits staged"
+                            : root.physical-eq-mode == 9 ? "Custom EQ · live"
+                            : root.physical-eq-mode >= 0 ? "EQ enabled · live"
+                            : "fw \{root.firmware}";
                         color: Theme.sub;
                         font-family: Theme.mono;
                         font-size: 11px;
@@ -4891,6 +4908,10 @@ export component MainWindow inherits Window {
                     alignment: center;
                     HorizontalLayout {
                         spacing: 2px;
+                        if root.tray-available: IconBtn {
+                            icon: Icons.remove;
+                            clicked => { root.minimize-to-tray(); }
+                        }
                         IconBtn {
                             icon: Icons.home;
                             active: root.welcome-open;
@@ -4920,7 +4941,75 @@ export component MainWindow inherits Window {
             ctl-row := HorizontalLayout {
                 spacing: 10px;
                 height: 62px;
-                SlotCard {
+                if root.physical-eq-mode >= 0: Rectangle {
+                    width: 190px;
+                    height: 62px;
+                    border-radius: Theme.r-md;
+                    background: Theme.card;
+                    border-width: 1px;
+                    border-color: Theme.line;
+                    VerticalLayout {
+                        padding-left: 13px;
+                        padding-right: 13px;
+                        padding-top: 9px;
+                        padding-bottom: 9px;
+                        spacing: 2px;
+                        Text {
+                            text: "CUSTOM EQ";
+                            font-family: Theme.mono;
+                            font-size: 9px;
+                            font-weight: 700;
+                            letter-spacing: 1px;
+                            color: Theme.sub;
+                            height: 14px;
+                        }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            Text {
+                                text: root.physical-eq-mode == 8 ? "normal audio" : "your curve";
+                                font-family: Theme.mono;
+                                font-size: 9px;
+                                color: Theme.faint;
+                                horizontal-stretch: 1;
+                                vertical-alignment: center;
+                            }
+                            Text {
+                                text: root.physical-eq-mode == 8 ? "OFF" : "ON";
+                                font-family: Theme.mono;
+                                font-size: 11px;
+                                font-weight: 700;
+                                color: root.physical-eq-mode == 8 ? Theme.sub : Theme.accent;
+                                vertical-alignment: center;
+                            }
+                            Rectangle {
+                                width: 32px;
+                                height: 18px;
+                                border-radius: 9px;
+                                background: root.physical-eq-mode == 8 ? Theme.line : Theme.accent;
+                                opacity: root.connected && !root.busy ? 1 : 0.45;
+                                Rectangle {
+                                    x: root.physical-eq-mode == 8 ? 3px : 17px;
+                                    y: 3px;
+                                    width: 12px;
+                                    height: 12px;
+                                    border-radius: 6px;
+                                    background: Theme.card;
+                                    animate x { duration: Theme.settle; easing: Theme.ease-state; }
+                                }
+                                TouchArea {
+                                    x: -5px;
+                                    y: -6px;
+                                    width: parent.width + 10px;
+                                    height: parent.height + 12px;
+                                    enabled: root.connected && !root.busy;
+                                    mouse-cursor: pointer;
+                                    clicked => { root.toggle-custom-eq(); }
+                                }
+                            }
+                        }
+                    }
+                }
+                if root.physical-eq-mode < 0: SlotCard {
                     // Wider than it was: the row now carries a recovery button on the
                     // one state where it is needed, and 190px put it on top of the
                     // stepper.
@@ -4948,14 +5037,25 @@ export component MainWindow inherits Window {
                 }
                 SliderCard {
                     horizontal-stretch: 1;
-                    label: "GLOBAL OFFSET";
-                    caption: "volume";
+                    label: "VOLUME TRIM";
+                    caption: "separate from buttons";
                     minimum: -12;
                     maximum: 6;
                     value: root.global-gain;
                     enabled: root.connected;
                     readout: "\{round(root.global-gain * 10) / 10} dB";
                     moved(v) => { root.set-global-gain(v); }
+                }
+                if root.supports-physical-volume: SliderCard {
+                    horizontal-stretch: 1;
+                    label: "VOLUME";
+                    caption: "synced with buttons";
+                    minimum: -60;
+                    maximum: 0;
+                    value: root.physical-volume;
+                    enabled: root.connected;
+                    readout: "\{round(root.physical-volume * 10) / 10} dB";
+                    moved(v) => { root.set-physical-volume(v); }
                 }
             }
 
@@ -5480,5 +5580,60 @@ export component MainWindow inherits Window {
         width: root.width;
         height: root.height;
         done => { root.splash-done = true; }
+    }
+
+    if root.close-dialog-open: Rectangle {
+        background: #00000066;
+        width: parent.width;
+        height: parent.height;
+        TouchArea { }
+        Rectangle {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: 400px;
+            height: 156px;
+            background: Theme.card;
+            border-radius: Theme.r-lg;
+            border-width: 1px;
+            border-color: Theme.line;
+            VerticalLayout {
+                padding: 20px;
+                spacing: 12px;
+                Text { text: "Close Hub Moon"; color: Theme.text; font-size: 18px; font-weight: 700; }
+                Text { text: "Exit the app or keep it running in the tray."; color: Theme.sub; font-size: 12px; }
+                HorizontalLayout {
+                    spacing: 8px;
+                    TextBtn { label: "Cancel"; clicked => { root.close-dialog-open = false; } }
+                    TextBtn { label: "Close to tray"; clicked => { root.close-dialog-open = false; root.minimize-to-tray(); } }
+                    TextBtn { label: "Exit app"; primary: true; clicked => { root.exit-app(); } }
+                }
+            }
+        }
+    }
+}
+
+export component VolumeWindow inherits Window {
+    title: "Hub Moon volume";
+    width: 320px;
+    height: 114px;
+    background: Theme.bg;
+    in property <float> volume;
+    in property <bool> available: true;
+    in property <string> device-name;
+    callback set-physical-volume(float);
+    VerticalLayout {
+        padding: 14px;
+        spacing: 8px;
+        Text { text: root.device-name; color: Theme.sub; font-family: Theme.mono; font-size: 10px; }
+        SliderCard {
+            label: "VOLUME";
+            caption: root.available ? "synced with buttons" : "DAC disconnected";
+            minimum: -60;
+            maximum: 0;
+            value: root.volume;
+            readout: "\{round(root.volume * 10) / 10} dB";
+            enabled: root.available;
+            moved(v) => { root.set-physical-volume(v); }
+        }
     }
 }

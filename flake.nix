@@ -12,7 +12,7 @@
       packages = forAll (pkgs: {
         default = pkgs.python3Packages.buildPythonApplication {
           pname = "hub-moon";
-          version = "2.0.0b1";
+          version = "2.0.0";
           src = ./.;
           pyproject = true;
 
@@ -23,7 +23,7 @@
           # `python3Packages.slint` does not resolve, package it from PyPI (it ships
           # manylinux wheels) or use the PyInstaller bundle instead. Unverified here —
           # this flake has not been built since the GUI moved off Qt.
-          dependencies = with pkgs.python3Packages; [ hidapi slint ];
+          dependencies = with pkgs.python3Packages; [ hidapi slint pystray pillow ];
 
           # ship the udev rule (see nixosModules.default), desktop entry, icon
           postInstall = ''

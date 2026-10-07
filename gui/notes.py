@@ -9,6 +9,16 @@ installed from a release.
 
 
 NOTES = {
+    '2.0.0': [
+        "Physical volume remains connected at the DAC's minimum button setting, including its final step below the nominal range.",
+        'Volume drags no longer replay queued positions or change on mouse hover.',
+        'The DAC output slider now says Volume trim, with separate from buttons beside it.',
+        'Live volume-trim writes no longer wait for an acknowledgement the DAWN PRO2 does not send, avoiding a response timeout on every slider adjustment.',
+        'A system tray menu changes EQ mode, applies EQ presets and saved profiles, adjusts physical volume, and saves to the DAC through the existing device queue.',
+        'A Custom EQ / EQ off button replaces Device Slot on DAWN PRO2 firmware 1.5.',
+        'DAWN PRO2 firmware 1.5 shows the physical EQ mode separately from its stored profile.',
+        'A Volume slider for DAWN PRO2 firmware 1.5 controls the same live gain as the physical buttons and follows button changes.',
+    ],
     '2.0.0b1': [
         'The window opened floating, and only on some machines.',
         'Running the test suite rewrote your own settings.',

@@ -186,7 +186,7 @@ MOTION_LABELS = ("Full", "Reduced", "Off")
 # is under the time it takes to plug a cable in and look at the screen, and the poll
 # is one `hid.enumerate()` — measured at 0.75 ms — on a worker thread that skips the
 # check whenever it has real work queued.
-DEVICE_POLL = timedelta(seconds=2)
+DEVICE_POLL = timedelta(milliseconds=250)
 
 # How long a notice stays up. Through 1.2.0 it stayed forever: `toast()` set the text
 # and nothing ever cleared it, so "Written to flash." sat over the interface until it
@@ -554,11 +554,16 @@ class DeviceWorker(_Worker):
         super().__init__("hidworker")
         self._post = post
         self._dev = None
+        self._physical_volume_target_generation = 0
+        self._staged_eq = {}
+        self._staged_pregain = None
 
     def on_crash(self, exc):
         self._post("error", "Device error: %s" % exc)
 
     def _close(self):
+        self._staged_eq.clear()
+        self._staged_pregain = None
         if self._dev is not None:
             try:
                 self._dev.close()
@@ -576,11 +581,16 @@ class DeviceWorker(_Worker):
         name = info.get("product_string") or mc.SUPPORTED_DEVICES.get(
             dev.product_id, "Moondrop DAC")
         active = dev.get_active_eq_index()
+        firmware = dev.get_firmware_version()
+        physical_volume = (dev.get_physical_volume()
+                           if getattr(dev, "supports_physical_volume", False) else None)
         return {
             "connected": True,
             "deviceName": name,
             "productId": dev.product_id,
-            "firmware": dev.get_firmware_version(),
+            "firmware": firmware,
+            "physicalVolume": physical_volume,
+            "physicalEqMode": dev.get_physical_eq_mode() if getattr(dev, "supports_eq_mode", False) else None,
             "activeProfile": -1 if active is None else int(active),
             "peqIndex": dev.peq_index,
             "supportsPregain": dev.supports_pregain,
@@ -594,12 +604,9 @@ class DeviceWorker(_Worker):
     def probe(self):
         """Is the world still the way the UI thinks it is?
 
-        Enumeration only — this never opens the hidraw and never reads from a device
-        it already holds, so it can run on the same queue as real work without being
-        able to disturb it. `hid.enumerate()` costs well under a millisecond here, and
-        the watch skips itself entirely whenever the queue is busy.
-
-        Silence is the normal case: nothing is posted unless the answer changed.
+        Enumerate for hotplug, then read button volume on verified firmware.
+        All reads share the device job queue with writes. A failed volume read
+        drops the handle so the next probe can reopen it.
         """
         present = bool(mc.find_devices())
         if present and self._dev is None:
@@ -610,6 +617,18 @@ class DeviceWorker(_Worker):
             # means the next plug-in of the same DAC opens a second one.
             self._close()
             self._post("vanished", None)
+        elif present and getattr(self._dev, "supports_physical_volume", False):
+            try:
+                self._post("physical_volume", self._dev.get_physical_volume())
+                if getattr(self._dev, "supports_eq_mode", False):
+                    mode = self._dev.get_physical_eq_mode()
+                    self._post("eq_mode", mode)
+                    if mode != 8:
+                        self._flush_staged_eq()
+            except (OSError, ValueError):
+                # Reopen on the next probe rather than repeatedly using a stale HID.
+                self._close()
+                self._post("physical_volume_unavailable", None)
 
     def refresh(self):
         self._post("busy", True)
@@ -634,11 +653,36 @@ class DeviceWorker(_Worker):
         finally:
             self._post("busy", False)
 
+    def _eq_preview_available(self):
+        if not getattr(self._dev, "supports_eq_mode", False):
+            return True
+        mode = self._dev.get_physical_eq_mode()
+        self._post("eq_mode", mode)
+        return mode != 8
+
+    def _flush_staged_eq(self):
+        # Recheck before each write: the buttons can change mode during a batch.
+        for index, args in list(self._staged_eq.items()):
+            if not self._eq_preview_available():
+                return False
+            self._dev.write_peq_index(index, *args)
+            del self._staged_eq[index]
+        if self._staged_pregain is not None:
+            if not self._eq_preview_available():
+                return False
+            self._dev.set_pregain(self._staged_pregain, save=False)
+            self._staged_pregain = None
+        return True
+
     def write_band(self, index, ftype, freq, gain, q):
         if self._dev is None:
             return
         try:
-            self._dev.write_peq_index(index, ftype, freq, gain, q)
+            if not getattr(self._dev, "supports_eq_mode", False):
+                self._dev.write_peq_index(index, ftype, freq, gain, q)
+                return
+            self._staged_eq[index] = (ftype, freq, gain, q)
+            self._flush_staged_eq()
         except ValueError as exc:
             self._post("error", str(exc))
 
@@ -654,6 +698,8 @@ class DeviceWorker(_Worker):
         question, not told a fact.
         """
         if self._dev is None:
+            return
+        if not self._eq_preview_available():
             return
         for b in bands:
             try:
@@ -673,6 +719,17 @@ class DeviceWorker(_Worker):
             return
         self._post("busy", True)
         try:
+            if getattr(self._dev, "supports_eq_mode", False):
+                for b in bands:
+                    self._staged_eq[b["index"]] = (b["type"], int(round(b["frequency"])),
+                                                   float(b["gain"]), float(b["q"]))
+                if self._dev.supports_pregain and pregain is not None:
+                    self._staged_pregain = float(pregain)
+                if global_gain is not None:
+                    self._dev.set_global_gain(float(global_gain), save=False)
+                if self._flush_staged_eq():
+                    self._post("snapshot", (self._read_all(), False))
+                return
             for b in bands:
                 try:
                     self._dev.write_peq_index(b["index"], b["type"],
@@ -692,6 +749,10 @@ class DeviceWorker(_Worker):
         if self._dev is None:
             return
         try:
+            if getattr(self._dev, "supports_eq_mode", False):
+                self._staged_pregain = float(db)
+                self._flush_staged_eq()
+                return
             self._dev.set_pregain(db, save=False)
         except Exception as exc:
             self._post("error", str(exc))
@@ -703,6 +764,16 @@ class DeviceWorker(_Worker):
             self._dev.set_global_gain(db, save=False)
         except Exception as exc:
             self._post("error", str(exc))
+
+    def set_physical_volume(self, db, generation):
+        if self._dev is None or generation != self._physical_volume_target_generation:
+            return
+        try:
+            self._post("physical_volume_written", (generation, self._dev.set_physical_volume(db)))
+        except Exception as exc:
+            self._post("error", str(exc))
+            self._close()
+            self._post("physical_volume_unavailable", None)
 
     def set_slot(self, index):
         """Ask for a profile, then report the one the device is actually on.
@@ -727,11 +798,35 @@ class DeviceWorker(_Worker):
         got = self._dev.get_active_eq_index()
         return -1 if got is None else int(got)
 
-    def save_to_flash(self):
+    def set_custom_eq_enabled(self, enabled):
         if self._dev is None:
             return
         self._post("busy", True)
         try:
+            mode = self._dev.set_custom_eq_enabled(bool(enabled))
+            if enabled:
+                self._flush_staged_eq()
+            self._post("eq_mode", mode)
+        except Exception as exc:
+            self._post("error", "EQ switch failed: %s" % exc)
+        finally:
+            self._post("busy", False)
+
+    def save_to_flash(self, bands=None, pregain=None):
+        if self._dev is None:
+            return
+        self._post("busy", True)
+        try:
+            if getattr(self._dev, "supports_eq_mode", False) and bands is not None:
+                # Save the editor's complete curve, including edits whose live
+                # job failed or whose staging buffer was cleared on reconnect.
+                for b in bands:
+                    self._staged_eq[b["index"]] = (b["type"], int(round(b["frequency"])),
+                                                   float(b["gain"]), float(b["q"]))
+                if self._dev.supports_pregain and pregain is not None:
+                    self._staged_pregain = float(pregain)
+            if not self._eq_preview_available() or not self._flush_staged_eq():
+                raise ValueError("Hold both DAC volume buttons until the LED is yellow, then save again.")
             self._dev.save_eq_to_flash()
             self._dev.save_offset_to_flash()
             self._post("saved", None)
@@ -1204,6 +1299,12 @@ class Bridge:
         self.supports_pregain = True
         self.pregain = 0.0
         self.global_gain = 0.0
+        self.physical_volume = 0.0
+        self.tray = None
+        self.physical_eq_mode = -1
+        self.supports_physical_volume = False
+        self._physical_volume_generation = 0
+        self._physical_volume_pending = False
         self.slot = 7
         # Which profile index the app's own curve lives at, learned the only way it can
         # be: a write to the custom PEQ store selects that store, so whatever the device
@@ -1381,8 +1482,12 @@ class Bridge:
         window.select_band = self.select_band
         window.set_pregain = self.set_pregain
         window.set_global_gain = self.set_global_gain
+        window.set_physical_volume = self.set_physical_volume
         window.match_headroom = self.match_headroom
         window.step_slot = self.step_slot
+        window.toggle_custom_eq = self.toggle_custom_eq
+        window.minimize_to_tray = lambda: self.tray.hide() if self.tray else None
+        window.exit_app = slint.quit_event_loop
         window.reselect_custom = self.reselect_custom
         window.plot_press = self.plot_press
         window.plot_move = self.plot_move
@@ -1500,6 +1605,12 @@ class Bridge:
             self.supports_pregain = state["supportsPregain"]
             self.pregain = round(state["pregain"], 1)
             self.global_gain = round(state["globalGain"], 1)
+            physical = state.get("physicalVolume")
+            mode = state.get("physicalEqMode")
+            self.physical_eq_mode = -1 if mode is None else int(mode)
+            if not self._physical_volume_pending:
+                self.supports_physical_volume = physical is not None
+                self.physical_volume = 0.0 if physical is None else float(physical)
             self.slot = state["activeProfile"]
             # `clean` is False exactly when this snapshot followed a batch write, and a
             # write to the custom PEQ store selects that store — so this is the one
@@ -1519,6 +1630,29 @@ class Bridge:
                 self.toast("")
                 if self.pristine is None:
                     self._snapshot()
+        elif kind == "eq_mode":
+            if self.physical_eq_mode == int(payload):
+                return
+            self.physical_eq_mode = int(payload)
+        elif kind == "physical_volume":
+            if self._physical_volume_pending:
+                return
+            if self.supports_physical_volume and self.physical_volume == float(payload):
+                return
+            self.physical_volume = float(payload)
+            self.supports_physical_volume = True
+        elif kind == "physical_volume_written":
+            generation, actual = payload
+            if generation != self._physical_volume_generation:
+                return
+            self._physical_volume_pending = False
+            self.physical_volume = float(actual)
+        elif kind == "physical_volume_unavailable":
+            self.physical_eq_mode = -1
+            self._physical_volume_generation += 1
+            self.dev._physical_volume_target_generation = self._physical_volume_generation
+            self._physical_volume_pending = False
+            self.supports_physical_volume = False
         elif kind == "slot":
             # The device's answer, not the request. See DeviceWorker.set_slot.
             was = self.slot
@@ -1536,6 +1670,12 @@ class Bridge:
             self.bands = [dict(b) for b in DEMO_BANDS]
             self.pregain = 0.0
             self.global_gain = 0.0
+            self.physical_volume = 0.0
+            self.physical_eq_mode = -1
+            self.supports_physical_volume = False
+            self._physical_volume_generation += 1
+            self.dev._physical_volume_target_generation = self._physical_volume_generation
+            self._physical_volume_pending = False
             self.dirty = False
             # The demo curve is NOT a device state, and must never become one that
             # `revert` can write back. It used to: start the app while something else
@@ -2278,7 +2418,7 @@ class Bridge:
 
     def save_to_flash(self):
         if self.connected:
-            self.dev.submit(self.dev.save_to_flash)
+            self.dev.submit(self.dev.save_to_flash, [dict(b) for b in self.bands], self.pregain)
         else:
             self.dirty = False
             self._snapshot()
@@ -2696,7 +2836,7 @@ class Bridge:
 
     def set_global_gain(self, db):
         """The DAC's own output offset, downstream of the EQ. Distinct from pre-gain:
-        this is volume, that is headroom."""
+        this is EQ trim, separate from the physical button volume."""
         db = round(_clamp(float(db), GLOBAL_MIN, GLOBAL_MAX), 1)
         if abs(db - self.global_gain) < 0.05:
             return
@@ -2705,6 +2845,24 @@ class Bridge:
         if self.connected:
             self.dev.submit(self.dev.set_global_gain, float(db))
         self.push()
+
+    def set_physical_volume(self, db):
+        if not self.connected or not self.supports_physical_volume:
+            return
+        db = _clamp(float(db), -60.0, 0.0)
+        self.physical_volume = db
+        self._physical_volume_generation += 1
+        generation = self._physical_volume_generation
+        self.dev._physical_volume_target_generation = generation
+        self._physical_volume_pending = True
+        self.push()
+        # Keep the thumb at the pointer. Send only the latest target after a
+        # short pause, and ignore older readbacks until that target is applied.
+        def send_latest():
+            if (generation == self._physical_volume_generation and self.connected
+                    and self.supports_physical_volume and not self.handing_over):
+                self.dev.submit(self.dev.set_physical_volume, db, generation)
+        slint.Timer.single_shot(timedelta(milliseconds=75), send_latest)
 
     def match_headroom(self):
         self.set_pregain(suggest_pregain(self.bands))
@@ -2751,6 +2909,29 @@ class Bridge:
             # applied, and claiming ownership before that would be a guess.
             return "as reported"
         return "your curve"
+
+    def toggle_custom_eq(self):
+        if self.connected and self.physical_eq_mode >= 0:
+            self.dev.submit(self.dev.set_custom_eq_enabled, self.physical_eq_mode == 8)
+
+    def tray_preset_names(self):
+        return [p[0] for p in PRESETS]
+
+    def tray_apply_preset(self, index):
+        if self.connected and not self.busy:
+            self.apply_preset(index)
+            if self.physical_eq_mode == 8:
+                self.dev.submit(self.dev.set_custom_eq_enabled, True)
+
+    def tray_apply_profile(self, name):
+        if self.connected and not self.busy and any(p['name'] == name for p in self.prof_rows):
+            self.profile_apply(name)
+            if self.physical_eq_mode == 8:
+                self.dev.submit(self.dev.set_custom_eq_enabled, True)
+
+    def tray_volume_step(self, step):
+        if self.connected and not self.busy and self.supports_physical_volume:
+            self.set_physical_volume(_clamp(self.physical_volume + step, -60, 0))
 
     def step_slot(self, direction):
         """The DAC's active EQ profile.
@@ -3233,6 +3414,11 @@ class Bridge:
         other two workers were then never waited on at all. A worker wedged in a
         blocking read must not be able to hold up the two that are not.
         """
+        if self.tray is not None:
+            try:
+                self.tray.stop()
+            except Exception:
+                log.warning('Could not stop tray icon', exc_info=True)
         # Before anything else: stop asking. A poll queued after the shutdown job
         # would be a device read on a worker that has already closed its handle.
         if self._watch is not None:
@@ -3275,16 +3461,24 @@ class Bridge:
             TOAST_ERROR_SECONDS if is_error else TOAST_SECONDS, expire)
 
     def push(self):
+        if self.tray is not None:
+            try:
+                self.tray.update()
+            except Exception:
+                log.warning('Could not update tray menu', exc_info=True)
         w = self.win
         w.connected = self.connected
         w.busy = self.busy
         w.dirty = self.dirty
         w.device_name = self.device_name
         w.firmware = self.firmware or ""
+        w.physical_eq_mode = self.physical_eq_mode
         w.band_count = self.band_count
         w.pregain = float(self.pregain)
         w.supports_pregain = self.supports_pregain
         w.global_gain = float(self.global_gain)
+        w.physical_volume = float(self.physical_volume)
+        w.supports_physical_volume = self.supports_physical_volume
         w.slot = self.slot
         w.slot_note = self.slot_note()
         w.slot_on_builtin = self.on_builtin

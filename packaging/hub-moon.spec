@@ -57,6 +57,12 @@ datas += _d
 binaries += _b
 hiddenimports += _h
 
+# pystray chooses its native backend dynamically; keep only the target OS backend.
+hiddenimports += ['pystray.' + ('_win32' if sys.platform == 'win32'
+                               else '_darwin' if sys.platform == 'darwin' else '_xorg')]
+if sys.platform.startswith('linux'):
+    hiddenimports += ['pystray._appindicator', 'pystray._gtk']
+
 # per-OS icon: Windows wants .ico, macOS wants .icns (both shipped, generated
 # from hub-moon.svg); Linux ignores this and uses the .desktop's Icon= instead.
 if sys.platform == "darwin":

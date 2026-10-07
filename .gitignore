@@ -3,6 +3,10 @@ __pycache__/
 .venv/
 venv/
 
+# Local DAC probes, downloaded firmware, and temporary test dependencies
+/.dac-test/
+/firmware-research/
+
 # build / packaging artifacts
 /build/
 /dist/

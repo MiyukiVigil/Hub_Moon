@@ -2,3 +2,6 @@
 # extra you install when you want `--gui`.
 slint>=1.13
 hidapi>=0.14.0
+certifi
+pystray>=0.19.5
+Pillow>=9

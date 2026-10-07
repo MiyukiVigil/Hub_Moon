@@ -37,7 +37,10 @@ graph view, and a way back to the welcome screen — all saved to
 
 **Control row.** `DEVICE SLOT` (the DAC's own EQ profile number, − / +, `as reported`),
 `PRE-GAIN headroom` (slider + dB readout; turns amber with a one-tap `match` when the
-curve would clip), `GLOBAL OFFSET volume` (slider + dB readout).
+curve would clip), `VOLUME TRIM separate from buttons` (slider + dB readout).
+The trim adjusts the DAC offset, not the physical buttons' volume setting.
+DAWN PRO2 firmware 1.5 also shows `VOLUME synced with buttons`, from -60 to 0 dB.
+This live playback setting follows the device and does not dirty or enter EQ presets.
 
 **Presets.** Eight pills: Flat, Bass, V-shape, Vocals, Warm, Air, Podcast, Loudness.
 

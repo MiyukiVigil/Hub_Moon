@@ -30,6 +30,131 @@ from gui import tuning                 # noqa: E402
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
+def test_eq_mode_indicator_follows_buttons_without_dirtying_curve(bridge):
+    bridge.dirty = False
+    bridge._handle('eq_mode', 8)
+    assert bridge.win.physical_eq_mode == 8
+    assert not bridge.dirty
+    bridge._handle('eq_mode', 9)
+    assert bridge.win.physical_eq_mode == 9
+    assert not bridge.dirty
+    bridge._handle('no_device', 'Disconnected')
+    assert bridge.win.physical_eq_mode == -1
+
+
+def test_eq_button_requests_opposite_mode_without_optimistic_status(bridge):
+    bridge.connected = True
+    bridge._handle('eq_mode', 8)
+    jobs = []
+    bridge.dev.submit = lambda fn, *args: jobs.append((fn.__name__, args))
+    bridge.toggle_custom_eq()
+    assert jobs == [('set_custom_eq_enabled', (True,))]
+    assert bridge.win.physical_eq_mode == 8
+    bridge._handle('eq_mode', 9)
+    bridge.toggle_custom_eq()
+    assert jobs[-1] == ('set_custom_eq_enabled', (False,))
+
+
+def test_tray_preset_stages_curve_then_enables_custom_eq(bridge):
+    bridge.connected = True
+    bridge.busy = False
+    bridge._handle('eq_mode', 8)
+    jobs = []
+    bridge.dev.submit = lambda fn, *args: jobs.append((fn.__name__, args))
+    bridge.tray_apply_preset(1)
+    assert [name for name, _ in jobs] == ['apply_bands', 'set_custom_eq_enabled']
+    assert jobs[-1][1] == (True,)
+    assert bridge.dirty
+
+
+def test_tray_ignores_stale_actions_after_disconnect(bridge):
+    bridge.connected = False
+    jobs = []
+    bridge.dev.submit = lambda *args: jobs.append(args)
+    bridge.tray_apply_preset(1)
+    bridge.tray_apply_profile('missing')
+    bridge.tray_volume_step(-1)
+    assert jobs == []
+
+
+def test_tray_volume_window_compiles_and_accepts_synced_values():
+    components = slint.load_file(os.path.join(ROOT, 'gui', 'ui', 'app.slint'))
+    popup = components.VolumeWindow()
+    targets = []
+    popup.set_physical_volume = targets.append
+    popup.volume = -21
+    popup.available = True
+    popup.device_name = 'DAWN PRO2'
+    popup.set_physical_volume(-30)
+    assert targets == [-30]
+    assert popup.volume == -21
+
+
+def test_button_volume_update_does_not_dirty_eq_or_write_device(bridge):
+    bridge.dirty = False
+    bridge._handle('physical_volume', -3825 / 256)
+    assert bridge.supports_physical_volume
+    assert bridge.win.physical_volume == pytest.approx(-3825 / 256)
+    assert not bridge.dirty
+    bridge._handle('no_device', 'Disconnected')
+    assert not bridge.supports_physical_volume
+    assert not bridge.win.supports_physical_volume
+
+
+def test_volume_drag_keeps_latest_target_and_ignores_stale_readbacks(bridge, monkeypatch):
+    callbacks = []
+    monkeypatch.setattr(slint.Timer, 'single_shot', lambda delay, fn: callbacks.append(fn))
+    sent = []
+    monkeypatch.setattr(bridge.dev, 'submit', lambda fn, *args: sent.append(args))
+    bridge.connected = True
+    bridge.supports_physical_volume = True
+    bridge.dirty = False
+    for target in (-30, -28, -25, -20):
+        bridge.set_physical_volume(target)
+    generation = bridge._physical_volume_generation
+    assert bridge.win.physical_volume == -20
+    bridge._handle('physical_volume', -35)
+    bridge._handle('physical_volume_written', (generation-1, -30))
+    assert bridge.win.physical_volume == -20
+    for callback in callbacks:
+        callback()
+    assert sent == [(-20, generation)]
+    bridge._handle('physical_volume_written', (generation, -20.3203125))
+    assert bridge.win.physical_volume == pytest.approx(-20.3203125)
+    assert not bridge._physical_volume_pending
+    assert not bridge.dirty
+    bridge._handle('physical_volume', -21)
+    assert bridge.win.physical_volume == -21
+
+
+def test_disconnect_cancels_delayed_volume_drag(bridge, monkeypatch):
+    callbacks = []
+    monkeypatch.setattr(slint.Timer, 'single_shot', lambda delay, fn: callbacks.append(fn))
+    sent = []
+    monkeypatch.setattr(bridge.dev, 'submit', lambda fn, *args: sent.append(args))
+    bridge.connected = True
+    bridge.supports_physical_volume = True
+    bridge.set_physical_volume(-20)
+    bridge._handle('no_device', 'Disconnected')
+    for callback in callbacks:
+        callback()
+    assert not sent
+    assert not bridge._physical_volume_pending
+
+
+def test_worker_discards_volume_target_superseded_while_queued():
+    calls = []
+    class Dac:
+        def set_physical_volume(self, db):
+            calls.append(db)
+            return db
+    worker = bridge_mod.DeviceWorker(lambda *args: None)
+    worker._dev = Dac()
+    worker._physical_volume_target_generation = 4
+    worker.set_physical_volume(-30, 3)
+    assert calls == []
+
+
 OFFER = {
     "version": "9.9.9", "rollback": False, "notes": ["first note", "second note"],
     "channel": "beta", "date": "2026-01-01", "summary": "A summary line.",
