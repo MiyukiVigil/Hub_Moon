@@ -1,63 +1,69 @@
 {
   "schema": 1,
-  "version": "1.2.0",
+  "version": "2.0.0",
   "channel": "stable",
-  "tag": "v1.2.0",
-  "date": "2026-08-17",
-  "summary": "v1.2.0",
-  "notes_url": "https://hubmoon.miyukivigil.tech/changelog.html#v1-2-0",
+  "tag": "v2.0.0",
+  "date": "2026-10-07",
+  "summary": "v2.0.0",
+  "notes_url": "https://hubmoon.miyukivigil.tech/changelog.html#v2-0-0",
   "notes": [
-    "The bundle smoke test now runs on macOS and Windows too.",
-    "Every animation now runs on the theme's own timing."
+    "Physical volume remains connected at the DAC's minimum button setting, including its final step below the nominal range.",
+    "Volume drags no longer replay queued positions or change on mouse hover.",
+    "The DAC output slider now says Volume trim, with separate from buttons beside it.",
+    "Live volume-trim writes no longer wait for an acknowledgement the DAWN PRO2 does not send, avoiding a response timeout on every slider adjustment.",
+    "A system tray menu changes EQ mode, applies EQ presets and saved profiles, adjusts physical volume, and saves to the DAC through the existing device queue.",
+    "A Custom EQ / EQ off button replaces Device Slot on DAWN PRO2 firmware 1.5.",
+    "DAWN PRO2 firmware 1.5 shows the physical EQ mode separately from its stored profile.",
+    "A Volume slider for DAWN PRO2 firmware 1.5 controls the same live gain as the physical buttons and follows button changes."
   ],
   "assets": {
     "arch-package": {
-      "url": "https://github.com/MiyukiVigil/Hub_Moon/releases/download/v1.2.0/hub-moon-1.2.0-1-x86_64.pkg.tar.zst",
-      "sha256": "3f9aa2668b0d2f7304781de2d906f087081741defd56a631631db625243ce6ce",
-      "size": 40262998,
-      "name": "hub-moon-1.2.0-1-x86_64.pkg.tar.zst"
+      "url": "https://github.com/MiyukiVigil/Hub_Moon/releases/download/v2.0.0/hub-moon-2.0.0-1-x86_64.pkg.tar.zst",
+      "sha256": "bd723b1b8eafabc94aa6389befe3c5bc599da23de17f2e16d4f12978a16bc886",
+      "size": 47079100,
+      "name": "hub-moon-2.0.0-1-x86_64.pkg.tar.zst"
     },
     "rpm-package": {
-      "url": "https://github.com/MiyukiVigil/Hub_Moon/releases/download/v1.2.0/hub-moon-1.2.0-1.x86_64.rpm",
-      "sha256": "7ed6193d8c9b699071aa1d52f84238120600eaea17a3ad65f976114bfa933b3d",
-      "size": 41790954,
-      "name": "hub-moon-1.2.0-1.x86_64.rpm"
+      "url": "https://github.com/MiyukiVigil/Hub_Moon/releases/download/v2.0.0/hub-moon-2.0.0-1.x86_64.rpm",
+      "sha256": "ed24364e6700be1ad355d948e86bf497b82606f9116bccaecd2fb57e44b5e127",
+      "size": 48628998,
+      "name": "hub-moon-2.0.0-1.x86_64.rpm"
     },
     "deb-package": {
-      "url": "https://github.com/MiyukiVigil/Hub_Moon/releases/download/v1.2.0/hub-moon_1.2.0-1_amd64.deb",
-      "sha256": "7360a88124adcb908b462ecd61019c0573ee14f348e386d5a1ef7442af81025a",
-      "size": 41758642,
-      "name": "hub-moon_1.2.0-1_amd64.deb"
+      "url": "https://github.com/MiyukiVigil/Hub_Moon/releases/download/v2.0.0/hub-moon_2.0.0-1_amd64.deb",
+      "sha256": "26a7c69f79cdc9b6ee1437e51098e5a3805a394317d064fef94a0da6d1812c04",
+      "size": 48609014,
+      "name": "hub-moon_2.0.0-1_amd64.deb"
     },
     "linux-tarball": {
-      "url": "https://github.com/MiyukiVigil/Hub_Moon/releases/download/v1.2.0/HubMoon-1.2.0-linux-x86_64.tar.gz",
-      "sha256": "e57fc1a8224037941918be9bd1a57930a6e57117bbf98886623d600bf624af24",
-      "size": 40961674,
-      "name": "HubMoon-1.2.0-linux-x86_64.tar.gz"
+      "url": "https://github.com/MiyukiVigil/Hub_Moon/releases/download/v2.0.0/HubMoon-2.0.0-linux-x86_64.tar.gz",
+      "sha256": "3a8fd20716ad27975821417e9343dd55443dbe4e7ae776f80fd5b26f8be6bacc",
+      "size": 47680100,
+      "name": "HubMoon-2.0.0-linux-x86_64.tar.gz"
     },
     "macos-dmg-arm64": {
-      "url": "https://github.com/MiyukiVigil/Hub_Moon/releases/download/v1.2.0/HubMoon-1.2.0-macOS-arm64.dmg",
-      "sha256": "b00a46ef5c3ee51e2a108d41bae779ce077e0edd3e7cda6653da2b1cf08e5f3c",
-      "size": 22138852,
-      "name": "HubMoon-1.2.0-macOS-arm64.dmg"
+      "url": "https://github.com/MiyukiVigil/Hub_Moon/releases/download/v2.0.0/HubMoon-2.0.0-macOS-arm64.dmg",
+      "sha256": "1f2aeb081b40c1e9bc833fa3789fc16aa56667d32aac19ee584527f598d4c312",
+      "size": 28141765,
+      "name": "HubMoon-2.0.0-macOS-arm64.dmg"
     },
     "windows-portable": {
-      "url": "https://github.com/MiyukiVigil/Hub_Moon/releases/download/v1.2.0/HubMoon-1.2.0-windows-portable.zip",
-      "sha256": "25033e40cfdf1babd8780653230a1c877e8c65219c046b3ff5e5385f97c224d8",
-      "size": 22562289,
-      "name": "HubMoon-1.2.0-windows-portable.zip"
+      "url": "https://github.com/MiyukiVigil/Hub_Moon/releases/download/v2.0.0/HubMoon-2.0.0-windows-portable.zip",
+      "sha256": "c9b737c942c8eadc743bbe5b8357530de935acac312d1a98046632e6fb3574ac",
+      "size": 29781091,
+      "name": "HubMoon-2.0.0-windows-portable.zip"
     },
     "appimage": {
-      "url": "https://github.com/MiyukiVigil/Hub_Moon/releases/download/v1.2.0/HubMoon-1.2.0-x86_64.AppImage",
-      "sha256": "5034bb066f9cb85473959b02b082cdd5b98288478e2d2f89df77bf0972aedd76",
-      "size": 38296056,
-      "name": "HubMoon-1.2.0-x86_64.AppImage"
+      "url": "https://github.com/MiyukiVigil/Hub_Moon/releases/download/v2.0.0/HubMoon-2.0.0-x86_64.AppImage",
+      "sha256": "329520eee82cc03551f66972f9cd86ad465bdc9e57b8f77a25dff752a67d1099",
+      "size": 44542456,
+      "name": "HubMoon-2.0.0-x86_64.AppImage"
     },
     "windows-installer": {
-      "url": "https://github.com/MiyukiVigil/Hub_Moon/releases/download/v1.2.0/HubMoon-Setup-1.2.0.exe",
-      "sha256": "b0002a577db6be505237aa65695a2d45dc89fa3c783fbfc3eab2d52431d7cafa",
-      "size": 18192173,
-      "name": "HubMoon-Setup-1.2.0.exe"
+      "url": "https://github.com/MiyukiVigil/Hub_Moon/releases/download/v2.0.0/HubMoon-Setup-2.0.0.exe",
+      "sha256": "44199a57af93b4c34f1a3c9a144f8df6a217326a1398e1afc467f1913cf8e483",
+      "size": 22229334,
+      "name": "HubMoon-Setup-2.0.0.exe"
     }
   }
 }
