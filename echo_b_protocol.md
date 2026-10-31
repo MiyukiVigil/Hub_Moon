@@ -124,17 +124,21 @@ Checked against Moondrop's library only as a black box (comparing the responses 
   **0 = left, 1 = right**, with the same band numbers. The run stopped there, so no unknown slot was touched.
 - In `--band-map`, 9 / word 0 = 1 was "not heard". Either it was missed or band 9 behaves differently on the right;
   still to check.
-- **After the run the right channel was louder and clipping.** Every write in the run was either the low-pass or flat,
-  so the likely cause is what got overwritten. Every test so far wrote flat to word 0 = 1 bands 1–9 without reading
-  them first, and the probe only ever read word 0 = 0. So the right channel probably holds a factory tuning (possibly
-  a level cut) that flat replaced. (The owner answered "back to normal" by mistake.)
-- Fix: the plain probe now reads both channels, the listening tests save bands 1–9 of both channels first and write
-  exactly that back, and `--restore` only flattens the left channel. A replug should restore the right channel from
-  flash (cmd 190 is volatile); a plain probe after the replug shows its factory values.
-- Consequence for Hub Moon: a "flat" reset must write back the device's own values per channel, not the app's flat band.
+- **After the run the right channel was louder and clipping** until the owner replugged the Echo-B. (They answered
+  "back to normal" by mistake.) Every write in the run was either the low-pass or flat.
+- First guess: the right channel holds a factory tuning that the earlier flat writes replaced. **Disproved**: the plain
+  probe after the replug reads bands 1–9 of **both** channels as flat (shift 3, [4194304, 0, 0, 0, 0]), and the
+  settings match the first probe (48 kHz, EQ mode 0, stored EQ 48 kHz). Writing flat onto flat changes nothing.
+- So the coefficients are not the cause. What is left: something the readable settings do not show (filter state
+  left over from the live coefficient change, or 188/187 acting differently on the right), or the ear adapting after
+  a minute of muffled sound. `--right-check` splits it up: EQ enable alone, then the low-pass on right bands 9 and 5,
+  each put back, asking after each whether the right ear is loud. If it is, it reads every band and setting at that
+  moment and compares them with the start.
+- The listening tests still save both channels first and write back exactly that. `--restore` flattens both channels
+  again, since both power up flat.
 
 ## Still unknown
-- The right channel's factory values (word 0 = 1), and whether a replug restores them.
+- Why the right ear went loud and clipping after `--find-right`, and whether Hub Moon's live writes can trigger it.
 - Whether band 9 / word 0 = 1 is live (heard in neither ear in `--band-map`).
 - Whether a live EQ survives a sample-rate change, since the coefficients are designed for one rate.
 - The live path rejects band > 4 for Freeman3 while the product says 9 bands; how the Dart UI maps 9 bands is unverified.

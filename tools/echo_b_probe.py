@@ -16,8 +16,10 @@ step by step until you hear it, then puts every band back as it was. --band-map
 puts the same low-pass on one band at a time and asks whether you hear it and
 in which ears. --find-right does the same on other band slots (read first,
 skipped unless they hold a filter, then put back) to find the right channel.
-These three read bands 1-9 of both channels first and write back exactly that.
---restore sets the left channel back to flat; a replug restores both channels.
+--right-check repeats --find-right in separate steps, since the right ear went
+loud after it, and reads every band and setting if that happens again.
+These four read bands 1-9 of both channels first and write back exactly that.
+--restore sets both channels back to flat; a replug does the same.
 Protocol notes: echo_b_protocol.md.
 
 Dependencies:
@@ -31,7 +33,8 @@ Usage:
     python3 echo_b_probe.py --listen-test # find what makes a live write audible
     python3 echo_b_probe.py --band-map    # which bands and channels are live
     python3 echo_b_probe.py --find-right  # where the right channel's bands are
-    python3 echo_b_probe.py --restore     # set the left channel back to flat
+    python3 echo_b_probe.py --right-check # what makes the right ear loud
+    python3 echo_b_probe.py --restore     # set both channels back to flat
 """
 
 import sys
@@ -303,7 +306,7 @@ def read_band(dev, band, out_len, in_len, copy=0):
 
 
 def set_band(dev, band, shift, ints, out_len, in_len, copy=0):
-    """Word 0 is 0 or 1; the app's reset writes both, and what it selects is unknown."""
+    """Word 0 is the channel: 0 = left, 1 = right."""
     words = [copy, band, shift] + list(ints) + [0] * 5
     return query(dev, CMD_SET_EQ_BAND, words, out_len, in_len) is not None
 
@@ -480,12 +483,7 @@ def set_bands(dev, bands, copies, band_value, out_len, in_len):
 
 
 def snapshot(dev, out_len, in_len):
-    """{(band, word 0): (shift, raw)} for bands 1-9 of both channels, or None if a read fails.
-
-    --find-right muffled the right channel through word 0 = 1, which earlier tests had
-    set to flat without reading it first. The right channel came back loud and
-    clipping, so it probably holds a factory tuning that flat is not.
-    """
+    """{(band, word 0): (shift, raw)} for bands 1-9 of both channels, or None if a read fails."""
     saved = {}
     for copy in (0, 1):
         for band in EQ_BANDS:
@@ -704,24 +702,128 @@ def find_right(hid, path=None):
     return 0 if all(results.values()) else 2
 
 
-def restore(hid, path=None):
-    """Set the left channel's bands back to flat, which is how they came from the factory.
+def device_state(dev, out_len, in_len):
+    """Data words of each read-only setting query, to compare before and during a problem."""
+    state = {}
+    for name, cmd, words in (
+            ("sample rate", CMD_GET_SAMPLE_RATE, [SAMPLE_RATE_SUBCMD] + [0] * 12),
+            ("EQ mode", CMD_GET_SAMPLE_RATE, [EQ_MODE_SUBCMD] + [0] * 12),
+            ("stored EQ sample rate", CMD_GET_EQ_CONFIG, [0] * 13)):
+        print("\n%s (cmd %d):" % (name[0].upper() + name[1:], cmd))
+        res = query(dev, cmd, words, out_len, in_len)
+        state[name] = hexdump(res[10:]) if res else "read failed"
+    return state
 
-    The right channel (word 0 = 1) is left alone: its factory values are not known
-    yet and flat is probably not one of them. A replug restores both.
+
+# Right-channel bands for --right-check: 9 was not heard in --band-map, 5 was heard in
+# --find-right and was followed by the loud right ear.
+CHECK_BANDS = [9, 5]
+
+
+def right_check(hid, path=None):
     """
+    After --find-right the right ear was loud and clipping until a replug, yet the
+    plain probe after the replug reads both channels flat, so writing flat changed
+    nothing. This repeats that run in separate steps (EQ enable alone, then the
+    low-pass on band 9 and band 5 of the right channel, each put back), asking
+    after each one whether the right ear has gone loud. If it has, it reads every
+    band and setting while the problem is there and compares them with the start.
+    """
+    freq, q = LISTEN_FILTER
+    dev = open_echo_b(hid, path)
+    if dev is None:
+        return 1
+    heard, results, loud_after, changed = {}, {}, None, None
+    try:
+        out_len, in_len = report_sizes(dev)
+        print("\nSample rate (cmd %d):" % CMD_GET_SAMPLE_RATE)
+        fs = current_sample_rate(dev, out_len, in_len) or 48000
+        lp = low_pass_band(freq, q, fs)
+        print("\nListening filter: %d Hz low-pass, Q %.3f, at %d Hz -> shift %d %s"
+              % (freq, q, fs, lp[0], lp[1]))
+        saved = snapshot(dev, out_len, in_len)
+        if saved is None:
+            print("\nCould not read every band, so nothing was changed.")
+            return 2
+        before = device_state(dev, out_len, in_len)
+
+        ask("\nTurn the volume down a little, start some music through the Echo-B and leave it "
+            "playing, then press Enter. ")
+        answer = ask("\nNothing has been changed yet. Do both ears sound equally loud and clean? [y/n] ")
+        heard["before any change"] = "even" if answer.startswith("y") else "uneven"
+
+        results["eq enable"] = enable_eq(dev, out_len, in_len)
+        answer = ask("\nEQ is now switched on, with every band as it was. Is the right ear now "
+                     "louder or harsher than the left? [y/n] ")
+        heard["EQ enable alone"] = "right loud" if answer.startswith("y") else "no change"
+        if answer.startswith("y"):
+            loud_after = "EQ enable alone"
+
+        for band in CHECK_BANDS if loud_after is None else []:
+            label = "band %d, right" % band
+            print("\n=== %s ===" % label)
+            results[label] = set_bands(dev, [band], [1], lp, out_len, in_len)
+            answer = ask("\n%s: does the music sound muffled, like it is behind a wall? [y/n] " % label)
+            if answer.startswith("y"):
+                ears = ask("Muffled in which ears: both, left only or right only? [b/l/r] ")
+                heard[label] = {"l": "left only", "r": "right only"}.get(ears[:1], "both")
+            else:
+                heard[label] = "not heard"
+            results[label + " put back"] = set_bands(dev, [band], [1], saved[(band, 1)], out_len, in_len)
+            answer = ask("\n%s is back as it was. Listen for about 20 seconds and compare the ears.\n"
+                         "Is the right ear now louder or harsher than the left? [y/n] " % label)
+            heard[label + " put back"] = "right loud" if answer.startswith("y") else "even"
+            if answer.startswith("y"):
+                loud_after = label
+                break
+
+        if loud_after:
+            print("\n=== Reading everything while the right ear is loud ===")
+            now = snapshot(dev, out_len, in_len)
+            now_state = device_state(dev, out_len, in_len)
+            changed = [("band %d, word 0 = %d" % slot, saved[slot], now[slot] if now else None)
+                       for slot in saved if not now or now[slot] != saved[slot]]
+            changed += [(name, before[name], now_state[name])
+                        for name in before if now_state[name] != before[name]]
+            print("\n=== Writing every band again ===")
+            results["put back as found"] = put_back(dev, saved, out_len, in_len)
+            answer = ask("\nEvery band has been written again. Is the right ear still loud? [y/n] ")
+            heard["after writing every band again"] = "still loud" if answer.startswith("y") else "even"
+        else:
+            print("\n=== Putting every band back as it was ===")
+            results["put back as found"] = put_back(dev, saved, out_len, in_len)
+    finally:
+        dev.close()
+
+    print("\nWhat was heard:")
+    for label, what in heard.items():
+        print("  %-32s %s" % (label, what))
+    if loud_after:
+        print("\nRight ear went loud after: %s" % loud_after)
+        print("Changed since the start (what, before, while loud):")
+        for what, was, now in changed or [("nothing", "", "")]:
+            print("  %s  %s  ->  %s" % (what, was, now))
+        print("\nIf it is still loud, unplug and replug the Echo-B.")
+    summary(results)
+    return 0 if all(results.values()) else 2
+
+
+def restore(hid, path=None):
+    """Set both channels' bands back to flat, which is how both read at power-up."""
     dev = open_echo_b(hid, path)
     if dev is None:
         return 1
     try:
         out_len, in_len = report_sizes(dev)
-        ok = set_bands(dev, EQ_BANDS, [0], FLAT_BAND, out_len, in_len)
-        print("\nBand %d now (cmd %d):" % (TEST_BAND, CMD_GET_EQ_BAND))
-        final = read_band(dev, TEST_BAND, out_len, in_len)
+        ok = set_bands(dev, EQ_BANDS, [0, 1], FLAT_BAND, out_len, in_len)
+        flat = True
+        for copy in (0, 1):
+            print("\nBand %d, word 0 = %d now (cmd %d):" % (TEST_BAND, copy, CMD_GET_EQ_BAND))
+            final = read_band(dev, TEST_BAND, out_len, in_len, copy)
+            flat = flat and final is not None and (final[0], final[1]) == FLAT_BAND
     finally:
         dev.close()
-    flat = final is not None and (final[0], final[1]) == FLAT_BAND
-    print("\nFor the right channel, unplug and replug the Echo-B.")
+    print("\nIf it still sounds wrong, unplug and replug the Echo-B.")
     summary({"restore": ok, "flat again": flat})
     return 0 if ok and flat else 2
 
@@ -740,8 +842,10 @@ def main():
                         help="temporarily muffle one band at a time to find which bands and channels are live")
     parser.add_argument("--find-right", action="store_true",
                         help="temporarily muffle other band slots one at a time to find the right channel")
+    parser.add_argument("--right-check", action="store_true",
+                        help="repeat --find-right in separate steps to find what makes the right ear loud")
     parser.add_argument("--restore", action="store_true",
-                        help="set the left channel's EQ bands back to flat (replug for both)")
+                        help="set both channels' EQ bands back to flat")
     args = parser.parse_args()
 
     if args.dry_run:
@@ -776,8 +880,9 @@ def main():
         return 0
     if args.restore:
         return restore(hid, args.path)
-    if args.write_test or args.listen_test or args.band_map or args.find_right:
-        test = (find_right if args.find_right else band_map if args.band_map
+    if args.write_test or args.listen_test or args.band_map or args.find_right or args.right_check:
+        test = (right_check if args.right_check else find_right if args.find_right
+                else band_map if args.band_map
                 else listen_test if args.listen_test else write_test)
         try:
             return test(hid, args.path)
