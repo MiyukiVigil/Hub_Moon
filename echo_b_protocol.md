@@ -149,9 +149,18 @@ Checked against Moondrop's library only as a black box (comparing the responses 
   a band differently. `--ear-compare` checks: the low-pass, then a plain −12 dB cut (b0 = 0.25, same tone), each on
   band 5 of the left and then the right, asking each time whether it sounded muffled, only quieter, or unchanged.
 
+## Ear compare (issue #1, `--ear-compare`, macOS, 48 kHz)
+- Low-pass on band 5: word 0 = 0 heard as **muffled, left only**; word 0 = 1 as **muffled, right only**. On the
+  right the drums and instruments went dull but voices stayed clear, which fits a centre-panned vocal still
+  reaching the unfiltered left ear.
+- −12 dB on band 5: word 0 = 1 heard as quieter, same tone, right only. Word 0 = 0 heard as quieter in both ears;
+  the low-pass on the same slot stayed left-only, so this is most likely the overall level dropping, not a leak.
+- So **both channels apply a band the same way**; the "quieter" in `--right-check` was how a one-ear low-pass came
+  across. Each put-back sounded even, every band read back flat, and the ears were even at the end.
+- This run sent 188/187 before the music started, like `--find-right`, and **the loud right ear did not come back**.
+
 ## Still unknown
-- Why the right ear went loud and clipping after `--find-right`. It did not happen again in `--right-check`, which
-  made the same kind of writes. One difference: `--find-right` sent 188/187 before the music started.
-- Whether the right channel applies a band the same way as the left (see Right check).
+- Why the right ear went loud and clipping after `--find-right`. It has not come back in `--right-check` or
+  `--ear-compare`, including with 188/187 sent before the music started.
 - Whether a live EQ survives a sample-rate change, since the coefficients are designed for one rate.
 - The live path rejects band > 4 for Freeman3 while the product says 9 bands; how the Dart UI maps 9 bands is unverified.
