@@ -47,7 +47,7 @@ Almost every command uses n = 13 (62-byte message); 187 is sent with n = 1. Data
 
 Coefficients: biquad scaled by 2^(25 − Gain) (Gain 3 → 2^22), B0..B2 = b0..b2, A0 = −a1, A1 = −a2.
 Live band 0–4 → hw band 5–9 (`shiftEQBandForFreeman3` = band + 5); flash save writes bands 1–9.
-Bands 1–4 are not reachable from the app's live path (possibly factory tuning; unverified).
+Bands 1–4 are not reachable from the app's live path, but they are live on the left channel (see Band map below).
 FREQ_SAMPLE_RATE index table: [8000,16000,24000,32000,44100,48000,96000,192000,384000,882000,176000].
 App always sends filterType 0 (peaking) from `sySendEqParams`, gain/Q as doubles.
 
@@ -102,7 +102,24 @@ Checked against Moondrop's library only as a black box (comparing the responses 
 - `--band-map` follows up: the same low-pass on one (band, word 0) pair at a time (9/0 as the control, then 9/1, 5/0,
   1/0, 4/0), asking whether it is heard and in which ears.
 
+## Band map (issue #1, `--band-map`, macOS, 48 kHz)
+| slot (band, word 0) | heard |
+|---|---|
+| 9, 0 | left only |
+| 9, 1 | not heard |
+| 5, 0 | left only |
+| 1, 0 | left only |
+| 4, 0 | left only |
+- Bands 1–4 are live too, not just the app's 5–9, so a 9-band EQ can use all of 1–9.
+- Every slot with word 0 = 0 acts on the **left channel only**. Word 0 = 1 is either not the right channel or not
+  live in EQ mode 0. So the app's live path (always word 0 = 0) would only EQ the left ear, unless 188/187 or the
+  EQ mode links the channels.
+- Restoring flat on bands 1–9 (both values of word 0) brought the sound back.
+- `--find-right` follows up. It tries 5/1 and 1/1 (slots the app writes), then 9/2, 9/3, 10/0, 14/0 and 18/0. Each
+  slot is read with 446 first and written only if the reply echoes the slot and holds a filter (b0 ≠ 0). It gets
+  the values it held before written back, and the run stops at the first slot heard on the right.
+
 ## Still unknown
-- Which bands are in the audio path (the app only writes 5–9), and what word 0 of 190/446 selects (channel or bank?).
+- Where the right channel's bands are, and what word 0 of 190/446 selects.
 - Whether a live EQ survives a sample-rate change, since the coefficients are designed for one rate.
 - The live path rejects band > 4 for Freeman3 while the product says 9 bands; how the Dart UI maps 9 bands is unverified.

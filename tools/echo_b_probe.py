@@ -14,7 +14,9 @@ It never touches flash (cmd 220); a replug undoes it (confirmed on hardware).
 --listen-test makes the change unmistakable (a 400 Hz low-pass) and widens it
 step by step until you hear it, then sets every band back to flat. --band-map
 puts the same low-pass on one band at a time and asks whether you hear it and
-in which ears. --restore sets every band back to flat.
+in which ears. --find-right does the same on other band slots (read first,
+skipped unless they hold a filter, then put back) to find the right channel.
+--restore sets every band back to flat.
 Protocol notes: echo_b_protocol.md.
 
 Dependencies:
@@ -27,6 +29,7 @@ Usage:
     python3 echo_b_probe.py --write-test  # temporary one-band write, then restore
     python3 echo_b_probe.py --listen-test # find what makes a live write audible
     python3 echo_b_probe.py --band-map    # which bands and channels are live
+    python3 echo_b_probe.py --find-right  # where the right channel's bands are
     python3 echo_b_probe.py --restore     # set every band back to flat
 """
 
@@ -595,6 +598,88 @@ def band_map(hid, path=None):
     return 0 if all(results.values()) else 2
 
 
+# (band, word 0) candidates for the right channel, for --find-right. --band-map heard
+# bands 1, 4, 5 and 9 with word 0 = 0 in the left ear only and band 9 / word 0 = 1 not
+# at all. The first two are slots the app already writes; the rest are not, so each is
+# read first and only written when the device answers with a real filter.
+RIGHT_TARGETS = [(5, 1), (1, 1), (9, 2), (9, 3), (10, 0), (14, 0), (18, 0)]
+
+
+def read_slot(dev, band, copy, out_len, in_len):
+    """(shift, raw ints) of a slot, or None unless the reply echoes it and holds a filter."""
+    res = query(dev, CMD_GET_EQ_BAND, [copy, band] + [0] * 11, out_len, in_len)
+    if not res or len(res) < 42:
+        return None
+    echoed = struct.unpack_from("<2i", res, 10) == (copy, band)
+    gain, raw, _ = decode_band(res)
+    print("  shift %d  raw %s%s" % (gain, raw, "" if echoed else "  (slot not echoed)"))
+    # b0 = 0 would silence the channel, so a slot like that cannot be in the audio path.
+    return (gain, raw) if echoed and raw[0] != 0 and 0 <= gain <= 25 else None
+
+
+def find_right(hid, path=None):
+    """
+    --band-map heard every live change in the left ear only. This tries other
+    (band, word 0) slots one at a time to find the right channel's bands. Each
+    slot is read first and skipped unless the device answers with a real filter;
+    after the listen it gets exactly what was read back. It stops at the first
+    slot heard on the right, then sets bands 1-9 back to flat.
+    """
+    freq, q = LISTEN_FILTER
+    dev = open_echo_b(hid, path)
+    if dev is None:
+        return 1
+    heard, results = {}, {}
+    try:
+        out_len, in_len = report_sizes(dev)
+        print("\nSample rate (cmd %d):" % CMD_GET_SAMPLE_RATE)
+        fs = current_sample_rate(dev, out_len, in_len) or 48000
+        lp = low_pass_band(freq, q, fs)
+        print("\nListening filter: %d Hz low-pass, Q %.3f, at %d Hz -> shift %d %s"
+              % (freq, q, fs, lp[0], lp[1]))
+        results["eq enable"] = enable_eq(dev, out_len, in_len)
+        results["start flat"] = set_bands(dev, EQ_BANDS, [0, 1], FLAT_BAND, out_len, in_len)
+
+        ask("\nStart some music through the Echo-B and leave it playing, then press Enter. ")
+        for band, copy in RIGHT_TARGETS:
+            label = "band %d, word 0 = %d" % (band, copy)
+            print("\n=== %s ===" % label)
+            print("\nRead first (cmd %d):" % CMD_GET_EQ_BAND)
+            before = read_slot(dev, band, copy, out_len, in_len)
+            if before is None:
+                heard[label] = "skipped, no filter there"
+                continue
+            results[label] = set_bands(dev, [band], [copy], lp, out_len, in_len)
+            answer = ask("\n%s: does the music sound muffled, like it is behind a wall? [y/n] " % label)
+            if answer.startswith("y"):
+                ears = ask("Muffled in which ears: both, left only or right only? [b/l/r] ")
+                heard[label] = {"l": "left only", "r": "right only"}.get(ears[:1], "both")
+            else:
+                heard[label] = "not heard"
+            results[label + " put back"] = set_bands(dev, [band], [copy], before, out_len, in_len)
+            if heard[label] in ("right only", "both"):
+                break
+
+        print("\n=== Putting bands 1-9 back to flat ===")
+        results["restore"] = set_bands(dev, EQ_BANDS, [0, 1], FLAT_BAND, out_len, in_len)
+        flat = True
+        for band in EQ_BANDS:
+            print("\nBand %d now (cmd %d):" % (band, CMD_GET_EQ_BAND))
+            final = read_band(dev, band, out_len, in_len)
+            flat = flat and final is not None and (final[0], final[1]) == FLAT_BAND
+        results["flat again"] = flat
+        back = ask("\nIs the music back to normal now? [y/n] ")
+        results["sounds normal again"] = back.startswith("y")
+    finally:
+        dev.close()
+
+    print("\nWhat was heard:")
+    for label, what in heard.items():
+        print("  %-20s %s" % (label, what))
+    summary(results)
+    return 0 if all(results.values()) else 2
+
+
 def restore(hid, path=None):
     """Set every band back to flat, as the Moondrop app does on first connect."""
     dev = open_echo_b(hid, path)
@@ -624,6 +709,8 @@ def main():
                         help="temporarily muffle the sound in widening steps, then set every band back to flat")
     parser.add_argument("--band-map", action="store_true",
                         help="temporarily muffle one band at a time to find which bands and channels are live")
+    parser.add_argument("--find-right", action="store_true",
+                        help="temporarily muffle other band slots one at a time to find the right channel")
     parser.add_argument("--restore", action="store_true",
                         help="set every EQ band back to flat")
     args = parser.parse_args()
@@ -660,8 +747,9 @@ def main():
         return 0
     if args.restore:
         return restore(hid, args.path)
-    if args.write_test or args.listen_test or args.band_map:
-        test = band_map if args.band_map else listen_test if args.listen_test else write_test
+    if args.write_test or args.listen_test or args.band_map or args.find_right:
+        test = (find_right if args.find_right else band_map if args.band_map
+                else listen_test if args.listen_test else write_test)
         try:
             return test(hid, args.path)
         except KeyboardInterrupt:
