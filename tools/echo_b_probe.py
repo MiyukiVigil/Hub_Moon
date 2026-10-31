@@ -18,7 +18,9 @@ in which ears. --find-right does the same on other band slots (read first,
 skipped unless they hold a filter, then put back) to find the right channel.
 --right-check repeats --find-right in separate steps, since the right ear went
 loud after it, and reads every band and setting if that happens again.
-These four read bands 1-9 of both channels first and write back exactly that.
+--ear-compare makes the same two changes (the low-pass, then a plain -12 dB
+cut) on the left and then the right, to check both channels hear a band alike.
+These five read bands 1-9 of both channels first and write back exactly that.
 --restore sets both channels back to flat; a replug does the same.
 Protocol notes: echo_b_protocol.md.
 
@@ -34,6 +36,7 @@ Usage:
     python3 echo_b_probe.py --band-map    # which bands and channels are live
     python3 echo_b_probe.py --find-right  # where the right channel's bands are
     python3 echo_b_probe.py --right-check # what makes the right ear loud
+    python3 echo_b_probe.py --ear-compare # same change on each ear in turn
     python3 echo_b_probe.py --restore     # set both channels back to flat
 """
 
@@ -808,6 +811,74 @@ def right_check(hid, path=None):
     return 0 if all(results.values()) else 2
 
 
+LEVEL_BAND = (3, [1 << 20, 0, 0, 0, 0])  # -12 dB with no change in tone
+COMPARE_BAND = 5
+CHANGE_KINDS = {"m": "muffled", "q": "quieter, same tone", "n": "nothing"}
+
+
+def ear_compare(hid, path=None):
+    """
+    In --right-check the low-pass on the right channel sounded like the right ear
+    getting quieter, not muffled, while --band-map heard it as muffled on the left.
+    This makes the same two changes on band 5 of each channel in turn: the
+    low-pass, and a plain -12 dB cut that keeps the tone. Each is put back before
+    the next. If the right channel hears both the way the left does, the two
+    channels handle a band the same and the difference was only how it sounded.
+    """
+    freq, q = LISTEN_FILTER
+    dev = open_echo_b(hid, path)
+    if dev is None:
+        return 1
+    heard, results = {}, {}
+    try:
+        out_len, in_len = report_sizes(dev)
+        print("\nSample rate (cmd %d):" % CMD_GET_SAMPLE_RATE)
+        fs = current_sample_rate(dev, out_len, in_len) or 48000
+        lp = low_pass_band(freq, q, fs)
+        print("\nListening filter: %d Hz low-pass, Q %.3f, at %d Hz -> shift %d %s"
+              % (freq, q, fs, lp[0], lp[1]))
+        saved = snapshot(dev, out_len, in_len)
+        if saved is None:
+            print("\nCould not read every band, so nothing was changed.")
+            return 2
+        results["eq enable"] = enable_eq(dev, out_len, in_len)
+
+        ask("\nTurn the volume down a little, start some music through the Echo-B and leave it "
+            "playing, then press Enter. ")
+        for name, value in (("low-pass", lp), ("-12 dB", LEVEL_BAND)):
+            for copy, side in ((0, "left"), (1, "right")):
+                label = "%s, %s" % (name, side)
+                print("\n=== %s (band %d, word 0 = %d) ===" % (label, COMPARE_BAND, copy))
+                results[label] = set_bands(dev, [COMPARE_BAND], [copy], value, out_len, in_len)
+                kind = ask("\nWhat changed?\n"
+                           "  m = muffled: bass still there, voices and cymbals dull\n"
+                           "  q = only quieter, the tone sounds the same\n"
+                           "  n = nothing\n[m/q/n] ")
+                what = CHANGE_KINDS.get(kind[:1], "nothing")
+                if what != "nothing":
+                    ears = ask("In which ears: both, left only or right only? [b/l/r] ")
+                    what += ", " + {"l": "left only", "r": "right only"}.get(ears[:1], "both")
+                heard[label] = what
+                results[label + " put back"] = set_bands(
+                    dev, [COMPARE_BAND], [copy], saved[(COMPARE_BAND, copy)], out_len, in_len)
+                ask("Put back. Press Enter when both ears sound the same again. ")
+
+        print("\n=== Putting every band back as it was ===")
+        results["put back as found"] = put_back(dev, saved, out_len, in_len)
+        answer = ask("\nDo both ears sound equally loud and clean now? [y/n] ")
+        heard["at the end"] = "even" if answer.startswith("y") else "uneven"
+    finally:
+        dev.close()
+
+    print("\nWhat was heard:")
+    for label, what in heard.items():
+        print("  %-18s %s" % (label, what))
+    if heard.get("at the end") == "uneven":
+        print("\nUnplug and replug the Echo-B to undo every change.")
+    summary(results)
+    return 0 if all(results.values()) else 2
+
+
 def restore(hid, path=None):
     """Set both channels' bands back to flat, which is how both read at power-up."""
     dev = open_echo_b(hid, path)
@@ -844,6 +915,8 @@ def main():
                         help="temporarily muffle other band slots one at a time to find the right channel")
     parser.add_argument("--right-check", action="store_true",
                         help="repeat --find-right in separate steps to find what makes the right ear loud")
+    parser.add_argument("--ear-compare", action="store_true",
+                        help="make the same two changes on the left, then the right, and compare")
     parser.add_argument("--restore", action="store_true",
                         help="set both channels' EQ bands back to flat")
     args = parser.parse_args()
@@ -880,8 +953,10 @@ def main():
         return 0
     if args.restore:
         return restore(hid, args.path)
-    if args.write_test or args.listen_test or args.band_map or args.find_right or args.right_check:
-        test = (right_check if args.right_check else find_right if args.find_right
+    if (args.write_test or args.listen_test or args.band_map or args.find_right
+            or args.right_check or args.ear_compare):
+        test = (ear_compare if args.ear_compare else right_check if args.right_check
+                else find_right if args.find_right
                 else band_map if args.band_map
                 else listen_test if args.listen_test else write_test)
         try:

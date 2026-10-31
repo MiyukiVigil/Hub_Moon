@@ -137,8 +137,21 @@ Checked against Moondrop's library only as a black box (comparing the responses 
 - The listening tests still save both channels first and write back exactly that. `--restore` flattens both channels
   again, since both power up flat.
 
+## Right check (issue #1, `--right-check`, macOS, 48 kHz)
+- Both ears even before any change, and still even after 188/187 alone.
+- The low-pass on band 9 / word 0 = 1, then band 5 / word 0 = 1: each time the owner heard **the right ear get
+  quieter** rather than muffled (so answered "not heard"), and putting the band back made it even again. So band 9
+  is live on the right too; `--band-map` just missed it.
+- **The loud right ear did not come back**: even after each band was put back, and after 20 s of listening. Every
+  band read back flat at the end.
+- In `--band-map` the same low-pass sounded muffled on the left, and in `--find-right` muffled on the right. A
+  one-ear low-pass can easily come across as that ear being quieter, but it could also mean the right channel applies
+  a band differently. `--ear-compare` checks: the low-pass, then a plain −12 dB cut (b0 = 0.25, same tone), each on
+  band 5 of the left and then the right, asking each time whether it sounded muffled, only quieter, or unchanged.
+
 ## Still unknown
-- Why the right ear went loud and clipping after `--find-right`, and whether Hub Moon's live writes can trigger it.
-- Whether band 9 / word 0 = 1 is live (heard in neither ear in `--band-map`).
+- Why the right ear went loud and clipping after `--find-right`. It did not happen again in `--right-check`, which
+  made the same kind of writes. One difference: `--find-right` sent 188/187 before the music started.
+- Whether the right channel applies a band the same way as the left (see Right check).
 - Whether a live EQ survives a sample-rate change, since the coefficients are designed for one rate.
 - The live path rejects band > 4 for Freeman3 while the product says 9 bands; how the Dart UI maps 9 bands is unverified.
