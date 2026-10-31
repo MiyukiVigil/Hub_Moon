@@ -84,8 +84,16 @@ Checked against Moondrop's library only as a black box (comparing the responses 
   bands 0–9, once with word 0 = 0 and once with word 0 = 1 (word 0 may be a channel or bank; unverified).
 - First live change per session: 188 [1, 0…], then 187 [0], then 190 [0, band+5, Gain, B0, B1, B2, A0, A1, 0…].
 
+## Live write test (issue #1, `echo_b_probe.py --write-test`, macOS, 48 kHz)
+- 188, 187 and 190 [0, 9, …] (−6 dB peaking at 1 kHz on band 9) all replied OK; cmd 190's reply echoes the words.
+- cmd 446 then read exactly the written values back, so 446 reads the live copy.
+- After a replug band 9 read flat again: **cmd 190 is volatile**, and the copy loaded at power-up is flat (the flash).
+- 446 replies carry each coefficient in 3 bytes with the 4th zeroed (written `…8b ff`, read `…8b 00`), so readback
+  must sign-extend from 24 bits. Writing the full two's-complement word is accepted.
+- **Not heard**: the owner noticed no change in the music. Either the dip was too subtle, or band 9 / word 0 = 0 is not
+  in the audio path in EQ mode 0. `--listen-test` narrows this down: a 400 Hz low-pass written to band 9 with word 0 = 0,
+  then word 0 = 1, then bands 1–9, then 188/187 re-sent, asking after each step; everything goes back to flat at the end.
+
 ## Still unknown
-- Whether cmd 190 (live set) is volatile, and whether cmd 446 reads the live or the flash copy.
-  `echo_b_probe.py --write-test` answers both: it live-sets band 9 to −6 dB at 1 kHz, reads it back, asks for a replug,
-  reads again, and writes flat back (`--restore` does only that last step).
+- What makes a live write audible (see above), and what word 0 of 190/446 selects.
 - The live path rejects band > 4 for Freeman3 while the product says 9 bands; how the Dart UI maps 9 bands is unverified.

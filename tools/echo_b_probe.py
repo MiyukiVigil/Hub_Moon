@@ -9,7 +9,11 @@ code, sample rate, EQ mode, and the 9 stored EQ bands) and changes nothing.
 --write-test is the one exception: it live-sets EQ band 9 to a -6 dB dip at
 1 kHz, reads it back, asks you to unplug and replug, reads it again, then sets
 the band back to flat with the same command the Moondrop app uses to reset it.
-It never touches flash (cmd 220). --restore only does that last flat write.
+It never touches flash (cmd 220); a replug undoes it (confirmed on hardware).
+
+--listen-test makes the change unmistakable (a 400 Hz low-pass) and widens it
+step by step until you hear it, then sets every band back to flat. --restore
+sets every band back to flat.
 Protocol notes: echo_b_protocol.md.
 
 Dependencies:
@@ -20,7 +24,8 @@ Usage:
     python3 echo_b_probe.py --list     # list every Moondrop HID interface
     python3 echo_b_probe.py --dry-run  # print the packets without a device
     python3 echo_b_probe.py --write-test  # temporary one-band write, then restore
-    python3 echo_b_probe.py --restore     # set band 9 back to flat
+    python3 echo_b_probe.py --listen-test # find what makes a live write audible
+    python3 echo_b_probe.py --restore     # set every band back to flat
 """
 
 import sys
@@ -52,6 +57,7 @@ CMD_SET_EQ_BAND = 190      # [0, band, Gain, B0, B1, B2, A0, A1, 0...], live
 TEST_BAND = 9              # live band 4, the last one the app's UI reaches
 TEST_FILTER = (1000, -6.0, 1.0)  # Hz, dB, Q: a cut, so nothing can clip
 FLAT_BAND = (3, [1 << 22, 0, 0, 0, 0])  # what the app writes to reset a band
+LISTEN_FILTER = (400, 0.707)  # Hz, Q: low-pass, music sounds like it is behind a wall
 FREQ_SAMPLE_RATE = [8000, 16000, 24000, 32000, 44100, 48000, 96000, 192000,
                     384000, 882000, 176000]
 
@@ -107,6 +113,19 @@ def peaking_band(freq, gain_db, q, fs):
     a0 = 1 + alpha / a
     values = [(1 + alpha * a) / a0, -2 * cos_w / a0, (1 - alpha * a) / a0,
               2 * cos_w / a0, -(1 - alpha / a) / a0]
+    return quantise(values)
+
+
+def low_pass_band(freq, q, fs):
+    """RBJ low-pass in the same format. Never boosts, so it cannot clip."""
+    w = 2 * math.pi * freq / fs
+    alpha, cos_w = math.sin(w) / (2 * q), math.cos(w)
+    a0 = 1 + alpha
+    b = (1 - cos_w) / 2 / a0
+    return quantise([b, 2 * b, b, 2 * cos_w / a0, -(1 - alpha) / a0])
+
+
+def quantise(values):
     for shift in range(26):
         ints = [round(v * 2 ** (25 - shift)) for v in values]
         if all(-(1 << 23) <= i < (1 << 23) for i in ints):
@@ -266,9 +285,9 @@ def current_sample_rate(dev, out_len, in_len):
     return None
 
 
-def read_band(dev, band, out_len, in_len):
+def read_band(dev, band, out_len, in_len, copy=0):
     """(shift, raw ints, float coeffs) of one stored band, or None."""
-    res = query(dev, CMD_GET_EQ_BAND, [0, band] + [0] * 11, out_len, in_len)
+    res = query(dev, CMD_GET_EQ_BAND, [copy, band] + [0] * 11, out_len, in_len)
     if not res or len(res) < 42:
         return None
     gain, raw, coeffs = decode_band(res)
@@ -277,8 +296,9 @@ def read_band(dev, band, out_len, in_len):
     return gain, raw, coeffs
 
 
-def set_band(dev, band, shift, ints, out_len, in_len):
-    words = [0, band, shift] + list(ints) + [0] * 5
+def set_band(dev, band, shift, ints, out_len, in_len, copy=0):
+    """Word 0 is 0 or 1; the app's reset writes both, and what it selects is unknown."""
+    words = [copy, band, shift] + list(ints) + [0] * 5
     return query(dev, CMD_SET_EQ_BAND, words, out_len, in_len) is not None
 
 
@@ -436,15 +456,90 @@ def write_test(hid, path=None):
     return 0 if all(results.values()) else 2
 
 
+def enable_eq(dev, out_len, in_len):
+    print("\nEQ enable (cmd %d):" % CMD_EQ_ENABLE)
+    enabled = query(dev, CMD_EQ_ENABLE, [1] + [0] * 12, out_len, in_len) is not None
+    print("\nEQ bypass off (cmd %d):" % CMD_EQ_BYPASS)
+    return query(dev, CMD_EQ_BYPASS, [0], out_len, in_len) is not None and enabled
+
+
+def set_bands(dev, bands, copies, band_value, out_len, in_len):
+    ok = True
+    for copy in copies:
+        for band in bands:
+            print("\nSet band %d, word 0 = %d (cmd %d):" % (band, copy, CMD_SET_EQ_BAND))
+            ok = set_band(dev, band, band_value[0], band_value[1], out_len, in_len, copy) and ok
+    return ok
+
+
+def listen_test(hid, path=None):
+    """
+    --write-test showed a live write reads back but was not heard. This makes
+    the change unmistakable (a 400 Hz low-pass) and widens it one step at a
+    time until it is heard: word 0 = 0 on band 9, then word 0 = 1 too, then
+    every band, then EQ enable sent again after the writes. Every band it
+    touched goes back to flat at the end, and a replug clears it anyway.
+    """
+    freq, q = LISTEN_FILTER
+    dev = open_echo_b(hid, path)
+    if dev is None:
+        return 1
+    heard_at, results = None, {}
+    try:
+        out_len, in_len = report_sizes(dev)
+        print("\nSample rate (cmd %d):" % CMD_GET_SAMPLE_RATE)
+        fs = current_sample_rate(dev, out_len, in_len) or 48000
+        lp = low_pass_band(freq, q, fs)
+        print("\nListening filter: %d Hz low-pass, Q %.3f, at %d Hz -> shift %d %s"
+              % (freq, q, fs, lp[0], lp[1]))
+        results["eq enable"] = enable_eq(dev, out_len, in_len)
+
+        steps = [
+            ("band 9, word 0 = 0", lambda: set_bands(dev, [TEST_BAND], [0], lp, out_len, in_len)),
+            ("band 9, word 0 = 1 as well", lambda: set_bands(dev, [TEST_BAND], [1], lp, out_len, in_len)),
+            ("bands 1-9, both values of word 0",
+             lambda: set_bands(dev, EQ_BANDS, [0, 1], lp, out_len, in_len)),
+            ("EQ enable sent again after the writes", lambda: enable_eq(dev, out_len, in_len)),
+        ]
+        ask("\nStart some music through the Echo-B and leave it playing, then press Enter. ")
+        for n, (label, run) in enumerate(steps, 1):
+            print("\n=== Step %d: %s ===" % (n, label))
+            results["step %d" % n] = run()
+            if n == 2:
+                print("\nBand 9, word 0 = 1, read back (cmd %d):" % CMD_GET_EQ_BAND)
+                read_band(dev, TEST_BAND, out_len, in_len, copy=1)
+            answer = ask("\nStep %d: does the music now sound muffled, like it is behind a wall? [y/n] " % n)
+            if answer.startswith("y"):
+                heard_at = "step %d (%s)" % (n, label)
+                break
+
+        print("\n=== Putting every band back to flat ===")
+        results["restore"] = set_bands(dev, EQ_BANDS, [0, 1], FLAT_BAND, out_len, in_len)
+        flat = True
+        for band in EQ_BANDS:
+            print("\nBand %d now (cmd %d):" % (band, CMD_GET_EQ_BAND))
+            final = read_band(dev, band, out_len, in_len)
+            flat = flat and final is not None and (final[0], final[1]) == FLAT_BAND
+        results["flat again"] = flat
+        if heard_at:
+            back = ask("\nIs the music back to normal now? [y/n] ")
+            results["sounds normal again"] = back.startswith("y")
+    finally:
+        dev.close()
+
+    print("\nFirst heard at: %s" % (heard_at or "never"))
+    summary(results)
+    return 0 if all(results.values()) else 2
+
+
 def restore(hid, path=None):
-    """Set the test band back to flat, as the Moondrop app does on first connect."""
+    """Set every band back to flat, as the Moondrop app does on first connect."""
     dev = open_echo_b(hid, path)
     if dev is None:
         return 1
     try:
         out_len, in_len = report_sizes(dev)
-        print("\nSet band %d to flat (cmd %d):" % (TEST_BAND, CMD_SET_EQ_BAND))
-        ok = set_band(dev, TEST_BAND, FLAT_BAND[0], FLAT_BAND[1], out_len, in_len)
+        ok = set_bands(dev, EQ_BANDS, [0, 1], FLAT_BAND, out_len, in_len)
         print("\nBand %d now (cmd %d):" % (TEST_BAND, CMD_GET_EQ_BAND))
         final = read_band(dev, TEST_BAND, out_len, in_len)
     finally:
@@ -462,8 +557,10 @@ def main():
                         help="print the query packets without opening a device")
     parser.add_argument("--write-test", action="store_true",
                         help="temporarily change EQ band %d, then set it back to flat" % TEST_BAND)
+    parser.add_argument("--listen-test", action="store_true",
+                        help="temporarily muffle the sound in widening steps, then set every band back to flat")
     parser.add_argument("--restore", action="store_true",
-                        help="set EQ band %d back to flat" % TEST_BAND)
+                        help="set every EQ band back to flat")
     args = parser.parse_args()
 
     if args.dry_run:
@@ -482,6 +579,9 @@ def main():
             CMD_SET_EQ_BAND, [0, TEST_BAND, shift] + ints + [0] * 5)))
         print("flat band:   %s" % hexdump(build_message(
             CMD_SET_EQ_BAND, [0, TEST_BAND, FLAT_BAND[0]] + FLAT_BAND[1] + [0] * 5)))
+        lp = low_pass_band(*LISTEN_FILTER, 48000)
+        print("listen band: %s" % hexdump(build_message(
+            CMD_SET_EQ_BAND, [1, TEST_BAND, lp[0]] + lp[1] + [0] * 5)))
         return 0
 
     try:
@@ -495,11 +595,12 @@ def main():
         return 0
     if args.restore:
         return restore(hid, args.path)
-    if args.write_test:
+    if args.write_test or args.listen_test:
         try:
-            return write_test(hid, args.path)
+            return (listen_test if args.listen_test else write_test)(hid, args.path)
         except KeyboardInterrupt:
-            print("\nStopped. To put band %d back to flat, run:  echo_b_probe.py --restore" % TEST_BAND)
+            print("\nStopped. To put the bands back to flat, run:  echo_b_probe.py --restore"
+                  "\n(or just unplug and replug: live writes do not survive that)")
             return 130
     return probe(hid, args.path)
 
