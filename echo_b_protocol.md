@@ -42,6 +42,18 @@ All observed commands use n = 13 (62-byte message).
 FREQ_SAMPLE_RATE index table: [8000,16000,24000,32000,44100,48000,96000,192000,384000,882000,176000].
 App always sends filterType 0 (peaking) from `sySendEqParams`, gain/Q as doubles.
 
+## Confirmed on hardware (issue #1, `tools/echo_b_probe.py`, macOS, hidapi)
+- hidapi enumerates interface 3 with `interface_number` 3; `open_path` + `write` + `get_input_report` work.
+- USB string 41 is not readable on macOS (`get_indexed_string` error), so identify by VID:PID, not string 41.
+- Report descriptor (usage page 0x0C, consumer):
+  - report ID 1: 61-byte input and 61-byte output (vendor usage 0x00), i.e. 62 bytes with the ID = one CAF message.
+  - report ID 2: 1-byte input, volume up/down (0xE9/0xEA), play/pause (0xCD), 0xCF. Media keys, ignore.
+- Reply = request header with bit 31 set (byte 5 `0x01` → `0x81`), same module ID, words echoed or filled.
+  Bytes 2..3 in the reply are just the word count (4, 13), so "int16 ≥ 0" really means "not an error code".
+- cmd 259 reply: word 0 = 0x7CF4 (31988), ASCII `CX31988` at bytes 18..24, so the chip is a **Conexant CX31988**.
+- cmd 346 reply: word 0 = 62 (echoed), word 1 = 5 (48000 Hz, matching the macOS output rate), word 3 = 0x20 (32,
+  probably bit depth; not verified).
+
 ## Still unknown
 - Coefficient design: `Eq2Coeff.CxAudioConvertEqParams2Coeffs(fs, {flags, Freq_Hz, Gain_dB*256, Q*256}, 24)` is native
   (`libcxaudiodsplib_embca_jni.so`: `EqDesignFx`, `EqFxToFloat`, Q8.23 / Q31 helpers). Likely RBJ biquad quantised to
