@@ -81,7 +81,7 @@ Checked against Moondrop's library only as a black box (comparing the responses 
 
 ## App write sequence (`FreemanCnxtUsbDevice`)
 - First EQ read after connect (`setDefaultAvailable`): writes flat [0|1, band, 3, 4194304, 0, 0, 0, 0] with cmd 190 to
-  bands 0–9, once with word 0 = 0 and once with word 0 = 1 (word 0 may be a channel or bank; unverified).
+  bands 0–9, once with word 0 = 0 and once with word 0 = 1 (word 0 = channel, 0 left / 1 right; see Find right).
 - First live change per session: 188 [1, 0…], then 187 [0], then 190 [0, band+5, Gain, B0, B1, B2, A0, A1, 0…].
 
 ## Live write test (issue #1, `echo_b_probe.py --write-test`, macOS, 48 kHz)
@@ -114,12 +114,27 @@ Checked against Moondrop's library only as a black box (comparing the responses 
 - Every slot with word 0 = 0 acts on the **left channel only**. Word 0 = 1 is either not the right channel or not
   live in EQ mode 0. So the app's live path (always word 0 = 0) would only EQ the left ear, unless 188/187 or the
   EQ mode links the channels.
-- Restoring flat on bands 1–9 (both values of word 0) brought the sound back.
+- Restoring flat on bands 1–9 (both values of word 0) seemed to bring the sound back (but see Find right).
 - `--find-right` follows up. It tries 5/1 and 1/1 (slots the app writes), then 9/2, 9/3, 10/0, 14/0 and 18/0. Each
   slot is read with 446 first and written only if the reply echoes the slot and holds a filter (b0 ≠ 0). It gets
   the values it held before written back, and the run stops at the first slot heard on the right.
 
+## Find right (issue #1, `--find-right`, macOS, 48 kHz)
+- The first candidate, band 5 / word 0 = 1, muffled the **right ear only**. So word 0 selects the channel:
+  **0 = left, 1 = right**, with the same band numbers. The run stopped there, so no unknown slot was touched.
+- In `--band-map`, 9 / word 0 = 1 was "not heard". Either it was missed or band 9 behaves differently on the right;
+  still to check.
+- **After the run the right channel was louder and clipping.** Every write in the run was either the low-pass or flat,
+  so the likely cause is what got overwritten. Every test so far wrote flat to word 0 = 1 bands 1–9 without reading
+  them first, and the probe only ever read word 0 = 0. So the right channel probably holds a factory tuning (possibly
+  a level cut) that flat replaced. (The owner answered "back to normal" by mistake.)
+- Fix: the plain probe now reads both channels, the listening tests save bands 1–9 of both channels first and write
+  exactly that back, and `--restore` only flattens the left channel. A replug should restore the right channel from
+  flash (cmd 190 is volatile); a plain probe after the replug shows its factory values.
+- Consequence for Hub Moon: a "flat" reset must write back the device's own values per channel, not the app's flat band.
+
 ## Still unknown
-- Where the right channel's bands are, and what word 0 of 190/446 selects.
+- The right channel's factory values (word 0 = 1), and whether a replug restores them.
+- Whether band 9 / word 0 = 1 is live (heard in neither ear in `--band-map`).
 - Whether a live EQ survives a sample-rate change, since the coefficients are designed for one rate.
 - The live path rejects band > 4 for Freeman3 while the product says 9 bands; how the Dart UI maps 9 bands is unverified.

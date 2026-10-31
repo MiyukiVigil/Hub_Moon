@@ -4,7 +4,7 @@ Probe for the Moondrop ECHO-B (Conexant/Synaptics "Freeman3" chip).
 
 Checks whether Hub Moon's HID stack (hidapi) can talk to the ECHO-B at all,
 before any EQ support is written. A plain run only sends query commands (chip
-code, sample rate, EQ mode, and the 9 stored EQ bands) and changes nothing.
+code, sample rate, EQ mode, and the 9 EQ bands of each channel) and changes nothing.
 
 --write-test is the one exception: it live-sets EQ band 9 to a -6 dB dip at
 1 kHz, reads it back, asks you to unplug and replug, reads it again, then sets
@@ -12,11 +12,12 @@ the band back to flat with the same command the Moondrop app uses to reset it.
 It never touches flash (cmd 220); a replug undoes it (confirmed on hardware).
 
 --listen-test makes the change unmistakable (a 400 Hz low-pass) and widens it
-step by step until you hear it, then sets every band back to flat. --band-map
+step by step until you hear it, then puts every band back as it was. --band-map
 puts the same low-pass on one band at a time and asks whether you hear it and
 in which ears. --find-right does the same on other band slots (read first,
 skipped unless they hold a filter, then put back) to find the right channel.
---restore sets every band back to flat.
+These three read bands 1-9 of both channels first and write back exactly that.
+--restore sets the left channel back to flat; a replug restores both channels.
 Protocol notes: echo_b_protocol.md.
 
 Dependencies:
@@ -30,7 +31,7 @@ Usage:
     python3 echo_b_probe.py --listen-test # find what makes a live write audible
     python3 echo_b_probe.py --band-map    # which bands and channels are live
     python3 echo_b_probe.py --find-right  # where the right channel's bands are
-    python3 echo_b_probe.py --restore     # set every band back to flat
+    python3 echo_b_probe.py --restore     # set the left channel back to flat
 """
 
 import sys
@@ -353,15 +354,16 @@ def probe(hid, path=None):
         results["eq config"] = res is not None
 
         bands = []
-        for band in EQ_BANDS:
-            print("\nEQ band %d (cmd %d):" % (band, CMD_GET_EQ_BAND))
-            read = read_band(dev, band, out_len, in_len)
-            bands.append((band, describe_band(read[2], fs) if read else "read failed"))
-        results["eq bands"] = all(desc != "read failed" for _, desc in bands)
+        for copy, side in ((0, "left"), (1, "right")):
+            for band in EQ_BANDS:
+                print("\nEQ band %d, %s (cmd %d, word 0 = %d):" % (band, side, CMD_GET_EQ_BAND, copy))
+                read = read_band(dev, band, out_len, in_len, copy)
+                bands.append((band, side, describe_band(read[2], fs) if read else "read failed"))
+        results["eq bands"] = all(desc != "read failed" for _, _, desc in bands)
 
         print("\nStored EQ (evaluated at %d Hz):" % fs)
-        for band, desc in bands:
-            print("  band %d: %s" % (band, desc))
+        for band, side, desc in bands:
+            print("  band %d %-5s: %s" % (band, side, desc))
     finally:
         dev.close()
 
@@ -477,13 +479,43 @@ def set_bands(dev, bands, copies, band_value, out_len, in_len):
     return ok
 
 
+def snapshot(dev, out_len, in_len):
+    """{(band, word 0): (shift, raw)} for bands 1-9 of both channels, or None if a read fails.
+
+    --find-right muffled the right channel through word 0 = 1, which earlier tests had
+    set to flat without reading it first. The right channel came back loud and
+    clipping, so it probably holds a factory tuning that flat is not.
+    """
+    saved = {}
+    for copy in (0, 1):
+        for band in EQ_BANDS:
+            print("\nSave band %d, word 0 = %d (cmd %d):" % (band, copy, CMD_GET_EQ_BAND))
+            read = read_band(dev, band, out_len, in_len, copy)
+            if read is None:
+                return None
+            saved[(band, copy)] = (read[0], read[1])
+    return saved
+
+
+def put_back(dev, saved, out_len, in_len):
+    """Write every saved slot back and check it reads back the same."""
+    ok = True
+    for (band, copy), value in saved.items():
+        ok = set_bands(dev, [band], [copy], value, out_len, in_len) and ok
+    for (band, copy), value in saved.items():
+        print("\nBand %d, word 0 = %d now (cmd %d):" % (band, copy, CMD_GET_EQ_BAND))
+        final = read_band(dev, band, out_len, in_len, copy)
+        ok = ok and final is not None and (final[0], final[1]) == value
+    return ok
+
+
 def listen_test(hid, path=None):
     """
     --write-test showed a live write reads back but was not heard. This makes
     the change unmistakable (a 400 Hz low-pass) and widens it one step at a
     time until it is heard: word 0 = 0 on band 9, then word 0 = 1 too, then
-    every band, then EQ enable sent again after the writes. Every band it
-    touched goes back to flat at the end, and a replug clears it anyway.
+    every band, then EQ enable sent again after the writes. Every band is
+    read first and put back as it was at the end; a replug clears it anyway.
     """
     freq, q = LISTEN_FILTER
     dev = open_echo_b(hid, path)
@@ -497,6 +529,10 @@ def listen_test(hid, path=None):
         lp = low_pass_band(freq, q, fs)
         print("\nListening filter: %d Hz low-pass, Q %.3f, at %d Hz -> shift %d %s"
               % (freq, q, fs, lp[0], lp[1]))
+        saved = snapshot(dev, out_len, in_len)
+        if saved is None:
+            print("\nCould not read every band, so nothing was changed.")
+            return 2
         results["eq enable"] = enable_eq(dev, out_len, in_len)
 
         steps = [
@@ -518,14 +554,8 @@ def listen_test(hid, path=None):
                 heard_at = "step %d (%s)" % (n, label)
                 break
 
-        print("\n=== Putting every band back to flat ===")
-        results["restore"] = set_bands(dev, EQ_BANDS, [0, 1], FLAT_BAND, out_len, in_len)
-        flat = True
-        for band in EQ_BANDS:
-            print("\nBand %d now (cmd %d):" % (band, CMD_GET_EQ_BAND))
-            final = read_band(dev, band, out_len, in_len)
-            flat = flat and final is not None and (final[0], final[1]) == FLAT_BAND
-        results["flat again"] = flat
+        print("\n=== Putting every band back as it was ===")
+        results["put back as found"] = put_back(dev, saved, out_len, in_len)
         if heard_at:
             back = ask("\nIs the music back to normal now? [y/n] ")
             results["sounds normal again"] = back.startswith("y")
@@ -546,7 +576,7 @@ def band_map(hid, path=None):
     """
     --listen-test heard a low-pass on band 9 with word 0 = 0. This puts the same
     low-pass on one (band, word 0) pair at a time and asks whether it is heard and
-    in which ears, putting that band back to flat before the next. It answers which
+    in which ears, putting that band back as it was before the next. It answers which
     bands are in the audio path (the app only writes 5-9) and whether word 0 picks
     a channel or something else.
     """
@@ -562,8 +592,11 @@ def band_map(hid, path=None):
         lp = low_pass_band(freq, q, fs)
         print("\nListening filter: %d Hz low-pass, Q %.3f, at %d Hz -> shift %d %s"
               % (freq, q, fs, lp[0], lp[1]))
+        saved = snapshot(dev, out_len, in_len)
+        if saved is None:
+            print("\nCould not read every band, so nothing was changed.")
+            return 2
         results["eq enable"] = enable_eq(dev, out_len, in_len)
-        results["start flat"] = set_bands(dev, EQ_BANDS, [0, 1], FLAT_BAND, out_len, in_len)
 
         ask("\nStart some music through the Echo-B and leave it playing, then press Enter. ")
         for band, copy in MAP_TARGETS:
@@ -576,16 +609,10 @@ def band_map(hid, path=None):
                 heard[label] = {"l": "left only", "r": "right only"}.get(ears[:1], "both")
             else:
                 heard[label] = "not heard"
-            results[label + " flat again"] = set_bands(dev, [band], [copy], FLAT_BAND, out_len, in_len)
+            results[label + " put back"] = set_bands(dev, [band], [copy], saved[(band, copy)], out_len, in_len)
 
-        print("\n=== Putting every band back to flat ===")
-        results["restore"] = set_bands(dev, EQ_BANDS, [0, 1], FLAT_BAND, out_len, in_len)
-        flat = True
-        for band in EQ_BANDS:
-            print("\nBand %d now (cmd %d):" % (band, CMD_GET_EQ_BAND))
-            final = read_band(dev, band, out_len, in_len)
-            flat = flat and final is not None and (final[0], final[1]) == FLAT_BAND
-        results["flat again"] = flat
+        print("\n=== Putting every band back as it was ===")
+        results["put back as found"] = put_back(dev, saved, out_len, in_len)
         back = ask("\nIs the music back to normal now? [y/n] ")
         results["sounds normal again"] = back.startswith("y")
     finally:
@@ -623,7 +650,7 @@ def find_right(hid, path=None):
     (band, word 0) slots one at a time to find the right channel's bands. Each
     slot is read first and skipped unless the device answers with a real filter;
     after the listen it gets exactly what was read back. It stops at the first
-    slot heard on the right, then sets bands 1-9 back to flat.
+    slot heard on the right, then puts bands 1-9 of both channels back as found.
     """
     freq, q = LISTEN_FILTER
     dev = open_echo_b(hid, path)
@@ -637,8 +664,11 @@ def find_right(hid, path=None):
         lp = low_pass_band(freq, q, fs)
         print("\nListening filter: %d Hz low-pass, Q %.3f, at %d Hz -> shift %d %s"
               % (freq, q, fs, lp[0], lp[1]))
+        saved = snapshot(dev, out_len, in_len)
+        if saved is None:
+            print("\nCould not read every band, so nothing was changed.")
+            return 2
         results["eq enable"] = enable_eq(dev, out_len, in_len)
-        results["start flat"] = set_bands(dev, EQ_BANDS, [0, 1], FLAT_BAND, out_len, in_len)
 
         ask("\nStart some music through the Echo-B and leave it playing, then press Enter. ")
         for band, copy in RIGHT_TARGETS:
@@ -660,14 +690,8 @@ def find_right(hid, path=None):
             if heard[label] in ("right only", "both"):
                 break
 
-        print("\n=== Putting bands 1-9 back to flat ===")
-        results["restore"] = set_bands(dev, EQ_BANDS, [0, 1], FLAT_BAND, out_len, in_len)
-        flat = True
-        for band in EQ_BANDS:
-            print("\nBand %d now (cmd %d):" % (band, CMD_GET_EQ_BAND))
-            final = read_band(dev, band, out_len, in_len)
-            flat = flat and final is not None and (final[0], final[1]) == FLAT_BAND
-        results["flat again"] = flat
+        print("\n=== Putting every band back as it was ===")
+        results["put back as found"] = put_back(dev, saved, out_len, in_len)
         back = ask("\nIs the music back to normal now? [y/n] ")
         results["sounds normal again"] = back.startswith("y")
     finally:
@@ -681,18 +705,23 @@ def find_right(hid, path=None):
 
 
 def restore(hid, path=None):
-    """Set every band back to flat, as the Moondrop app does on first connect."""
+    """Set the left channel's bands back to flat, which is how they came from the factory.
+
+    The right channel (word 0 = 1) is left alone: its factory values are not known
+    yet and flat is probably not one of them. A replug restores both.
+    """
     dev = open_echo_b(hid, path)
     if dev is None:
         return 1
     try:
         out_len, in_len = report_sizes(dev)
-        ok = set_bands(dev, EQ_BANDS, [0, 1], FLAT_BAND, out_len, in_len)
+        ok = set_bands(dev, EQ_BANDS, [0], FLAT_BAND, out_len, in_len)
         print("\nBand %d now (cmd %d):" % (TEST_BAND, CMD_GET_EQ_BAND))
         final = read_band(dev, TEST_BAND, out_len, in_len)
     finally:
         dev.close()
     flat = final is not None and (final[0], final[1]) == FLAT_BAND
+    print("\nFor the right channel, unplug and replug the Echo-B.")
     summary({"restore": ok, "flat again": flat})
     return 0 if ok and flat else 2
 
@@ -706,13 +735,13 @@ def main():
     parser.add_argument("--write-test", action="store_true",
                         help="temporarily change EQ band %d, then set it back to flat" % TEST_BAND)
     parser.add_argument("--listen-test", action="store_true",
-                        help="temporarily muffle the sound in widening steps, then set every band back to flat")
+                        help="temporarily muffle the sound in widening steps, then put every band back")
     parser.add_argument("--band-map", action="store_true",
                         help="temporarily muffle one band at a time to find which bands and channels are live")
     parser.add_argument("--find-right", action="store_true",
                         help="temporarily muffle other band slots one at a time to find the right channel")
     parser.add_argument("--restore", action="store_true",
-                        help="set every EQ band back to flat")
+                        help="set the left channel's EQ bands back to flat (replug for both)")
     args = parser.parse_args()
 
     if args.dry_run:
@@ -753,8 +782,8 @@ def main():
         try:
             return test(hid, args.path)
         except KeyboardInterrupt:
-            print("\nStopped. To put the bands back to flat, run:  echo_b_probe.py --restore"
-                  "\n(or just unplug and replug: live writes do not survive that)")
+            print("\nStopped. Unplug and replug the Echo-B to undo every change"
+                  "\n(live writes do not survive that).")
             return 130
     return probe(hid, args.path)
 
