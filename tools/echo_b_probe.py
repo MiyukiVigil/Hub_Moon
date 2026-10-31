@@ -12,8 +12,9 @@ the band back to flat with the same command the Moondrop app uses to reset it.
 It never touches flash (cmd 220); a replug undoes it (confirmed on hardware).
 
 --listen-test makes the change unmistakable (a 400 Hz low-pass) and widens it
-step by step until you hear it, then sets every band back to flat. --restore
-sets every band back to flat.
+step by step until you hear it, then sets every band back to flat. --band-map
+puts the same low-pass on one band at a time and asks whether you hear it and
+in which ears. --restore sets every band back to flat.
 Protocol notes: echo_b_protocol.md.
 
 Dependencies:
@@ -25,6 +26,7 @@ Usage:
     python3 echo_b_probe.py --dry-run  # print the packets without a device
     python3 echo_b_probe.py --write-test  # temporary one-band write, then restore
     python3 echo_b_probe.py --listen-test # find what makes a live write audible
+    python3 echo_b_probe.py --band-map    # which bands and channels are live
     python3 echo_b_probe.py --restore     # set every band back to flat
 """
 
@@ -532,6 +534,67 @@ def listen_test(hid, path=None):
     return 0 if all(results.values()) else 2
 
 
+# (band, word 0) pairs for --band-map. Band 9 / word 0 = 0 was heard in --listen-test
+# and comes first as the control; the rest ask which bands and which word 0 reach the audio.
+MAP_TARGETS = [(9, 0), (9, 1), (5, 0), (1, 0), (4, 0)]
+
+
+def band_map(hid, path=None):
+    """
+    --listen-test heard a low-pass on band 9 with word 0 = 0. This puts the same
+    low-pass on one (band, word 0) pair at a time and asks whether it is heard and
+    in which ears, putting that band back to flat before the next. It answers which
+    bands are in the audio path (the app only writes 5-9) and whether word 0 picks
+    a channel or something else.
+    """
+    freq, q = LISTEN_FILTER
+    dev = open_echo_b(hid, path)
+    if dev is None:
+        return 1
+    heard, results = {}, {}
+    try:
+        out_len, in_len = report_sizes(dev)
+        print("\nSample rate (cmd %d):" % CMD_GET_SAMPLE_RATE)
+        fs = current_sample_rate(dev, out_len, in_len) or 48000
+        lp = low_pass_band(freq, q, fs)
+        print("\nListening filter: %d Hz low-pass, Q %.3f, at %d Hz -> shift %d %s"
+              % (freq, q, fs, lp[0], lp[1]))
+        results["eq enable"] = enable_eq(dev, out_len, in_len)
+        results["start flat"] = set_bands(dev, EQ_BANDS, [0, 1], FLAT_BAND, out_len, in_len)
+
+        ask("\nStart some music through the Echo-B and leave it playing, then press Enter. ")
+        for band, copy in MAP_TARGETS:
+            label = "band %d, word 0 = %d" % (band, copy)
+            print("\n=== %s ===" % label)
+            results[label] = set_bands(dev, [band], [copy], lp, out_len, in_len)
+            answer = ask("\n%s: does the music sound muffled, like it is behind a wall? [y/n] " % label)
+            if answer.startswith("y"):
+                ears = ask("Muffled in which ears: both, left only or right only? [b/l/r] ")
+                heard[label] = {"l": "left only", "r": "right only"}.get(ears[:1], "both")
+            else:
+                heard[label] = "not heard"
+            results[label + " flat again"] = set_bands(dev, [band], [copy], FLAT_BAND, out_len, in_len)
+
+        print("\n=== Putting every band back to flat ===")
+        results["restore"] = set_bands(dev, EQ_BANDS, [0, 1], FLAT_BAND, out_len, in_len)
+        flat = True
+        for band in EQ_BANDS:
+            print("\nBand %d now (cmd %d):" % (band, CMD_GET_EQ_BAND))
+            final = read_band(dev, band, out_len, in_len)
+            flat = flat and final is not None and (final[0], final[1]) == FLAT_BAND
+        results["flat again"] = flat
+        back = ask("\nIs the music back to normal now? [y/n] ")
+        results["sounds normal again"] = back.startswith("y")
+    finally:
+        dev.close()
+
+    print("\nWhat was heard:")
+    for label, what in heard.items():
+        print("  %-20s %s" % (label, what))
+    summary(results)
+    return 0 if all(results.values()) else 2
+
+
 def restore(hid, path=None):
     """Set every band back to flat, as the Moondrop app does on first connect."""
     dev = open_echo_b(hid, path)
@@ -559,6 +622,8 @@ def main():
                         help="temporarily change EQ band %d, then set it back to flat" % TEST_BAND)
     parser.add_argument("--listen-test", action="store_true",
                         help="temporarily muffle the sound in widening steps, then set every band back to flat")
+    parser.add_argument("--band-map", action="store_true",
+                        help="temporarily muffle one band at a time to find which bands and channels are live")
     parser.add_argument("--restore", action="store_true",
                         help="set every EQ band back to flat")
     args = parser.parse_args()
@@ -595,9 +660,10 @@ def main():
         return 0
     if args.restore:
         return restore(hid, args.path)
-    if args.write_test or args.listen_test:
+    if args.write_test or args.listen_test or args.band_map:
+        test = band_map if args.band_map else listen_test if args.listen_test else write_test
         try:
-            return (listen_test if args.listen_test else write_test)(hid, args.path)
+            return test(hid, args.path)
         except KeyboardInterrupt:
             print("\nStopped. To put the bands back to flat, run:  echo_b_probe.py --restore"
                   "\n(or just unplug and replug: live writes do not survive that)")

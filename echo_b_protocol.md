@@ -94,6 +94,15 @@ Checked against Moondrop's library only as a black box (comparing the responses 
   in the audio path in EQ mode 0. `--listen-test` narrows this down: a 400 Hz low-pass written to band 9 with word 0 = 0,
   then word 0 = 1, then bands 1–9, then 188/187 re-sent, asking after each step; everything goes back to flat at the end.
 
+## Listen test (issue #1, `--listen-test`, macOS, 48 kHz)
+- **Heard at step 1**: 188 [1], 187 [0], then 190 [0, 9, 3, 2771, 5543, 2771, 8078119, −3894901] (400 Hz low-pass)
+  muffled the music at once, with no commit step. So the app's live sequence works as-is, and the −6 dB dip in
+  `--write-test` was simply too subtle to notice.
+- Writing flat to bands 1–9 (both values of word 0) brought the sound back, and every band read back flat.
+- `--band-map` follows up: the same low-pass on one (band, word 0) pair at a time (9/0 as the control, then 9/1, 5/0,
+  1/0, 4/0), asking whether it is heard and in which ears.
+
 ## Still unknown
-- What makes a live write audible (see above), and what word 0 of 190/446 selects.
+- Which bands are in the audio path (the app only writes 5–9), and what word 0 of 190/446 selects (channel or bank?).
+- Whether a live EQ survives a sample-rate change, since the coefficients are designed for one rate.
 - The live path rejects band > 4 for Freeman3 while the product says 9 bands; how the Dart UI maps 9 bands is unverified.
