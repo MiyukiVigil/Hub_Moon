@@ -21,6 +21,7 @@ import math
 import re
 import time
 import struct
+import itertools
 import argparse
 
 # The one version string in the project. pyproject reads it from here (statically,
@@ -667,10 +668,11 @@ def max_shelf_q(gain):
     return 1.0 / (1.0 - 2.0 / s)
 
 
-def calculate_biquad(f, gain, Q, filter_type):
+def calculate_biquad(f, gain, Q, filter_type, fs=FS):
     """
     Standard Bristow-Johnson biquad formulas.
     Swapped numerator/denominator as in Moondrop's implementation.
+    fs defaults to the DACs' fixed 96 kHz; the ECHO-B designs per sample rate.
     """
     if filter_type not in FILTER_TYPES or filter_type == "disabled":
         return [0.0]*3, [1.0, 0.0, 0.0]
@@ -683,7 +685,7 @@ def calculate_biquad(f, gain, Q, filter_type):
             raise ShelfSlopeError(gain, Q, limit)
 
     # Convert parameters
-    w0 = f * math.pi * 2 / FS
+    w0 = f * math.pi * 2 / fs
     cos_w0 = math.cos(w0)
 
     if filter_type == "peaking":
@@ -794,6 +796,76 @@ def max_safe_gain(freq, Q, filter_type, sign, limit=18.0):
         else:
             hi = mid
     return sign * lo if lo > 0.05 else None
+
+
+# ── ECHO-B (Conexant CX31988) coefficients ──────────────────────────────────
+#
+# The ECHO-B stores each band as five signed 24-bit ints [B0, B1, B2, A0, A1] =
+# [b0, b1, b2, -a1, -a2], all scaled by 2**(25 - shift) with one shift per band.
+# A flat band reads back as shift 3, [2**22, 0, 0, 0, 0]. See echo_b_protocol.md.
+ECHO_B_INT_LIMIT = 1 << 23
+ECHO_B_FLAT = (3, [1 << 22, 0, 0, 0, 0])
+
+
+def _echo_b_db(coeffs, scale, zs):
+    b0, b1, b2, na1, na2 = (c / scale for c in coeffs)
+    out = []
+    for z in zs:
+        n, d = abs(b0 + b1 * z + b2 * z * z), abs(1 - na1 * z - na2 * z * z)
+        out.append(20 * math.log10(n / d) if n and d else -300.0)
+    return out
+
+
+def echo_b_coefficients(f, gain, Q, filter_type, fs):
+    """
+    Design one ECHO-B band at sample rate fs: returns (shift, [B0, B1, B2, A0, A1]).
+    The shift is the smallest that fits all five in 24 bits, which is also what
+    Moondrop's app picks.
+
+    Rounding each coefficient on its own is fine above ~100 Hz, but a low corner
+    puts the poles almost on z = 1, where 1 - A0 - A1 is only a few LSB wide (about
+    7 at 20 Hz / 96 kHz) and one LSB moves the peak by most of a dB. So when plain
+    rounding misses the float response by more than 0.01 dB, nudge the feedback
+    pair and then the numerator by a few LSB and keep whatever lands closest. That
+    gets within 0.4 dB at 20 Hz / 48 kHz and 0.1 dB from 125 Hz up.
+    """
+    if filter_type == "disabled":
+        return ECHO_B_FLAT[0], list(ECHO_B_FLAT[1])
+    num, den = calculate_biquad(f, gain, Q, filter_type, fs)
+    floats = [den[0], den[1], den[2], -num[1], -num[2]]
+    shift = next((s for s in range(26)
+                  if all(abs(round(v * 2 ** (25 - s))) < ECHO_B_INT_LIMIT for v in floats)), None)
+    if shift is None:
+        raise CoefficientOverflowError(COEFF_NAMES[0], max(floats, key=abs))
+    scale = 2 ** (25 - shift)
+    best = [round(v * scale) for v in floats]
+
+    top = min(20000.0, 0.49 * fs)
+    grid = {20 * (top / 20) ** (k / 47) for k in range(48)}
+    # 1/24 octave around the corner, or a narrow notch hides between grid points
+    grid |= {f * 2 ** (k / 24) for k in range(-24, 25) if 20 <= f * 2 ** (k / 24) <= top}
+    zs = [complex(math.cos(w), -math.sin(w)) for w in (2 * math.pi * x / fs for x in sorted(grid))]
+    target = _echo_b_db(floats, 1, zs)
+
+    def err(c):
+        if not all(abs(x) < ECHO_B_INT_LIMIT for x in c):
+            return float("inf")
+        return max(abs(x - y) for x, y in zip(_echo_b_db(c, scale, zs), target))
+
+    best_err = err(best)
+    if best_err <= 0.01:
+        return shift, best
+    # Search B0, B2, A0, A1 together, moving B1 opposite to A0. Near DC b1 and a1
+    # are both about -2 for every type, so keeping B1 + A0 fixed keeps their
+    # rounding errors cancelling, which matters more than either one alone.
+    base = list(best)
+    for d0, d2, d3, d4 in itertools.product(range(-3, 4), repeat=4):
+        cand = [base[0] + d0, base[1] - d3, base[2] + d2, base[3] + d3, base[4] + d4]
+        e = err(cand)
+        if e < best_err:
+            best, best_err = cand, e
+    return shift, best
+
 
 def find_devices():
     devices = []

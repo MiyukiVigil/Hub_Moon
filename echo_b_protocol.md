@@ -25,7 +25,9 @@
 | 2–5 | u32: `n_words & 0xFF` \| `command_id << 16` \| `reply << 31` |
 | 6–9 | u32 module ID = CAF id of "CTRL": ((c0-32)<<8)\|((c1-32)<<14)\|((c2-32)<<20)\|((c3-32)<<26) |
 | 10.. | n × u32 data words |
-All observed commands use n = 13 (62-byte message).
+Almost every command uses n = 13 (62-byte message); 187 is sent with n = 1. Data words are serialised as their low
+32 bits, so negative coefficients go out as two's complement. Each read command is its write command + 256
+(190/446 band, 90/346 EQ mode, 186/442 EQ config).
 
 ## Commands (module CTRL)
 | cmd | data | meaning |
@@ -60,9 +62,30 @@ App always sends filterType 0 (peaking) from `sySendEqParams`, gain/Q as doubles
 - cmd 259 reply: word 0 = 0x7CF4 (31988), ASCII `CX31988` at bytes 18..24, so the chip is a **Conexant CX31988**.
 - cmd 346 reply: word 0 = 62 (echoed), word 1 = 5 (48000 Hz, matching the macOS output rate), word 3 = 0x20 (32,
   probably bit depth; not verified).
+- cmd 346 [90] reply: EQ mode 0.
+- cmd 442 reply: word 0 = 5 (stored EQ designed for 48 kHz). Further words 0xC0000003, 0, 1, 0, 0x1C0: meaning unknown.
+- cmd 446, bands 1–9: **all** shift 3, [4194304, 0, 0, 0, 0] = exact pass-through (b0 = 1.0). This confirms the
+  2^(25 − shift) scaling. Bands 1–4 are flat too, so on this unit they hold no factory tuning. The owner never managed
+  to connect the Moondrop app, so this is probably the factory default.
+
+## Coefficient design (Hub Moon, clean-room)
+`echo_b_coefficients()` in `moondrop_control.py`: the existing RBJ `calculate_biquad` at the device's sample rate,
+smallest shift that fits all five values in 24 bits, then a small search over the rounded ints for low corners.
+Checked against Moondrop's library only as a black box (comparing the responses each produces):
+- Shift choice agrees in ~96% of bands.
+- From ~100 Hz to 1 kHz they agree within ~0.1 dB. At very low corners ours is as close to float RBJ as theirs or
+  closer (20 Hz / 48 kHz: 0.25 vs 0.32 dB worst case; 20 Hz / 96 kHz: 0.92 vs 0.94).
+- Higher up, Moondrop's design increasingly departs from RBJ (some bandwidth warping): worst case at 48 kHz ~0.3 dB at
+  4 kHz, ~1.2 dB at 8 kHz, ~6 dB at 16 kHz. Ours stays exactly on RBJ, which is what AutoEQ / REW PEQ profiles assume.
+- Moondrop's function returns nonzero codes (2048, 6144, 7680) for some bands; meaning unknown, ignored.
+
+## App write sequence (`FreemanCnxtUsbDevice`)
+- First EQ read after connect (`setDefaultAvailable`): writes flat [0|1, band, 3, 4194304, 0, 0, 0, 0] with cmd 190 to
+  bands 0–9, once with word 0 = 0 and once with word 0 = 1 (word 0 may be a channel or bank; unverified).
+- First live change per session: 188 [1, 0…], then 187 [0], then 190 [0, band+5, Gain, B0, B1, B2, A0, A1, 0…].
 
 ## Still unknown
-- Coefficient design: `Eq2Coeff.CxAudioConvertEqParams2Coeffs(fs, {flags, Freq_Hz, Gain_dB*256, Q*256}, 24)` is native
-  (`libcxaudiodsplib_embca_jni.so`: `EqDesignFx`, `EqFxToFloat`, Q8.23 / Q31 helpers). Likely RBJ biquad quantised to
-  24-bit with a per-band shift in `Gain`, but exact scaling/sign of A0/A1 needs disassembly or a USB capture.
+- Whether cmd 190 (live set) is volatile, and whether cmd 446 reads the live or the flash copy.
+  `echo_b_probe.py --write-test` answers both: it live-sets band 9 to −6 dB at 1 kHz, reads it back, asks for a replug,
+  reads again, and writes flat back (`--restore` does only that last step).
 - The live path rejects band > 4 for Freeman3 while the product says 9 bands; how the Dart UI maps 9 bands is unverified.

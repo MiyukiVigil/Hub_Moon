@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
 """
-Read-only probe for the Moondrop ECHO-B (Conexant/Synaptics "Freeman3" chip).
+Probe for the Moondrop ECHO-B (Conexant/Synaptics "Freeman3" chip).
 
 Checks whether Hub Moon's HID stack (hidapi) can talk to the ECHO-B at all,
-before any EQ support is written. It only sends query commands (chip code,
-sample rate, EQ mode, and the 9 stored EQ bands) and never changes EQ,
-presets or flash. Protocol notes: echo_b_protocol.md.
+before any EQ support is written. A plain run only sends query commands (chip
+code, sample rate, EQ mode, and the 9 stored EQ bands) and changes nothing.
+
+--write-test is the one exception: it live-sets EQ band 9 to a -6 dB dip at
+1 kHz, reads it back, asks you to unplug and replug, reads it again, then sets
+the band back to flat with the same command the Moondrop app uses to reset it.
+It never touches flash (cmd 220). --restore only does that last flat write.
+Protocol notes: echo_b_protocol.md.
 
 Dependencies:
     pip install hidapi
@@ -14,6 +19,8 @@ Usage:
     python3 echo_b_probe.py            # probe the first ECHO-B found
     python3 echo_b_probe.py --list     # list every Moondrop HID interface
     python3 echo_b_probe.py --dry-run  # print the packets without a device
+    python3 echo_b_probe.py --write-test  # temporary one-band write, then restore
+    python3 echo_b_probe.py --restore     # set band 9 back to flat
 """
 
 import sys
@@ -39,6 +46,12 @@ EQ_MODE_SUBCMD = 90
 CMD_GET_EQ_CONFIG = 442    # sample-rate index the stored EQ was designed for
 CMD_GET_EQ_BAND = 446      # [0, band] -> Gain byte at 18, B0 B1 B2 A0 A1 at 22..41
 EQ_BANDS = range(1, 10)
+CMD_EQ_BYPASS = 187        # [0] -> EQ CFG bypass off, sent once with 188
+CMD_EQ_ENABLE = 188        # [1, 0...]
+CMD_SET_EQ_BAND = 190      # [0, band, Gain, B0, B1, B2, A0, A1, 0...], live
+TEST_BAND = 9              # live band 4, the last one the app's UI reaches
+TEST_FILTER = (1000, -6.0, 1.0)  # Hz, dB, Q: a cut, so nothing can clip
+FLAT_BAND = (3, [1 << 22, 0, 0, 0, 0])  # what the app writes to reset a band
 FREQ_SAMPLE_RATE = [8000, 16000, 24000, 32000, 44100, 48000, 96000, 192000,
                     384000, 882000, 176000]
 
@@ -56,7 +69,7 @@ def build_message(cmd, words):
     """[report id 1, 0x00] + u32 header + u32 module + n data words, little-endian."""
     header = (len(words) & 0xFF) | (cmd << 16)
     return bytes([REPORT_ID, 0]) + struct.pack("<II", header, CTRL_MODULE) + \
-        struct.pack("<%dI" % len(words), *words)
+        struct.pack("<%dI" % len(words), *(w & 0xFFFFFFFF for w in words))
 
 
 def hexdump(data):
@@ -80,6 +93,25 @@ def decode_band(res):
     scale = 2.0 ** (25 - gain)
     b0, b1, b2, na1, na2 = (v / scale for v in raw)
     return gain, raw, (b0, b1, b2, -na1, -na2)
+
+
+def peaking_band(freq, gain_db, q, fs):
+    """
+    RBJ peaking biquad as the ECHO-B stores it: (shift, [B0, B1, B2, A0, A1]),
+    using the smallest shift that fits all five in 24 bits. Plain rounding is
+    exact enough here; Hub Moon refines it for corners below ~100 Hz.
+    """
+    a = 10 ** (gain_db / 40)
+    w = 2 * math.pi * freq / fs
+    alpha, cos_w = math.sin(w) / (2 * q), math.cos(w)
+    a0 = 1 + alpha / a
+    values = [(1 + alpha * a) / a0, -2 * cos_w / a0, (1 - alpha * a) / a0,
+              2 * cos_w / a0, -(1 - alpha / a) / a0]
+    for shift in range(26):
+        ints = [round(v * 2 ** (25 - shift)) for v in values]
+        if all(-(1 << 23) <= i < (1 << 23) for i in ints):
+            return shift, ints
+    raise ValueError("filter does not fit 24 bits")
 
 
 def response_db(coeffs, freq, fs):
@@ -188,12 +220,13 @@ def query(dev, cmd, words, out_len, in_len):
     return res if status >= 0 else None
 
 
-def probe(hid, path=None):
+def open_echo_b(hid, path=None):
+    """Open the ECHO-B's HID interface, or print why not and return None."""
     found = list_interfaces(hid)
     info = next((d for d in found if d["path"] == path), None) if path else pick_interface(found)
     if info is None:
         print("\nNo ECHO-B (PID 0x1496-0x149C) found.")
-        return 1
+        return None
     print("\nUsing PID 0x%04x interface %s: %s"
           % (info["product_id"], info["interface_number"], info["path"]))
 
@@ -202,6 +235,56 @@ def probe(hid, path=None):
         dev.open_path(info["path"])
     except (IOError, OSError) as e:
         print("Could not open the HID interface: %s" % e)
+        return None
+    return dev
+
+
+def report_sizes(dev):
+    """(output, input) length of report id 1, from the report descriptor."""
+    out_len = in_len = DEFAULT_REPORT_LEN - 1
+    try:
+        descriptor = dev.get_report_descriptor()
+        print("Report descriptor (%d bytes): %s" % (len(descriptor), hexdump(descriptor)))
+        lengths = report_lengths(descriptor)
+        print("Report lengths: %s" % ", ".join(
+            "%s id %d = %d" % (k[0], k[1], v) for k, v in sorted(lengths.items())))
+        out_len = lengths.get(("output", REPORT_ID), out_len)
+        in_len = lengths.get(("input", REPORT_ID), in_len)
+    except (AttributeError, IOError, OSError, ValueError) as e:
+        print("Report descriptor unavailable (%s); assuming %d-byte reports"
+              % (e, DEFAULT_REPORT_LEN))
+    return out_len, in_len
+
+
+def current_sample_rate(dev, out_len, in_len):
+    res = query(dev, CMD_GET_SAMPLE_RATE, [SAMPLE_RATE_SUBCMD] + [0] * 12, out_len, in_len)
+    if res and len(res) >= 18:
+        idx = struct.unpack_from("<i", res, 14)[0]
+        hz = FREQ_SAMPLE_RATE[idx] if 0 <= idx < len(FREQ_SAMPLE_RATE) else None
+        print("  index %d -> %s" % (idx, "%d Hz" % hz if hz else "unknown"))
+        return hz
+    return None
+
+
+def read_band(dev, band, out_len, in_len):
+    """(shift, raw ints, float coeffs) of one stored band, or None."""
+    res = query(dev, CMD_GET_EQ_BAND, [0, band] + [0] * 11, out_len, in_len)
+    if not res or len(res) < 42:
+        return None
+    gain, raw, coeffs = decode_band(res)
+    print("  shift %d  raw %s" % (gain, raw))
+    print("  b0 %.6f b1 %.6f b2 %.6f a1 %.6f a2 %.6f" % coeffs)
+    return gain, raw, coeffs
+
+
+def set_band(dev, band, shift, ints, out_len, in_len):
+    words = [0, band, shift] + list(ints) + [0] * 5
+    return query(dev, CMD_SET_EQ_BAND, words, out_len, in_len) is not None
+
+
+def probe(hid, path=None):
+    dev = open_echo_b(hid, path)
+    if dev is None:
         return 1
 
     results = {"open": True}
@@ -215,18 +298,7 @@ def probe(hid, path=None):
         except (IOError, OSError, ValueError) as e:
             print("String 41:    unavailable (%s)" % e)
 
-        out_len = in_len = DEFAULT_REPORT_LEN - 1
-        try:
-            descriptor = dev.get_report_descriptor()
-            print("Report descriptor (%d bytes): %s" % (len(descriptor), hexdump(descriptor)))
-            lengths = report_lengths(descriptor)
-            print("Report lengths: %s" % ", ".join(
-                "%s id %d = %d" % (k[0], k[1], v) for k, v in sorted(lengths.items())))
-            out_len = lengths.get(("output", REPORT_ID), out_len)
-            in_len = lengths.get(("input", REPORT_ID), in_len)
-        except (AttributeError, IOError, OSError, ValueError) as e:
-            print("Report descriptor unavailable (%s); assuming %d-byte reports"
-                  % (e, DEFAULT_REPORT_LEN))
+        out_len, in_len = report_sizes(dev)
 
         print("\nChip code (cmd %d):" % CMD_GET_CHIP_CODE)
         res = query(dev, CMD_GET_CHIP_CODE, [1, 0, 0, 0], out_len, in_len)
@@ -235,15 +307,10 @@ def probe(hid, path=None):
             print("  chip code %d (0x%x)" % (code, code & 0xFFFFFFFF))
         results["chip code"] = res is not None
 
-        hz = None
         print("\nSample rate (cmd %d):" % CMD_GET_SAMPLE_RATE)
-        res = query(dev, CMD_GET_SAMPLE_RATE, [SAMPLE_RATE_SUBCMD] + [0] * 12, out_len, in_len)
-        if res and len(res) >= 18:
-            idx = struct.unpack_from("<i", res, 14)[0]
-            hz = FREQ_SAMPLE_RATE[idx] if 0 <= idx < len(FREQ_SAMPLE_RATE) else None
-            print("  index %d -> %s" % (idx, "%d Hz" % hz if hz else "unknown"))
-        results["sample rate"] = res is not None
-        fs = hz if res and hz else 48000
+        hz = current_sample_rate(dev, out_len, in_len)
+        results["sample rate"] = hz is not None
+        fs = hz or 48000
 
         print("\nEQ mode (cmd %d [%d]):" % (CMD_GET_SAMPLE_RATE, EQ_MODE_SUBCMD))
         res = query(dev, CMD_GET_SAMPLE_RATE, [EQ_MODE_SUBCMD] + [0] * 12, out_len, in_len)
@@ -263,14 +330,8 @@ def probe(hid, path=None):
         bands = []
         for band in EQ_BANDS:
             print("\nEQ band %d (cmd %d):" % (band, CMD_GET_EQ_BAND))
-            res = query(dev, CMD_GET_EQ_BAND, [0, band] + [0] * 11, out_len, in_len)
-            if res and len(res) >= 42:
-                gain, raw, coeffs = decode_band(res)
-                print("  shift %d  raw %s" % (gain, raw))
-                print("  b0 %.6f b1 %.6f b2 %.6f a1 %.6f a2 %.6f" % coeffs)
-                bands.append((band, describe_band(coeffs, fs)))
-            else:
-                bands.append((band, "read failed"))
+            read = read_band(dev, band, out_len, in_len)
+            bands.append((band, describe_band(read[2], fs) if read else "read failed"))
         results["eq bands"] = all(desc != "read failed" for _, desc in bands)
 
         print("\nStored EQ (evaluated at %d Hz):" % fs)
@@ -279,17 +340,130 @@ def probe(hid, path=None):
     finally:
         dev.close()
 
-    print("\nSummary: " + ", ".join(
-        "%s %s" % (k, "OK" if v else "FAILED") for k, v in results.items()))
+    summary(results)
     return 0 if all(results.values()) else 2
 
 
+def ask(prompt):
+    try:
+        return input(prompt).strip().lower()
+    except EOFError:
+        return ""
+
+
+def summary(results):
+    print("\nSummary: " + ", ".join(
+        "%s %s" % (k, "OK" if v else "FAILED") for k, v in results.items()))
+
+
+def write_test(hid, path=None):
+    """
+    Live-set one band, read it back, survive a replug, then put it back to flat.
+    Sends exactly what the Moondrop app sends before and during a live EQ
+    change (188, 187, 190), and nothing that writes flash.
+    """
+    freq, gain_db, q = TEST_FILTER
+    results = {}
+    dev = open_echo_b(hid, path)
+    if dev is None:
+        return 1
+    try:
+        out_len, in_len = report_sizes(dev)
+        print("\nSample rate (cmd %d):" % CMD_GET_SAMPLE_RATE)
+        fs = current_sample_rate(dev, out_len, in_len) or 48000
+
+        print("\nBand %d before the test (cmd %d):" % (TEST_BAND, CMD_GET_EQ_BAND))
+        before = read_band(dev, TEST_BAND, out_len, in_len)
+        results["read before"] = before is not None
+        if before is None:
+            print("\nCould not read the band, so not writing anything.")
+            summary(results)
+            return 2
+
+        shift, ints = peaking_band(freq, gain_db, q, fs)
+        print("\nTest filter: %+.0f dB at %d Hz, Q %.1f, at %d Hz -> shift %d %s"
+              % (gain_db, freq, q, fs, shift, ints))
+
+        print("\nEQ enable (cmd %d):" % CMD_EQ_ENABLE)
+        enabled = query(dev, CMD_EQ_ENABLE, [1] + [0] * 12, out_len, in_len) is not None
+        print("\nEQ bypass off (cmd %d):" % CMD_EQ_BYPASS)
+        unbypassed = query(dev, CMD_EQ_BYPASS, [0], out_len, in_len) is not None
+        results["eq enable"] = enabled and unbypassed
+
+        print("\nLive set band %d (cmd %d):" % (TEST_BAND, CMD_SET_EQ_BAND))
+        results["write"] = set_band(dev, TEST_BAND, shift, ints, out_len, in_len)
+
+        print("\nBand %d after the write (cmd %d):" % (TEST_BAND, CMD_GET_EQ_BAND))
+        after = read_band(dev, TEST_BAND, out_len, in_len)
+        results["read back matches"] = after is not None and (after[0], after[1]) == (shift, ints)
+
+        heard = ask("\nPlay some music through the Echo-B now. The test is a 6 dB dip around "
+                    "1 kHz, so voices and mids should sound a bit quieter or further away.\n"
+                    "Did the sound change? [y/n] ")
+    finally:
+        dev.close()
+
+    ask("\nNow unplug the Echo-B, plug it back in, wait a few seconds, then press Enter. ")
+    dev = open_echo_b(hid, path)
+    if dev is None:
+        print("Could not reopen it. Once it is plugged in, run:  echo_b_probe.py --restore")
+        summary(results)
+        return 2
+    try:
+        out_len, in_len = report_sizes(dev)
+        print("\nBand %d after replugging (cmd %d):" % (TEST_BAND, CMD_GET_EQ_BAND))
+        replug = read_band(dev, TEST_BAND, out_len, in_len)
+        if replug is None:
+            after_replug = "read failed"
+        elif (replug[0], replug[1]) == (shift, ints):
+            after_replug = "kept the test filter"
+        elif (replug[0], replug[1]) == FLAT_BAND:
+            after_replug = "back to flat"
+        else:
+            after_replug = "something else (%s)" % describe_band(replug[2], fs)
+
+        print("\nSet band %d back to flat (cmd %d):" % (TEST_BAND, CMD_SET_EQ_BAND))
+        results["restore"] = set_band(dev, TEST_BAND, FLAT_BAND[0], FLAT_BAND[1], out_len, in_len)
+        print("\nBand %d after restoring (cmd %d):" % (TEST_BAND, CMD_GET_EQ_BAND))
+        final = read_band(dev, TEST_BAND, out_len, in_len)
+        results["flat again"] = final is not None and (final[0], final[1]) == FLAT_BAND
+    finally:
+        dev.close()
+
+    print("\nHeard a change: %s" % {"y": "yes", "yes": "yes", "n": "no", "no": "no"}.get(heard, heard or "not answered"))
+    print("After replugging, band %d %s" % (TEST_BAND, after_replug))
+    summary(results)
+    return 0 if all(results.values()) else 2
+
+
+def restore(hid, path=None):
+    """Set the test band back to flat, as the Moondrop app does on first connect."""
+    dev = open_echo_b(hid, path)
+    if dev is None:
+        return 1
+    try:
+        out_len, in_len = report_sizes(dev)
+        print("\nSet band %d to flat (cmd %d):" % (TEST_BAND, CMD_SET_EQ_BAND))
+        ok = set_band(dev, TEST_BAND, FLAT_BAND[0], FLAT_BAND[1], out_len, in_len)
+        print("\nBand %d now (cmd %d):" % (TEST_BAND, CMD_GET_EQ_BAND))
+        final = read_band(dev, TEST_BAND, out_len, in_len)
+    finally:
+        dev.close()
+    flat = final is not None and (final[0], final[1]) == FLAT_BAND
+    summary({"restore": ok, "flat again": flat})
+    return 0 if ok and flat else 2
+
+
 def main():
-    parser = argparse.ArgumentParser(description="Read-only ECHO-B probe")
+    parser = argparse.ArgumentParser(description="ECHO-B probe (read-only unless --write-test or --restore)")
     parser.add_argument("--list", action="store_true", help="list Moondrop HID interfaces")
     parser.add_argument("--path", help="HID path to probe (from --list)")
     parser.add_argument("--dry-run", action="store_true",
                         help="print the query packets without opening a device")
+    parser.add_argument("--write-test", action="store_true",
+                        help="temporarily change EQ band %d, then set it back to flat" % TEST_BAND)
+    parser.add_argument("--restore", action="store_true",
+                        help="set EQ band %d back to flat" % TEST_BAND)
     args = parser.parse_args()
 
     if args.dry_run:
@@ -301,6 +475,13 @@ def main():
             build_message(CMD_GET_SAMPLE_RATE, [EQ_MODE_SUBCMD] + [0] * 12)))
         print("eq config:   %s" % hexdump(build_message(CMD_GET_EQ_CONFIG, [0] * 13)))
         print("eq band 1:   %s" % hexdump(build_message(CMD_GET_EQ_BAND, [0, 1] + [0] * 11)))
+        shift, ints = peaking_band(*TEST_FILTER, 48000)
+        print("eq enable:   %s" % hexdump(build_message(CMD_EQ_ENABLE, [1] + [0] * 12)))
+        print("eq bypass:   %s" % hexdump(build_message(CMD_EQ_BYPASS, [0])))
+        print("test band:   %s" % hexdump(build_message(
+            CMD_SET_EQ_BAND, [0, TEST_BAND, shift] + ints + [0] * 5)))
+        print("flat band:   %s" % hexdump(build_message(
+            CMD_SET_EQ_BAND, [0, TEST_BAND, FLAT_BAND[0]] + FLAT_BAND[1] + [0] * 5)))
         return 0
 
     try:
@@ -312,6 +493,14 @@ def main():
     if args.list:
         list_interfaces(hid)
         return 0
+    if args.restore:
+        return restore(hid, args.path)
+    if args.write_test:
+        try:
+            return write_test(hid, args.path)
+        except KeyboardInterrupt:
+            print("\nStopped. To put band %d back to flat, run:  echo_b_probe.py --restore" % TEST_BAND)
+            return 130
     return probe(hid, args.path)
 
 
