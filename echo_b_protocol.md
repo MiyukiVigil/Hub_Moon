@@ -39,6 +39,13 @@ All observed commands use n = 13 (62-byte message).
 | 90  | [90, index, 0…] | switch EQ preset/mode |
 | 346 | [62, 0…] | get current sample-rate index (result int at byte 14) |
 | 259 | [1,0,0,0] (n=4) | get chip code (int at byte 10) |
+| 346 | [90, 0…] | get current EQ mode (int at byte 14), read-only |
+| 442 | [0…] | get sample-rate index the stored EQ was designed for (int at byte 10), read-only |
+| 446 | [0, band(1..9), 0…] | read one stored band: Gain/shift byte at 18, B0 B1 B2 A0 A1 at 22/26/30/34/38 (24-bit signed), read-only |
+
+Coefficients: biquad scaled by 2^(25 − Gain) (Gain 3 → 2^22), B0..B2 = b0..b2, A0 = −a1, A1 = −a2.
+Live band 0–4 → hw band 5–9 (`shiftEQBandForFreeman3` = band + 5); flash save writes bands 1–9.
+Bands 1–4 are not reachable from the app's live path (possibly factory tuning; unverified).
 FREQ_SAMPLE_RATE index table: [8000,16000,24000,32000,44100,48000,96000,192000,384000,882000,176000].
 App always sends filterType 0 (peaking) from `sySendEqParams`, gain/Q as doubles.
 

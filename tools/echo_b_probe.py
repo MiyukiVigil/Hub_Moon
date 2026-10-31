@@ -3,9 +3,9 @@
 Read-only probe for the Moondrop ECHO-B (Conexant/Synaptics "Freeman3" chip).
 
 Checks whether Hub Moon's HID stack (hidapi) can talk to the ECHO-B at all,
-before any EQ support is written. It only sends two query commands (chip
-code, current sample rate) and never touches EQ, presets or flash.
-Protocol notes: echo_b_protocol.md.
+before any EQ support is written. It only sends query commands (chip code,
+sample rate, EQ mode, and the 9 stored EQ bands) and never changes EQ,
+presets or flash. Protocol notes: echo_b_protocol.md.
 
 Dependencies:
     pip install hidapi
@@ -17,6 +17,8 @@ Usage:
 """
 
 import sys
+import math
+import cmath
 import time
 import struct
 import argparse
@@ -31,8 +33,12 @@ REPLY_TIMEOUT_S = 1.0
 REPLY_POLL_S = 0.005
 
 CMD_GET_CHIP_CODE = 259
-CMD_GET_SAMPLE_RATE = 346
+CMD_GET_SAMPLE_RATE = 346  # CONTROL_MGR_GET_PARAMETER_VALUE
 SAMPLE_RATE_SUBCMD = 62
+EQ_MODE_SUBCMD = 90
+CMD_GET_EQ_CONFIG = 442    # sample-rate index the stored EQ was designed for
+CMD_GET_EQ_BAND = 446      # [0, band] -> Gain byte at 18, B0 B1 B2 A0 A1 at 22..41
+EQ_BANDS = range(1, 10)
 FREQ_SAMPLE_RATE = [8000, 16000, 24000, 32000, 44100, 48000, 96000, 192000,
                     384000, 882000, 176000]
 
@@ -55,6 +61,42 @@ def build_message(cmd, words):
 
 def hexdump(data):
     return " ".join("%02x" % b for b in data)
+
+
+def s24(value):
+    """Sign-extend the low 24 bits, as the device stores 24-bit coefficients."""
+    value &= 0xFFFFFF
+    return value - (1 << 24) if value & 0x800000 else value
+
+
+def decode_band(res):
+    """
+    Coefficients of one stored band as floats (b0, b1, b2, a1, a2), plus the raw
+    values. The Gain byte is a shift: coefficients are scaled by 2^(25 - Gain),
+    and A0/A1 hold -a1/-a2 of H(z) = (b0 + b1/z + b2/z^2) / (1 + a1/z + a2/z^2).
+    """
+    gain = struct.unpack_from("<b", res, 18)[0]
+    raw = [s24(v) for v in struct.unpack_from("<5i", res, 22)]
+    scale = 2.0 ** (25 - gain)
+    b0, b1, b2, na1, na2 = (v / scale for v in raw)
+    return gain, raw, (b0, b1, b2, -na1, -na2)
+
+
+def response_db(coeffs, freq, fs):
+    b0, b1, b2, a1, a2 = coeffs
+    z1 = cmath.exp(-2j * math.pi * freq / fs)
+    h = (b0 + b1 * z1 + b2 * z1 * z1) / (1 + a1 * z1 + a2 * z1 * z1)
+    return 20 * math.log10(max(abs(h), 1e-12))
+
+
+def describe_band(coeffs, fs):
+    """Largest boost or cut between 20 Hz and 20 kHz, and where it is."""
+    freqs = [20 * 1000 ** (i / 299) for i in range(300)]
+    db, freq = max(((response_db(coeffs, f, fs), f) for f in freqs if f < fs / 2),
+                   key=lambda p: abs(p[0]))
+    if abs(db) < 0.05:
+        return "flat"
+    return "%+.1f dB around %d Hz" % (db, round(freq))
 
 
 def report_lengths(descriptor):
@@ -193,6 +235,7 @@ def probe(hid, path=None):
             print("  chip code %d (0x%x)" % (code, code & 0xFFFFFFFF))
         results["chip code"] = res is not None
 
+        hz = None
         print("\nSample rate (cmd %d):" % CMD_GET_SAMPLE_RATE)
         res = query(dev, CMD_GET_SAMPLE_RATE, [SAMPLE_RATE_SUBCMD] + [0] * 12, out_len, in_len)
         if res and len(res) >= 18:
@@ -200,6 +243,39 @@ def probe(hid, path=None):
             hz = FREQ_SAMPLE_RATE[idx] if 0 <= idx < len(FREQ_SAMPLE_RATE) else None
             print("  index %d -> %s" % (idx, "%d Hz" % hz if hz else "unknown"))
         results["sample rate"] = res is not None
+        fs = hz if res and hz else 48000
+
+        print("\nEQ mode (cmd %d [%d]):" % (CMD_GET_SAMPLE_RATE, EQ_MODE_SUBCMD))
+        res = query(dev, CMD_GET_SAMPLE_RATE, [EQ_MODE_SUBCMD] + [0] * 12, out_len, in_len)
+        if res and len(res) >= 18:
+            print("  EQ mode %d" % struct.unpack_from("<i", res, 14)[0])
+        results["eq mode"] = res is not None
+
+        print("\nStored EQ sample rate (cmd %d):" % CMD_GET_EQ_CONFIG)
+        res = query(dev, CMD_GET_EQ_CONFIG, [0] * 13, out_len, in_len)
+        if res and len(res) >= 14:
+            idx = struct.unpack_from("<i", res, 10)[0]
+            eq_hz = FREQ_SAMPLE_RATE[idx] if 0 <= idx < len(FREQ_SAMPLE_RATE) else None
+            print("  index %d -> %s" % (idx, "%d Hz" % eq_hz if eq_hz else "unknown"))
+            fs = eq_hz or fs
+        results["eq config"] = res is not None
+
+        bands = []
+        for band in EQ_BANDS:
+            print("\nEQ band %d (cmd %d):" % (band, CMD_GET_EQ_BAND))
+            res = query(dev, CMD_GET_EQ_BAND, [0, band] + [0] * 11, out_len, in_len)
+            if res and len(res) >= 42:
+                gain, raw, coeffs = decode_band(res)
+                print("  shift %d  raw %s" % (gain, raw))
+                print("  b0 %.6f b1 %.6f b2 %.6f a1 %.6f a2 %.6f" % coeffs)
+                bands.append((band, describe_band(coeffs, fs)))
+            else:
+                bands.append((band, "read failed"))
+        results["eq bands"] = all(desc != "read failed" for _, desc in bands)
+
+        print("\nStored EQ (evaluated at %d Hz):" % fs)
+        for band, desc in bands:
+            print("  band %d: %s" % (band, desc))
     finally:
         dev.close()
 
@@ -221,6 +297,10 @@ def main():
         print("chip code:   %s" % hexdump(build_message(CMD_GET_CHIP_CODE, [1, 0, 0, 0])))
         print("sample rate: %s" % hexdump(
             build_message(CMD_GET_SAMPLE_RATE, [SAMPLE_RATE_SUBCMD] + [0] * 12)))
+        print("eq mode:     %s" % hexdump(
+            build_message(CMD_GET_SAMPLE_RATE, [EQ_MODE_SUBCMD] + [0] * 12)))
+        print("eq config:   %s" % hexdump(build_message(CMD_GET_EQ_CONFIG, [0] * 13)))
+        print("eq band 1:   %s" % hexdump(build_message(CMD_GET_EQ_BAND, [0, 1] + [0] * 11)))
         return 0
 
     try:
