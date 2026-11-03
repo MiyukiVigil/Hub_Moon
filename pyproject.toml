@@ -55,6 +55,7 @@ gui = [
   # the window icon, loaded by @image-url from app.slint at startup — data, not an
   # asset the build consumes, so it has to be in the installed package
   "ui/*.png",
+  "ui/assets/devices/*.png",
 ]
 
 # Ruff is configured to find bugs, not to restyle a working codebase. The default

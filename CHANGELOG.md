@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- ECHO-B (`0x149B`) support, in testing: 9-band PEQ on both channels, designed for the
+  DAC's current sample rate and redesigned when it changes, with pre-gain carried on
+  band 1. Writes are live only; save keeps the curve on this computer and it is written
+  again on every connect. Flash is never touched. The header shows the DAC's real DSP rate.
+
+## [2.1.0] - 2026-10-11
+
+Prepared locally for the next update.
+
+### Added
+
+- DAWN PRO2 firmware 1.5 USB sample-rate/sample-width badge and DAC status panel,
+  with read-only channel gains and estimated EQ headroom.
+- A locally remembered DAC master-volume ceiling for Hub Moon commands, and EQ readback comparison after
+  unplug/reconnect. Physical buttons can exceed the app ceiling.
+- A live left/right balance slider with Center balance in DAC status on DAWN PRO2
+  firmware 1.5. It attenuates the opposite channel by up to 6 dB, preserves common
+  attenuation, verifies writes, and does not save to flash. Older readbacks do not
+  interrupt dragging. The status panel scrolls on smaller windows.
+- The connected device chip opens Device info with model, firmware, USB IDs,
+  serial when reported, and the existing DAC controls. DAWN PRO2 uses Moondrop's
+  official product thumbnail in the chip and panel.
+
 ## [2.0.0] - 2026-10-06
 
 Prepared for the stable channel. Includes the 2.0 beta's unified library,

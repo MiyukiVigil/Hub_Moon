@@ -214,7 +214,7 @@ component TextBtn inherits Rectangle {
         padding-left: 14px;
         padding-right: 14px;
         spacing: 7px;
-        Sym {
+        if root.icon != "": Sym {
             d: root.icon;
             sz: 15px;
             width: root.icon == "" ? 0px : 15px;
@@ -271,7 +271,7 @@ component HoldBtn inherits Rectangle {
         padding-left: 14px;
         padding-right: 14px;
         spacing: 7px;
-        Sym {
+        if root.icon != "": Sym {
             d: root.icon;
             sz: 15px;
             width: 15px;
@@ -4449,12 +4449,26 @@ export component MainWindow inherits Window {
     in property <string> device-name: "No device";
     in property <string> firmware;
     in property <int> band-count: 8;
+    in property <string> dsp-khz: "96";
     in property <float> pregain;
     in property <bool> supports-pregain: true;
     in property <float> global-gain;
     in property <float> physical-volume;
     in property <bool> supports-physical-volume;
     in property <int> physical-eq-mode: -1;
+    in property <string> stream-label;
+    in property <string> channel-label;
+    in property <bool> dawn-pro2;
+    in property <string> device-details;
+    in property <string> flash-check;
+    in property <float> volume-limit;
+    in property <float> balance;
+    in property <bool> supports-balance;
+    in property <string> balance-label;
+    callback set-balance(float);
+    in-out property <bool> diagnostics-open: false;
+    callback set-volume-limit(float);
+    callback arm-flash-check();
     in property <bool> tray-available: false;
     in-out property <bool> close-dialog-open: false;
     in property <int> slot: -1;
@@ -4779,15 +4793,15 @@ export component MainWindow inherits Window {
                         font-weight: 700;
                     }
                     Text {
-                        text: root.narrow ? "\{root.band-count}-band · 96 kHz"
-                            : "\{root.band-count}-band parametric EQ · DSP @ 96 kHz";
+                        text: root.narrow ? "\{root.band-count}-band · \{root.dsp-khz} kHz"
+                            : "\{root.band-count}-band parametric EQ · DSP @ \{root.dsp-khz} kHz";
                         color: Theme.faint;
                         font-family: Theme.mono;
                         font-size: 9px;
                     }
                 }
 
-                // device chip — click to re-scan
+                // Device chip opens info when connected, or re-scans without a DAC.
                 Rectangle {
                     y: 16px;
                     height: 30px;
@@ -4797,12 +4811,29 @@ export component MainWindow inherits Window {
                     border-width: 1px;
                     border-color: root.connected ? Theme.accent-line : Theme.line;
                     animate background, border-color { duration: Theme.quick; easing: Theme.ease-state; }
-                    dev-touch := TouchArea { mouse-cursor: pointer; clicked => { root.refresh(); } }
+                    dev-touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            if root.connected { root.diagnostics-open = true; }
+                            else { root.refresh(); }
+                        }
+                    }
                     chip := HorizontalLayout {
                         padding-left: 11px;
                         padding-right: 11px;
                         spacing: 8px;
-                        Sym {
+                        if root.connected && root.dawn-pro2: Rectangle {
+                            width: 24px;
+                            height: 30px;
+                            Image {
+                                y: (parent.height - self.height) / 2;
+                                source: @image-url("assets/devices/dawn-pro2.png");
+                                width: 24px;
+                                height: 24px;
+                                image-fit: contain;
+                            }
+                        }
+                        if !root.connected || !root.dawn-pro2: Sym {
                             d: root.connected ? Icons.headphones : Icons.usb-off;
                             sz: 15px;
                             width: 15px;
@@ -4834,10 +4865,7 @@ export component MainWindow inherits Window {
                     border-width: 1px;
                     border-color: Theme.line;
                     fw := Text {
-                        text: root.physical-eq-mode == 8 ? "EQ off · edits staged"
-                            : root.physical-eq-mode == 9 ? "Custom EQ · live"
-                            : root.physical-eq-mode >= 0 ? "EQ enabled · live"
-                            : "fw \{root.firmware}";
+                        text: root.physical-eq-mode >= 0 ? root.stream-label : "fw \{root.firmware}";
                         color: Theme.sub;
                         font-family: Theme.mono;
                         font-size: 11px;
@@ -4846,6 +4874,7 @@ export component MainWindow inherits Window {
                         horizontal-alignment: center;
                         vertical-alignment: center;
                     }
+                    TouchArea { mouse-cursor: pointer; clicked => { root.diagnostics-open = true; } }
                 }
 
                 // One spacer, so the whole right-hand group — pills and icons — sits
@@ -5580,6 +5609,87 @@ export component MainWindow inherits Window {
         width: root.width;
         height: root.height;
         done => { root.splash-done = true; }
+    }
+
+    if root.diagnostics-open: Rectangle {
+        width: parent.width;
+        height: parent.height;
+        background: #00000066;
+        TouchArea { }
+        Rectangle {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: min(520px, parent.width - 24px);
+            height: min(570px, parent.height - 24px);
+            border-radius: Theme.r-lg;
+            background: Theme.card;
+            border-width: 1px;
+            border-color: Theme.line;
+            VerticalLayout {
+                padding: 20px;
+                spacing: 12px;
+                HorizontalLayout {
+                    Text { text: "Device info"; color: Theme.text; font-size: 18px; font-weight: 700; }
+                    TextBtn { label: "Close"; clicked => { root.diagnostics-open = false; } }
+                }
+                Flickable {
+                    vertical-stretch: 1;
+                    viewport-width: self.width;
+                    viewport-height: max(self.height, dac-details.preferred-height);
+                    dac-details := VerticalLayout {
+                        width: parent.width;
+                        height: self.preferred-height;
+                        spacing: 12px;
+                HorizontalLayout {
+                    spacing: 12px;
+                    if root.connected && root.dawn-pro2: Image {
+                        source: @image-url("assets/devices/dawn-pro2.png");
+                        width: 64px;
+                        height: 64px;
+                        image-fit: contain;
+                    }
+                    VerticalLayout {
+                        spacing: 5px;
+                        Text { text: root.device-name; color: Theme.text; font-size: 16px; font-weight: 600; }
+                        Text { text: "Firmware " + (root.firmware != "" ? root.firmware : "unavailable"); color: Theme.sub; font-size: 12px; }
+                        Text { text: root.device-details; color: Theme.sub; font-size: 11px; wrap: word-wrap; }
+                    }
+                }
+                TextBtn { label: "Refresh device"; enabled: !root.busy; clicked => { root.refresh(); } }
+                Text { text: root.stream-label; color: Theme.accent; font-family: Theme.mono; font-size: 16px; }
+                Text { text: "Negotiated USB format; may remain visible while paused"; color: Theme.sub; font-size: 11px; }
+                Text { text: root.physical-eq-mode == 8 ? "EQ off" : root.physical-eq-mode >= 0 ? "EQ enabled" : "EQ mode unavailable"; color: Theme.sub; }
+                Text { text: root.channel-label; color: Theme.sub; }
+                Text { text: "Playback activity and live clipping: not yet verified"; color: Theme.sub; font-size: 11px; }
+                Text { text: "Estimated EQ headroom: " + root.headroom-hint; color: root.clipping ? Theme.accent : Theme.sub; font-size: 11px; }
+                SliderCard {
+                    label: "CHANNEL BALANCE";
+                    caption: "L ← center → R · all apps";
+                    minimum: -6;
+                    maximum: 6;
+                    value: root.balance;
+                    enabled: root.supports-balance && !root.busy;
+                    readout: root.balance-label;
+                    moved(v) => { root.set-balance(v); }
+                }
+                TextBtn { label: "Center balance"; enabled: root.supports-balance && !root.busy; clicked => { root.set-balance(0); } }
+                SliderCard {
+                    label: "DAC VOLUME CEILING";
+                    caption: "all apps · buttons can exceed";
+                    minimum: -60;
+                    maximum: 0;
+                    value: root.volume-limit;
+                    readout: "\{round(root.volume-limit)} dB";
+                    moved(v) => { root.set-volume-limit(v); }
+                }
+                Text { text: "Limits Hub Moon's DAC volume commands. Changing DAC volume affects every app using it."; color: Theme.sub; font-size: 11px; wrap: word-wrap; }
+                Text { text: root.flash-check; color: Theme.sub; font-size: 11px; wrap: word-wrap; }
+                TextBtn { label: "Check EQ after reconnect"; enabled: root.connected && !root.busy; clicked => { root.arm-flash-check(); } }
+                Text { text: "Reads the current curve, then compares after you unplug and reconnect. Does not save EQ."; color: Theme.sub; font-size: 11px; wrap: word-wrap; }
+                    }
+                }
+            }
+        }
     }
 
     if root.close-dialog-open: Rectangle {

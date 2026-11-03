@@ -420,6 +420,7 @@ def load_settings():
 
     return {"schema": SETTINGS_SCHEMA,
             "dark": bool(data.get("dark", False)),
+            "volume_limit": _clamp_int(data.get("volume_limit", 0), -60, 0),
             "readout": bool(data.get("readout", False)),
             "accent": int(accent) if isinstance(accent, (int, float)) else 0,
             # The surfaces and the ink, independent of the accent hue. Index into
@@ -555,6 +556,7 @@ class DeviceWorker(_Worker):
         self._post = post
         self._dev = None
         self._physical_volume_target_generation = 0
+        self._balance_target_generation = 0
         self._staged_eq = {}
         self._staged_pregain = None
 
@@ -579,7 +581,7 @@ class DeviceWorker(_Worker):
             bands.append(b if b else _disabled_band(i))
         info = dev.hid_info
         name = info.get("product_string") or mc.SUPPORTED_DEVICES.get(
-            dev.product_id, "Moondrop DAC")
+            dev.product_id) or mc.ECHO_B_DEVICES.get(dev.product_id, "Moondrop DAC")
         active = dev.get_active_eq_index()
         firmware = dev.get_firmware_version()
         physical_volume = (dev.get_physical_volume()
@@ -589,6 +591,9 @@ class DeviceWorker(_Worker):
             "deviceName": name,
             "productId": dev.product_id,
             "firmware": firmware,
+            "streamStatus": self._stream_now(),
+            "balance": self._balance_now(),
+            "deviceSerial": dev.hid_info.get("serial_number") or "",
             "physicalVolume": physical_volume,
             "physicalEqMode": dev.get_physical_eq_mode() if getattr(dev, "supports_eq_mode", False) else None,
             "activeProfile": -1 if active is None else int(active),
@@ -597,6 +602,8 @@ class DeviceWorker(_Worker):
             "pregain": dev.get_pregain(),
             "globalGain": dev.get_global_gain(),
             "bandCount": dev.bands,
+            "dspRate": getattr(dev, "sample_rate", None) or mc.FS,
+            "savesOnHost": isinstance(dev, mc.EchoBDevice),
             "bands": bands,
         }
 
@@ -620,15 +627,43 @@ class DeviceWorker(_Worker):
         elif present and getattr(self._dev, "supports_physical_volume", False):
             try:
                 self._post("physical_volume", self._dev.get_physical_volume())
+                self._post("balance", self._balance_now())
                 if getattr(self._dev, "supports_eq_mode", False):
                     mode = self._dev.get_physical_eq_mode()
                     self._post("eq_mode", mode)
+                    try:
+                        self._post("stream_status", self._stream_now())
+                    except (OSError, ValueError):
+                        self._post("stream_status", None)
                     if mode != 8:
                         self._flush_staged_eq()
             except (OSError, ValueError):
                 # Reopen on the next probe rather than repeatedly using a stale HID.
                 self._close()
                 self._post("physical_volume_unavailable", None)
+        elif present and hasattr(self._dev, "check_sample_rate"):
+            # ECHO-B coefficients are designed for one sample rate; redesign on a change.
+            try:
+                self._dev.check_sample_rate()
+            except (OSError, ValueError):
+                self._close()
+
+    def _balance_now(self):
+        if not getattr(self._dev, "supports_eq_mode", False):
+            return None
+        try:
+            trims = self._dev.get_channel_trims()
+            return trims[1] - trims[0] if trims is not None else None
+        except (OSError, ValueError):
+            return None
+
+    def _stream_now(self):
+        if not getattr(self._dev, "supports_eq_mode", False):
+            return None
+        try:
+            return self._dev.get_stream_status()
+        except (OSError, ValueError):
+            return None
 
     def refresh(self):
         self._post("busy", True)
@@ -644,7 +679,7 @@ class DeviceWorker(_Worker):
                     self._post("no_device", "No Moondrop DAC connected.")
                 return
             try:
-                self._dev = mc.MoondropDevice(infos[0])
+                self._dev = mc.open_device(infos[0])
             except Exception as exc:
                 self._post("no_device",
                            "Could not open the DAC (%s). You may need a udev rule or sudo." % exc)
@@ -775,6 +810,15 @@ class DeviceWorker(_Worker):
             self._close()
             self._post("physical_volume_unavailable", None)
 
+    def set_balance(self, db, generation):
+        if self._dev is None or generation != self._balance_target_generation:
+            return
+        try:
+            self._post("balance_written", (generation, self._dev.set_balance(db)))
+        except Exception as exc:
+            self._post("error", "Balance failed: %s" % exc)
+            self._post("balance_written", (generation, self._balance_now()))
+
     def set_slot(self, index):
         """Ask for a profile, then report the one the device is actually on.
 
@@ -830,10 +874,19 @@ class DeviceWorker(_Worker):
             self._dev.save_eq_to_flash()
             self._dev.save_offset_to_flash()
             self._post("saved", None)
+            self.capture_flash_reference()
         except Exception as exc:
             self._post("error", "Save to flash failed: %s" % exc)
         finally:
             self._post("busy", False)
+
+    def capture_flash_reference(self):
+        if self._dev is None:
+            return
+        try:
+            self._post("flash_reference", self._read_all())
+        except Exception as exc:
+            self._post("error", "Could not read verification baseline: %s" % exc)
 
     def shutdown_device(self):
         self._close()
@@ -1301,6 +1354,15 @@ class Bridge:
         self.global_gain = 0.0
         self.physical_volume = 0.0
         self.tray = None
+        self.stream_status = None
+        self.device_serial = ""
+        self.balance = None
+        self._balance_generation = 0
+        self._balance_pending = False
+        self.volume_limit = 0.0
+        self.flash_check = "Not checked after a power cycle"
+        self._flash_reference = None
+        self._flash_disconnected = False
         self.physical_eq_mode = -1
         self.supports_physical_volume = False
         self._physical_volume_generation = 0
@@ -1318,6 +1380,8 @@ class Bridge:
         # bands would snap to whatever it holds.
         self.on_builtin = False
         self.band_count = 8
+        self.dsp_rate = mc.FS
+        self.saves_on_host = False
         self.bands = [dict(b) for b in DEMO_BANDS]
         self.selected = -1
         self.active_preset = ""
@@ -1330,6 +1394,7 @@ class Bridge:
         self._reverting = False
 
         self.settings = load_settings()
+        self.volume_limit = float(self.settings["volume_limit"])
         # First run gets the welcome screen. After that it is on request only — an
         # opening screen you have already read is an obstacle, not a welcome.
         self.welcome_open = not self.settings["seen_welcome"]
@@ -1483,6 +1548,9 @@ class Bridge:
         window.set_pregain = self.set_pregain
         window.set_global_gain = self.set_global_gain
         window.set_physical_volume = self.set_physical_volume
+        window.set_volume_limit = self.set_volume_limit
+        window.set_balance = self.set_balance
+        window.arm_flash_check = self.arm_flash_check
         window.match_headroom = self.match_headroom
         window.step_slot = self.step_slot
         window.toggle_custom_eq = self.toggle_custom_eq
@@ -1607,6 +1675,11 @@ class Bridge:
             self.global_gain = round(state["globalGain"], 1)
             physical = state.get("physicalVolume")
             mode = state.get("physicalEqMode")
+            self.stream_status = state.get("streamStatus")
+            if not self._balance_pending:
+                self.balance = state.get("balance")
+            self.device_serial = state.get("deviceSerial", "")
+            self._check_flash_reconnect(state)
             self.physical_eq_mode = -1 if mode is None else int(mode)
             if not self._physical_volume_pending:
                 self.supports_physical_volume = physical is not None
@@ -1618,6 +1691,8 @@ class Bridge:
             # nothing: `apply_bands` already re-reads to show what the DAC took.
             self._note_slot(learn=not clean)
             self.band_count = state["bandCount"]
+            self.dsp_rate = state.get("dspRate", mc.FS)
+            self.saves_on_host = state.get("savesOnHost", False)
             self.bands = [dict(b) for b in state["bands"]]
             # The device can hold bands but not their name, so the name is read back
             # from this machine and re-attached by fingerprint. `describe` decides
@@ -1630,6 +1705,20 @@ class Bridge:
                 self.toast("")
                 if self.pristine is None:
                     self._snapshot()
+        elif kind == "balance":
+            if self._balance_pending or self.balance == payload:
+                return
+            self.balance = payload
+        elif kind == "balance_written":
+            generation, actual = payload
+            if generation != self._balance_generation:
+                return
+            self._balance_pending = False
+            self.balance = actual
+        elif kind == "stream_status":
+            if self.stream_status == payload:
+                return
+            self.stream_status = payload
         elif kind == "eq_mode":
             if self.physical_eq_mode == int(payload):
                 return
@@ -1648,6 +1737,7 @@ class Bridge:
             self._physical_volume_pending = False
             self.physical_volume = float(actual)
         elif kind == "physical_volume_unavailable":
+            self._invalidate_balance()
             self.physical_eq_mode = -1
             self._physical_volume_generation += 1
             self.dev._physical_volume_target_generation = self._physical_volume_generation
@@ -1664,6 +1754,8 @@ class Bridge:
             self._note_slot()
             self.push()
         elif kind == "no_device":
+            self._invalidate_balance()
+            self.stream_status = None
             self.connected = False
             self.device_name = "Demo — no DAC"
             self.firmware = ""
@@ -1709,16 +1801,22 @@ class Bridge:
             # nothing plugged in and wrong here — it would throw a full-screen
             # greeting over the work of somebody who just pulled a cable out and
             # knows perfectly well what they did.
+            self._flash_disconnected = self._flash_reference is not None
             log.info("the device went away")
             self._greeted = True
             self._handle("no_device", "The DAC was unplugged.")
             return                      # the inner call already pushed
         elif kind == "busy":
             self.busy = bool(payload)
+        elif kind == "flash_reference":
+            self._remember_flash(payload)
         elif kind == "saved":
+            if payload:
+                self._remember_flash(payload)
             self.dirty = False
             self._snapshot()
-            self.toast("Written to flash.", False)
+            self.toast("Saved on this computer; written again each time the DAC connects."
+                       if self.saves_on_host else "Written to flash.", False)
         elif kind == "error":
             if payload:
                 self.toast(str(payload), True)
@@ -2849,7 +2947,12 @@ class Bridge:
     def set_physical_volume(self, db):
         if not self.connected or not self.supports_physical_volume:
             return
-        db = _clamp(float(db), -60.0, 0.0)
+        db = _clamp(float(db), -60.0, self.volume_limit)
+        # The DAC rounds to 153/256 dB steps. Keep that rounded result at or
+        # below the app ceiling, including the non-integral minimum step.
+        if self.volume_limit < 0:
+            cap = max(-60.0, math.floor(self.volume_limit * 256 / 153) * 153 / 256)
+            db = min(db, cap)
         self.physical_volume = db
         self._physical_volume_generation += 1
         generation = self._physical_volume_generation
@@ -2863,6 +2966,64 @@ class Bridge:
                     and self.supports_physical_volume and not self.handing_over):
                 self.dev.submit(self.dev.set_physical_volume, db, generation)
         slint.Timer.single_shot(timedelta(milliseconds=75), send_latest)
+
+    def _invalidate_balance(self):
+        self.balance = None
+        self._balance_pending = False
+        self._balance_generation += 1
+        self.dev._balance_target_generation = self._balance_generation
+
+    def set_balance(self, db):
+        if not self.connected or self.balance is None or self.handing_over:
+            return
+        db = round(_clamp(float(db), -6, 6) * 256) / 256
+        self.balance = db
+        self._balance_generation += 1
+        generation = self._balance_generation
+        self.dev._balance_target_generation = generation
+        self._balance_pending = True
+        self.push()
+
+        def send_latest():
+            if (generation == self._balance_generation and self.connected
+                    and self.balance is not None and not self.handing_over):
+                self.dev.submit(self.dev.set_balance, db, generation)
+        slint.Timer.single_shot(timedelta(milliseconds=75), send_latest)
+
+    def set_volume_limit(self, db):
+        # An app slider ceiling, not a guarantee against physical-button changes.
+        self.volume_limit = float(round(_clamp(float(db), -60.0, 0.0)))
+        self.settings["volume_limit"] = self.volume_limit
+        save_settings(self.settings)
+        if self.connected and self.supports_physical_volume and self.physical_volume > self.volume_limit:
+            self.set_physical_volume(self.volume_limit)
+        self.push()
+
+    def _remember_flash(self, state):
+        self._flash_reference = (state["productId"], state.get("deviceSerial", ""),
+                                 tuning.fingerprint(state["bands"]), round(state["pregain"], 1),
+                                 round(state["globalGain"], 1))
+        self._flash_disconnected = False
+        self.flash_check = "Unplug and reconnect this DAC to check saved EQ"
+
+    def arm_flash_check(self):
+        if not self.connected or self.busy:
+            return
+        # Refresh/readback baseline only: never writes or saves the editor curve.
+        self.dev.submit(self.dev.capture_flash_reference)
+
+    def _check_flash_reconnect(self, state):
+        if not self._flash_disconnected or self._flash_reference is None:
+            return
+        pid, serial, curve, pregain, gain = self._flash_reference
+        if state["productId"] != pid or state.get("deviceSerial", "") != serial:
+            self.flash_check = "Reconnect the DAC used for this check"
+            return
+        matches = (tuning.fingerprint(state["bands"]) == curve
+                   and round(state["pregain"], 1) == pregain
+                   and round(state["globalGain"], 1) == gain)
+        self.flash_check = "Readback matches after reconnect" if matches else "Readback differs after reconnect"
+        self._flash_disconnected = False
 
     def match_headroom(self):
         self.set_pregain(suggest_pregain(self.bands))
@@ -3471,9 +3632,24 @@ class Bridge:
         w.busy = self.busy
         w.dirty = self.dirty
         w.device_name = self.device_name
+        w.dawn_pro2 = self.connected and self.product_id == 0x011D
+        w.device_details = ("USB %04X:%04X · %d EQ bands\nSerial: %s" %
+                            (mc.MOONDROP_VID, self.product_id, self.band_count,
+                             self.device_serial or "not reported")) if self.connected else "DAC disconnected"
         w.firmware = self.firmware or ""
+        w.volume_limit = self.volume_limit
+        w.balance = float(_clamp(self.balance or 0, -6, 6))
+        w.supports_balance = self.connected and self.balance is not None
+        w.balance_label = ("Unavailable" if self.balance is None else "Centered"
+                           if abs(self.balance) < 1 / 256 else
+                           "%s %.1f dB" % ("R" if self.balance > 0 else "L", abs(self.balance)))
+        w.flash_check = self.flash_check
+        st = self.stream_status if self.connected else None
+        w.stream_label = ("%d-bit / %g kHz" % (st["bits"], st["rate"] / 1000)) if st else "USB format unavailable"
+        w.channel_label = ("USB gain L %+.1f dB / R %+.1f dB" % (st["left_db"], st["right_db"])) if st else "Channel gain unavailable"
         w.physical_eq_mode = self.physical_eq_mode
         w.band_count = self.band_count
+        w.dsp_khz = "%g" % (self.dsp_rate / 1000)
         w.pregain = float(self.pregain)
         w.supports_pregain = self.supports_pregain
         w.global_gain = float(self.global_gain)

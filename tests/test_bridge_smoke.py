@@ -90,6 +90,33 @@ def test_tray_volume_window_compiles_and_accepts_synced_values():
     assert popup.volume == -21
 
 
+def test_flash_comparison_requires_disconnect_and_matching_device(bridge):
+    state = dict(productId=0x011D, deviceSerial='unit-a', bands=bridge.bands,
+                 pregain=-3, globalGain=0)
+    bridge._remember_flash(state)
+    bridge._check_flash_reconnect(state)
+    assert 'Unplug' in bridge.flash_check
+    bridge._flash_disconnected = True
+    bridge._check_flash_reconnect(dict(state, deviceSerial='unit-b'))
+    assert bridge._flash_disconnected
+    bridge._check_flash_reconnect(state)
+    assert bridge.flash_check == 'Readback matches after reconnect'
+    bridge._flash_disconnected = True
+    bridge._check_flash_reconnect(dict(state, pregain=-6))
+    assert bridge.flash_check == 'Readback differs after reconnect'
+
+
+def test_app_ceiling_clamps_requests_without_overriding_button_readback(bridge):
+    bridge.connected = True
+    bridge.supports_physical_volume = True
+    bridge.volume_limit = -10
+    bridge.set_physical_volume(-2)
+    assert bridge.physical_volume <= -10
+    bridge._physical_volume_pending = False
+    bridge._handle('physical_volume', -2)
+    assert bridge.physical_volume == -2
+
+
 def test_button_volume_update_does_not_dirty_eq_or_write_device(bridge):
     bridge.dirty = False
     bridge._handle('physical_volume', -3825 / 256)
@@ -125,6 +152,37 @@ def test_volume_drag_keeps_latest_target_and_ignores_stale_readbacks(bridge, mon
     assert not bridge.dirty
     bridge._handle('physical_volume', -21)
     assert bridge.win.physical_volume == -21
+
+
+def test_balance_drag_ignores_old_reads_and_disconnect_cancels_writes(bridge, monkeypatch):
+    callbacks = []
+    jobs = []
+    monkeypatch.setattr(slint.Timer, 'single_shot', lambda delay, fn: callbacks.append(fn))
+    bridge.dev.submit = lambda fn, *args: jobs.append((fn.__name__, args))
+    bridge.connected = True
+    bridge.balance = 0
+    bridge.dirty = False
+    bridge.set_balance(-3)
+    bridge.set_balance(4)
+    generation = bridge._balance_generation
+    bridge._handle('balance', 0)
+    bridge._handle('balance_written', (generation - 1, -3))
+    assert bridge.win.balance == 4
+    for callback in callbacks:
+        callback()
+    assert jobs == [('set_balance', (4, generation))]
+    bridge._handle('balance_written', (generation, 4))
+    assert not bridge._balance_pending and not bridge.dirty
+    callbacks.clear()
+    bridge.set_balance(2)
+    bridge._handle('no_device', 'Disconnected')
+    jobs.clear()
+    for callback in callbacks:
+        callback()
+    assert jobs == []
+    assert not bridge.win.supports_balance
+    bridge._handle('balance_written', (generation, 4))
+    assert bridge.balance is None
 
 
 def test_disconnect_cancels_delayed_volume_drag(bridge, monkeypatch):

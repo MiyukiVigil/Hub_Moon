@@ -9,6 +9,12 @@ installed from a release.
 
 
 NOTES = {
+    '2.1.0': [
+        'DAWN PRO2 firmware 1.5 USB sample-rate/sample-width badge and DAC status panel, with read-only channel gains and estimated EQ headroom.',
+        'A locally remembered DAC master-volume ceiling for Hub Moon commands, and EQ readback comparison after unplug/reconnect.',
+        'A live left/right balance slider with Center balance in DAC status on DAWN PRO2 firmware 1.5.',
+        'The connected device chip opens Device info with model, firmware, USB IDs, serial when reported, and the existing DAC controls.',
+    ],
     '2.0.0': [
         "Physical volume remains connected at the DAC's minimum button setting, including its final step below the nominal range.",
         'Volume drags no longer replay queued positions or change on mouse hover.',

@@ -34,6 +34,29 @@ when the tray is available. **Quit Hub Moon** exits directly. All tray actions s
 the window's device connection. Tray availability on other desktops depends on
 their native menu backend; the main window still works when no tray is available.
 
+On DAWN PRO2 firmware 1.5, the format badge reads USB sample rate and sample
+width directly from the DAC. Click it or the device chip for **Device info**,
+including model, firmware, USB identifiers, serial (when reported), separate
+USB channel gains and estimated EQ headroom. DAWN PRO2 shows its official product
+thumbnail in the chip and info panel. The negotiated format can remain
+visible while playback is paused; it is not an audio activity meter.
+
+The **DAC volume ceiling** caps master-volume requests from Hub Moon and is
+remembered locally. DAC master volume affects every app playing through the DAC;
+this is not a per-application Windows volume control. Physical DAC buttons and
+other applications can exceed this ceiling.
+**Check EQ after reconnect** reads a baseline without writing it, then compares
+EQ bands, pre-gain, and volume trim after an observed unplug/reconnect in this
+app session. Use the same DAC; devices without a USB serial cannot be uniquely
+distinguished. Saving to the DAC also arms this comparison automatically.
+The **Channel balance** slider shifts sound left or right by attenuating the
+opposite channel by up to 6 dB. **Center balance** restores equal channel trims,
+preserving any common attenuation. Balance affects all playback through the DAC,
+is read back live, and does not write flash or boost either channel.
+A hardware-enforced ceiling and live DSP clipping remain unverified. Pause tests
+also showed the USB audio engine can stay active while Tidal is paused, so the
+app does not claim to detect audible playback from its engine state.
+
 Everything below documents the **command line**, which is the same engine with a different front.
 Reach for it to script something, to drive Hub Moon from another program (see *Building a front-end
 on this*), or because you would rather not have a window open. It is not the reduced version — the
@@ -121,6 +144,12 @@ Vendor ID `0x35D8`. Names, IDs, and the per-device columns below are read out of
 | `0x98D5` | E.S. combo | no | **4** | yes |
 
 Rays, MOONRIVER 3, and FreeDSP Pro report no pre-gain support in the app's registry; `--set-pregain` warns and writes anyway, since whether the firmware ignores it is untested.
+
+### ECHO-B (`0x149B`), in testing
+
+The ECHO-B uses a different chip (Conexant CX31988) and a different protocol, worked out on a tester's device in issue #1 (notes in `echo_b_protocol.md`). It has 9 bands, applied to both channels, and the filters are designed for the sample rate it is running at, redesigned when that changes. Pre-gain is applied through band 1, since the chip has none of its own.
+
+Hub Moon never writes the ECHO-B's flash. The chip loses live EQ when unplugged and stores only filter coefficients, so **save** keeps the curve on this computer and Hub Moon writes it again each time the ECHO-B connects. Without Hub Moon running, it plays flat.
 
 ### Not supported: Old Fashioned (`0x0122`)
 

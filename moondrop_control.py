@@ -29,7 +29,7 @@ import argparse
 # bundle, the GUI shows it, and the updater compares against it. Everything that
 # used to carry its own copy — and had already drifted, the .app was still
 # announcing 0.2.0 at 1.0.0 — now asks this.
-__version__ = "2.0.0"
+__version__ = "2.1.0"
 
 def system_env():
     """The environment to spawn a *system* program with.
@@ -816,11 +816,12 @@ def _echo_b_db(coeffs, scale, zs):
     return out
 
 
-def echo_b_coefficients(f, gain, Q, filter_type, fs):
+def echo_b_coefficients(f, gain, Q, filter_type, fs, level_db=0.0):
     """
     Design one ECHO-B band at sample rate fs: returns (shift, [B0, B1, B2, A0, A1]).
     The shift is the smallest that fits all five in 24 bits, which is also what
-    Moondrop's app picks.
+    Moondrop's app picks. level_db scales the numerator, which is how pre-gain is
+    carried: the chip has no pre-gain of its own.
 
     Rounding each coefficient on its own is fine above ~100 Hz, but a low corner
     puts the poles almost on z = 1, where 1 - A0 - A1 is only a few LSB wide (about
@@ -829,10 +830,14 @@ def echo_b_coefficients(f, gain, Q, filter_type, fs):
     pair and then the numerator by a few LSB and keep whatever lands closest. That
     gets within 0.4 dB at 20 Hz / 48 kHz and 0.1 dB from 125 Hz up.
     """
+    level = 10 ** (level_db / 20)
     if filter_type == "disabled":
-        return ECHO_B_FLAT[0], list(ECHO_B_FLAT[1])
-    num, den = calculate_biquad(f, gain, Q, filter_type, fs)
-    floats = [den[0], den[1], den[2], -num[1], -num[2]]
+        if not level_db:
+            return ECHO_B_FLAT[0], list(ECHO_B_FLAT[1])
+        floats = [level, 0.0, 0.0, 0.0, 0.0]
+    else:
+        num, den = calculate_biquad(f, gain, Q, filter_type, fs)
+        floats = [den[0] * level, den[1] * level, den[2] * level, -num[1], -num[2]]
     shift = next((s for s in range(26)
                   if all(abs(round(v * 2 ** (25 - s))) < ECHO_B_INT_LIMIT for v in floats)), None)
     if shift is None:
@@ -867,11 +872,268 @@ def echo_b_coefficients(f, gain, Q, filter_type, fs):
     return shift, best
 
 
+# ── ECHO-B (Conexant CX31988) device ─────────────────────────────────────────
+#
+# Everything below was confirmed on a real ECHO-B in issue #1 with
+# tools/echo_b_probe.py; echo_b_protocol.md has the runs. The short of it:
+# 62-byte CAF messages on HID interface 3, live band writes that a replug undoes,
+# nine bands per channel with word 0 picking the channel, and both channels
+# powering up flat. Flash (cmd 220) has never been touched and is not used here.
+#
+# The chip stores coefficients, not frequency / gain / Q, so it cannot tell us
+# what curve it holds. The parameters live here, "save" keeps them on this
+# machine, and opening the device writes them again.
+ECHO_B_DEVICES = {0x149B: "ECHO-B"}
+ECHO_B_INTERFACE = 3
+ECHO_B_REPORT_ID = 1
+ECHO_B_REPORT_LEN = 61       # report id 1, both ways, from the device's report descriptor
+ECHO_B_REPLY_POLL_S = 0.005
+ECHO_B_CMD_EQ_BYPASS = 187   # [0]: bypass off, sent once with 188
+ECHO_B_CMD_EQ_ENABLE = 188   # [1, 0 x 12]
+ECHO_B_CMD_SET_BAND = 190    # [channel, band, shift, B0, B1, B2, A0, A1, 0 x 5], live
+ECHO_B_CMD_GET_PARAM = 346   # [62]: sample-rate index
+ECHO_B_SAMPLE_RATE_PARAM = 62
+ECHO_B_CHANNELS = (0, 1)     # word 0: 0 = left, 1 = right
+ECHO_B_SAMPLE_RATES = [8000, 16000, 24000, 32000, 44100, 48000, 96000, 192000,
+                       384000, 882000, 176000]
+
+
+def _caf_module(name):
+    c = [ord(ch) - 32 for ch in name]
+    return (c[0] << 8) | (c[1] << 14) | (c[2] << 20) | (c[3] << 26)
+
+
+ECHO_B_CTRL_MODULE = _caf_module("CTRL")
+
+
+def echo_b_message(cmd, words):
+    """[report id, 0] + u32 header (word count | cmd << 16) + u32 module + words, padded."""
+    msg = bytes([ECHO_B_REPORT_ID, 0]) + struct.pack(
+        "<II", (len(words) & 0xFF) | (cmd << 16), ECHO_B_CTRL_MODULE) + struct.pack(
+        "<%dI" % len(words), *(w & 0xFFFFFFFF for w in words))
+    return msg + bytes(max(0, ECHO_B_REPORT_LEN + 1 - len(msg)))
+
+
+def echo_b_state_path(serial):
+    name = re.sub(r"[^A-Za-z0-9_-]", "_", serial or "") or "default"
+    return os.path.join(config_dir(), "echo-b", name + ".json")
+
+
+class EchoBDevice:
+    """Same surface as MoondropDevice, so the GUI and CLI can drive either."""
+
+    bands = 9
+    peq_index = 0
+    supports_pregain = True
+    supports_physical_volume = False
+    supports_eq_mode = False
+
+    def __init__(self, hid_info):
+        self.hid_info = hid_info
+        self.product_id = hid_info['product_id']
+        self.device = hid.device()
+        self.device.open_path(hid_info['path'])
+        self._enabled = False
+        self.drain()
+        self.state_path = echo_b_state_path(hid_info.get('serial_number'))
+        self.saved = self._load()
+        self.params = [dict(b) for b in self.saved["bands"]]
+        self.pregain = self.saved["pregain"]
+        self.global_gain = self.saved["global_gain"]
+        self.sample_rate = self.read_sample_rate()
+        if not self._is_flat():
+            self.apply_all()
+
+    def close(self):
+        self.device.close()
+
+    def drain(self, max_reports=64):
+        for _ in range(max_reports):
+            if not self.device.read(ECHO_B_REPORT_LEN + 1, 1):
+                return
+
+    # ── transport ──
+    def query(self, cmd, words):
+        """Send one message; return the reply, or None on timeout or error status.
+
+        The reply echoes cmd with bit 15 set at bytes 4-5 and carries a status at
+        bytes 2-3. It is polled with GET_REPORT as Moondrop's app does, falling back
+        to the interrupt pipe for backends that deliver it there.
+        """
+        if self.device.write(list(echo_b_message(cmd, words))) < 0:
+            raise OSError("ECHO-B write failed")
+        get_input = getattr(self.device, "get_input_report", None)
+        deadline = time.monotonic() + RESPONSE_TIMEOUT_S
+        while time.monotonic() < deadline:
+            res = None
+            if get_input is not None:
+                try:
+                    res = get_input(ECHO_B_REPORT_ID, ECHO_B_REPORT_LEN + 1)
+                except (IOError, OSError, ValueError):
+                    res = None
+            if not res:
+                res = self.device.read(ECHO_B_REPORT_LEN + 1, 5)
+            if res and len(res) > 5 and struct.unpack_from("<H", bytes(res), 4)[0] == cmd | 0x8000:
+                res = bytes(res)
+                return res if struct.unpack_from("<h", res, 2)[0] >= 0 else None
+            time.sleep(ECHO_B_REPLY_POLL_S)
+        return None
+
+    def read_sample_rate(self):
+        res = self.query(ECHO_B_CMD_GET_PARAM, [ECHO_B_SAMPLE_RATE_PARAM] + [0] * 12)
+        if not res or len(res) < 18:
+            return None
+        idx = struct.unpack_from("<i", res, 14)[0]
+        return ECHO_B_SAMPLE_RATES[idx] if 0 <= idx < len(ECHO_B_SAMPLE_RATES) else None
+
+    def check_sample_rate(self):
+        """Coefficients are designed for one rate, so redesign them when it changes."""
+        rate = self.read_sample_rate()
+        if rate is None or rate == self.sample_rate:
+            return False
+        self.sample_rate = rate
+        if not self._is_flat():
+            self.apply_all()
+        return True
+
+    def _enable(self):
+        # Sent once per session, before the first band write, as Moondrop's app does.
+        if self._enabled:
+            return
+        if self.query(ECHO_B_CMD_EQ_ENABLE, [1] + [0] * 12) is None or \
+                self.query(ECHO_B_CMD_EQ_BYPASS, [0]) is None:
+            raise OSError("ECHO-B did not accept EQ enable")
+        self._enabled = True
+
+    def _write_band(self, index):
+        if self.sample_rate is None:
+            raise ValueError("ECHO-B sample rate is unknown, so no band can be designed for it.")
+        b = self.params[index]
+        # Pre-gain and global gain ride on the first band's numerator.
+        level = self.pregain + self.global_gain if index == 0 else 0.0
+        try:
+            shift, ints = echo_b_coefficients(b["frequency"], b["gain"], b["q"], b["type"],
+                                              self.sample_rate, level)
+        except CoefficientOverflowError:
+            raise ValueError(f"{b['type']} @ {b['gain']:+.1f} dB at {b['frequency']:g} Hz "
+                             f"does not fit the ECHO-B's 24-bit coefficients.") from None
+        self._enable()
+        for channel in ECHO_B_CHANNELS:
+            if self.query(ECHO_B_CMD_SET_BAND, [channel, index + 1, shift] + ints + [0] * 5) is None:
+                raise OSError(f"ECHO-B refused band {index + 1}")
+
+    def apply_all(self):
+        for i in range(self.bands):
+            self._write_band(i)
+
+    def _is_flat(self):
+        return (not self.pregain and not self.global_gain
+                and all(b["type"] == "disabled" for b in self.params))
+
+    # ── saved state ──
+    def _load(self):
+        flat = {"bands": [{"index": i, "type": "disabled", "frequency": 1000, "gain": 0.0, "q": 1.0}
+                          for i in range(self.bands)],
+                "pregain": 0.0, "global_gain": 0.0}
+        try:
+            with open(self.state_path, encoding="utf-8") as f:
+                raw = json.load(f)
+            bands = [{"index": i, "type": str(b["type"]), "frequency": int(b["frequency"]),
+                      "gain": float(b["gain"]), "q": float(b["q"])}
+                     for i, b in enumerate(raw["bands"][:self.bands])]
+            if len(bands) != self.bands or any(b["type"] not in FILTER_TYPES for b in bands):
+                return flat
+            return {"bands": bands, "pregain": float(raw.get("pregain", 0.0)),
+                    "global_gain": float(raw.get("global_gain", 0.0))}
+        except (OSError, ValueError, KeyError, TypeError):
+            return flat
+
+    def save_eq_to_flash(self):
+        """Keep the curve on this machine; the next connect writes it again."""
+        self.saved = {"bands": [dict(b) for b in self.params],
+                      "pregain": self.pregain, "global_gain": self.global_gain}
+        os.makedirs(os.path.dirname(self.state_path), exist_ok=True)
+        tmp = self.state_path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(self.saved, f, indent=1)
+        os.replace(tmp, self.state_path)
+
+    def save_offset_to_flash(self):
+        self.save_eq_to_flash()
+
+    # ── the MoondropDevice surface ──
+    def get_firmware_version(self):
+        return "Unknown"
+
+    def get_active_eq_index(self):
+        return None
+
+    def set_active_eq_index(self, index, save=True):
+        pass
+
+    def read_peq_index(self, index):
+        return dict(self.params[index]) if 0 <= index < self.bands else None
+
+    def write_peq_index(self, index, filter_type, freq, gain, Q):
+        if filter_type not in FILTER_TYPES:
+            raise ValueError(
+                f"Invalid filter type '{filter_type}'. Choose from: {', '.join(FILTER_TYPES)}")
+        if not 0 <= index < self.bands:
+            raise ValueError(
+                f"PEQ slot {index} out of range; this device has {self.bands} bands (0-{self.bands - 1})")
+        old = self.params[index]
+        self.params[index] = {"index": index, "type": filter_type, "frequency": int(freq),
+                              "gain": float(gain), "q": float(Q)}
+        try:
+            self._write_band(index)
+        except ValueError:
+            self.params[index] = old
+            raise
+
+    def get_pregain(self):
+        return self.pregain
+
+    def set_pregain(self, db, save=True):
+        self.pregain = float(db)
+        self._write_band(0)
+        if save:
+            self.save_eq_to_flash()
+
+    def get_global_gain(self):
+        return self.global_gain
+
+    def set_global_gain(self, db, save=True):
+        self.global_gain = float(db)
+        self._write_band(0)
+        if save:
+            self.save_eq_to_flash()
+
+
+def open_device(hid_info):
+    """The right driver for a device find_devices() returned."""
+    if hid_info['product_id'] in ECHO_B_DEVICES:
+        return EchoBDevice(hid_info)
+    return MoondropDevice(hid_info)
+
+
 def find_devices():
     devices = []
+    echo_b = []
     for d in hid.enumerate():
-        if d['vendor_id'] == MOONDROP_VID and d['product_id'] in SUPPORTED_DEVICES:
+        if d['vendor_id'] != MOONDROP_VID:
+            continue
+        if d['product_id'] in SUPPORTED_DEVICES:
             devices.append(d)
+        elif d['product_id'] in ECHO_B_DEVICES:
+            echo_b.append(d)
+    # The ECHO-B exposes several HID interfaces; only interface 3 takes CAF
+    # messages. macOS can report the number as -1, so then take the first.
+    for d in echo_b:
+        if d.get('interface_number') == ECHO_B_INTERFACE:
+            devices.append(d)
+            break
+    else:
+        devices.extend(echo_b[:1])
     return devices
 
 def find_unsupported_devices():
@@ -946,6 +1208,77 @@ class MoondropDevice:
         self.supports_physical_volume = self.product_id == 0x011D and version == "1.5"
         self.supports_eq_mode = self.supports_physical_volume
         return version
+
+    def get_stream_status(self):
+        """USB format and channel gains on DAWN PRO2 1.5; no audio is captured."""
+        if not getattr(self, "supports_eq_mode", False):
+            return None
+        def read(address):
+            packed = struct.pack('<I', address)
+            reply = self.send_command([CMD_READ, 0, 12] + list(packed))
+            if (not reply or len(reply) < 16 or reply[3] != 12
+                    or bytes(reply[4:8]) != packed):
+                raise OSError("Stream status RAM response did not verify")
+            return bytes(reply[8:16])
+        rate, bits = struct.unpack('<II', read(0x11cb34))
+        if rate not in (44100, 48000, 88200, 96000, 176400, 192000, 352800, 384000) or bits not in (16, 24, 32):
+            raise ValueError("Unrecognized USB stream format")
+        _, left, right, _ = struct.unpack('<4h', read(0x11cb64))
+        return {"rate": rate, "bits": bits, "left_db": left / 256,
+                "right_db": right / 256, "activity": None}
+
+    def get_channel_trims(self):
+        """Volatile left/right attenuation, verified on DAWN PRO2 1.5."""
+        if not getattr(self, "supports_eq_mode", False):
+            return None
+        values = []
+        for channel in (0, 1):
+            reply = self.send_command([CMD_READ, 22, 0, channel])
+            if not reply or len(reply) < 8 or reply[4] != channel:
+                raise OSError("Channel trim response did not verify")
+            raw = struct.unpack('>h', bytes(reply[6:8]))[0]
+            if not -12 * 256 <= raw <= 0:
+                raise ValueError("Channel trim outside verified attenuation range")
+            values.append(raw / 256)
+        return tuple(values)
+
+    def set_balance(self, db):
+        """Positive shifts right by attenuating left; never boosts or saves flash.
+
+        Preserve any common attenuation already present. Validate both targets
+        before writing, apply reductions first, and restore both on failure.
+        """
+        if not math.isfinite(db) or not -6 <= db <= 6:
+            raise ValueError("Balance must be between -6 and 6 dB")
+        original = self.get_channel_trims()
+        if original is None:
+            raise ValueError("Balance requires DAWN PRO2 firmware 1.5")
+        common = max(original)
+        target = (common - max(db, 0), common + min(db, 0))
+        raw = tuple(round(v * 256) for v in target)
+        if any(v < -12 * 256 or v > 0 for v in raw):
+            raise ValueError("Existing channel attenuation leaves insufficient balance range")
+
+        def write(channel, value):
+            self.send_command([CMD_WRITE, 22, 0, channel, 0]
+                              + list(struct.pack('>h', value)), wait_response=False)
+
+        try:
+            # First quiet the newly attenuated side, then release the other.
+            for channel in sorted((0, 1), key=lambda c: raw[c] - original[c] * 256):
+                if raw[channel] != round(original[channel] * 256):
+                    write(channel, raw[channel])
+            actual = self.get_channel_trims()
+            if actual != tuple(v / 256 for v in raw):
+                raise OSError("Balance write did not verify")
+        except Exception:
+            for channel, value in enumerate(original):
+                try:
+                    write(channel, round(value * 256))
+                except Exception:
+                    pass
+            raise
+        return actual[1] - actual[0]
 
     def get_physical_eq_mode(self):
         """Read the button-selected mode, separately from the stored EQ profile.
@@ -1734,7 +2067,7 @@ def main():
     if not args.json:
         print(f"Opening device: {name}...")
     try:
-        dev = MoondropDevice(dev_info)
+        dev = open_device(dev_info)
     except Exception as e:
         if args.json:
             print(json.dumps({"ok": False, "error": str(e)}))
